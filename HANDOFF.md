@@ -26,7 +26,46 @@ Runpod Flash** ("an MCP that proxies requests to GPUs"). All through tools; term
 - **forge kit** (`forge/`): the Flash GPU-proxy layer — mint/call/fanout/cost/teardown/diagnostics.
   Live-validated days ago (selftest, cross-silicon, evolver).
 
-## 🔴 BLOCKED — the critical Flash anchor (LLM world-gen)
+## 🟢 FLASH LLM — THE RECIPE (resolved the saga; resume here)
+After a long debugging marathon, the working pattern for an LLM on Flash is the **canonical
+class pattern from our OWN repos** (`tetra-rp/tetra-examples/2_ml_inference/llm_inference/vllm_inference.py`
+and `coding-model` → runpod-coder-v1). NOT a cloudpickle function handler, NOT the
+worker-v1-vllm image-without-a-staged-model. **The script `scripts/deploy_vllm_class.py` has it:**
+
+```python
+@Endpoint(name="dnd-llm", gpu=GpuGroup.AMPERE_24, workers=(1,1),
+          dependencies=["vllm==0.7.3", "transformers==4.48.2"])   # PINNED — see why below
+class DnDLLM:
+    def __init__(self):
+        import os; from vllm import LLM, SamplingParams
+        os.environ["VLLM_USE_V1"]="0"; os.environ["VLLM_WORKER_MULTIPROC_METHOD"]="spawn"
+        self.llm = LLM(model="Qwen/Qwen2.5-1.5B-Instruct", enforce_eager=True,
+                       gpu_memory_utilization=0.6, max_model_len=2048)
+    def chat(self, messages, ...): ...   # build im_start prompt, self.llm.generate(...)
+```
+
+**Errors cleared, in order (each was a real root cause):**
+1. Silent 500s (worker-v1-vllm IMAGE) — unreadable. The CLASS executor RETURNS exceptions → debuggable. Switch to the class.
+2. `libcudart.so.13: cannot open shared object` — latest `vllm` is built for CUDA 13; flash:latest container is CUDA 12 → **pin `vllm==0.7.3`** (CUDA-12, supports Qwen2.5).
+3. `Could not import ProcessorMixin` — vllm 0.7.3 ↔ transformers mismatch → **pin `transformers==4.48.2`**.
+4. (state at context-clear) Redeploying with BOTH pinned; was still in the big cold-start
+   (vllm+transformers install + model load, the longest yet), NO error yet — promising.
+
+**Stability env vars are mandatory** (from the tetra example): `VLLM_USE_V1=0`,
+`VLLM_WORKER_MULTIPROC_METHOD=spawn`, `enforce_eager=True`, `gpu_memory_utilization=0.6`.
+
+**RESUME STEP:** `RUNPOD_API_KEY=$(security find-generic-password -s runpod-api-key-prod -w) \
+.venv/bin/python -m scripts.deploy_vllm_class --keep` → if it returns the JSON room, **loop closed**:
+then point `dndmcp/worldgen.py` / `flash_llm.py` at this endpoint (the class is callable as
+`await DnDLLM().chat(messages)`). If another dep error, keep pinning (next likely: a tokenizers/
+torch pin) — the class executor will show the exact error in the job output.
+
+**Debugging tip (hard-won):** worker logs are NOT reachable from automation (job-logs API =
+empty/lifecycle only; pod-logs hapi.runpod.net = Cloudflare 403 even w/ JWT; Datadog = scheduler
+only). The CLASS pattern returning exceptions as job output is the ONLY agent-visible error channel.
+5 Flash gotchas recorded to Context DB (`find_learnings('flash')`).
+
+## 🔴 (historical) BLOCKED — the critical Flash anchor (LLM world-gen)
 **Goal:** a small LLM running on Flash generates structured world content (rooms/NPCs/lore) as you
 explore → written to DB. Code is DONE (`dndmcp/flash_llm.py`, `worldgen.py` wired, stub fallback).
 **Blocker:** the Flash worker (`runpod/flash:latest`, used by forge.mint decorator mode) requires
