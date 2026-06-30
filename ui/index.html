@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>FORGE — GPU fan-out, made visible</title>
+<style>
+  :root { --bg:#0b0e14; --panel:#141a24; --line:#222c3a; --txt:#e6edf3; --dim:#7d8794;
+          --idle:#2a3442; --run:#f5a623; --done:#3fb950; --accent:#58a6ff; --money:#3fb950; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace; background:var(--bg); color:var(--txt); }
+  header { padding:18px 24px; border-bottom:1px solid var(--line); display:flex; align-items:baseline; gap:14px; }
+  header h1 { font-size:18px; margin:0; letter-spacing:.5px; }
+  header .sub { color:var(--dim); font-size:12px; }
+  main { display:grid; grid-template-columns: 1fr 320px; gap:18px; padding:20px 24px; max-width:1100px; }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:16px; }
+  .panel h2 { font-size:11px; text-transform:uppercase; letter-spacing:1px; color:var(--dim); margin:0 0 12px; }
+  .controls { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+  select,button { font:inherit; background:#1b2230; color:var(--txt); border:1px solid var(--line); border-radius:7px; padding:7px 11px; cursor:pointer; }
+  button.primary { background:var(--accent); color:#08111f; border-color:var(--accent); font-weight:700; }
+  button:disabled { opacity:.45; cursor:not-allowed; }
+  label.mock { color:var(--dim); display:flex; gap:6px; align-items:center; cursor:pointer; }
+  .burst { display:flex; flex-wrap:wrap; gap:7px; margin-top:6px; }
+  .chip { width:30px; height:30px; border-radius:6px; background:var(--idle); transition:background .2s, transform .2s; }
+  .chip.run { background:var(--run); transform:scale(1.12); box-shadow:0 0 12px rgba(245,166,35,.5); }
+  .chip.done { background:var(--done); }
+  .metrics { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+  .metric { background:#11161f; border:1px solid var(--line); border-radius:8px; padding:12px; }
+  .metric .k { color:var(--dim); font-size:11px; text-transform:uppercase; letter-spacing:.5px; }
+  .metric .v { font-size:24px; font-weight:700; margin-top:4px; }
+  .v.money { color:var(--money); }
+  .headline { font-size:16px; margin-top:14px; padding:12px; border-radius:8px; background:#0d2818; border:1px solid #1c3b28; color:#7ee2a8; min-height:20px; }
+  .headline.err { background:#2a1416; border-color:#5c2327; color:#ff8d96; }
+  .bar { height:8px; background:var(--idle); border-radius:4px; overflow:hidden; margin-top:8px; }
+  .bar > div { height:100%; width:0; background:var(--accent); transition:width .3s; }
+  .results { max-height:200px; overflow:auto; font-size:12px; }
+  .results div { padding:2px 0; color:var(--dim); border-bottom:1px solid #1a2230; }
+  .log { font-size:11px; color:var(--dim); max-height:140px; overflow:auto; white-space:pre-wrap; }
+  .phase { color:var(--accent); }
+</style>
+</head>
+<body>
+<header>
+  <h1>FORGE</h1>
+  <span class="sub">GPU fan-out, made visible — one primitive, many compositions</span>
+</header>
+<main>
+  <section style="display:flex; flex-direction:column; gap:18px;">
+    <div class="panel">
+      <h2>Run a composition</h2>
+      <div class="controls">
+        <select id="wf">
+          <option value="montecarlo">Monte-Carlo π  (map → reduce)</option>
+          <option value="bestofn">Best-of-N optimize  (map → select)</option>
+          <option value="swarm">Swarm / best-of-N  (map → select)</option>
+        </select>
+        <label class="mock"><input type="checkbox" id="mock" checked /> mock (no GPU spend)</label>
+        <button class="primary" id="run">▶ Run</button>
+        <button id="warm" title="pre-mint + warm the GPU primitive (real mode)">Pre-warm</button>
+        <button id="teardown" title="delete the warm endpoint">Teardown</button>
+      </div>
+      <div class="bar"><div id="bar"></div></div>
+      <div style="margin-top:6px; color:var(--dim); font-size:12px;">
+        phase: <span class="phase" id="phase">idle</span>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>The fan-out — each chip is one GPU task</h2>
+      <div class="burst" id="burst"></div>
+    </div>
+
+    <div class="panel">
+      <h2>Result</h2>
+      <div class="headline" id="headline">—</div>
+    </div>
+  </section>
+
+  <aside style="display:flex; flex-direction:column; gap:18px;">
+    <div class="panel">
+      <h2>Live metrics</h2>
+      <div class="metrics">
+        <div class="metric"><div class="k">Cost</div><div class="v money" id="cost">$0.0000</div></div>
+        <div class="metric"><div class="k">In-flight</div><div class="v" id="inflight">0</div></div>
+        <div class="metric"><div class="k">Done</div><div class="v" id="done">0/0</div></div>
+        <div class="metric"><div class="k">Elapsed</div><div class="v" id="elapsed">0s</div></div>
+      </div>
+    </div>
+    <div class="panel">
+      <h2>Results stream</h2>
+      <div class="results" id="results"></div>
+    </div>
+    <div class="panel">
+      <h2>Log</h2>
+      <div class="log" id="log"></div>
+    </div>
+  </aside>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+let total = 0;
+
+function renderBurst(s) {
+  const burst = $("burst");
+  if (s.tasks_total !== total) {           // rebuild chip grid on new run
+    total = s.tasks_total;
+    burst.innerHTML = "";
+    for (let i = 0; i < total; i++) {
+      const c = document.createElement("div"); c.className = "chip"; c.id = "chip" + i; burst.appendChild(c);
+    }
+  }
+  // mark done chips green, and the current in-flight band amber
+  for (let i = 0; i < total; i++) {
+    const c = $("chip" + i); if (!c) continue;
+    if (i < s.tasks_done) c.className = "chip done";
+    else if (i < s.tasks_done + s.inflight) c.className = "chip run";
+    else c.className = "chip";
+  }
+}
+
+async function poll() {
+  try {
+    const s = await (await fetch("/status")).json();
+    $("cost").textContent = "$" + (s.cost_usd || 0).toFixed(4);
+    $("inflight").textContent = s.inflight;
+    $("done").textContent = `${s.tasks_done}/${s.tasks_total}`;
+    $("elapsed").textContent = (s.elapsed_s || 0) + "s";
+    $("phase").textContent = s.phase;
+    $("bar").style.width = s.tasks_total ? (100 * s.tasks_done / s.tasks_total) + "%" : "0%";
+    const h = $("headline"); h.textContent = s.headline || "—";
+    h.className = "headline" + (String(s.headline).startsWith("ERROR") ? " err" : "");
+    $("results").innerHTML = (s.results || []).slice(-40).reverse()
+      .map(r => `<div>task ${r.i} → ${r.value}</div>`).join("");
+    $("log").textContent = (s.log || []).join("\n");
+    $("run").disabled = s.running;
+    renderBurst(s);
+  } catch (e) { /* server starting */ }
+}
+setInterval(poll, 300); poll();
+
+$("run").onclick = async () => {
+  const wf = $("wf").value, mock = $("mock").checked ? 1 : 0;
+  await fetch(`/run?workflow=${wf}&mock=${mock}`, { method: "POST" });
+};
+$("warm").onclick = async () => { $("phase").textContent = "warming…"; await fetch(`/run?workflow=montecarlo&mock=0`, { method: "POST" }); };
+$("teardown").onclick = async () => { await fetch("/teardown", { method: "POST" }); };
+</script>
+</body>
+</html>

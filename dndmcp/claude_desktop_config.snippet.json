@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "dndmcp": {
+      "command": "/Users/zackmckenna/Developer/work/flash-hackathon/.venv/bin/python",
+      "args": ["-m", "dndmcp.server"],
+      "env": {
+        "PYTHONPATH": "/Users/zackmckenna/Developer/work/flash-hackathon",
+        "DNDMCP_STATE_DIR": "/Users/zackmckenna/.dndmcp_dev"
+      }
+    }
+  }
+}
