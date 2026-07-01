@@ -272,6 +272,23 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
    border-radius:6px;padding:8px 16px;font:600 12px 'IBM Plex Mono',monospace;cursor:pointer;flex-shrink:0}
  #chatSendBtn:hover{background:var(--visited)}
  #chatSendBtn:disabled{opacity:.6;cursor:default}
+ /* The world-selection choice card (e0b.10) — shown ABOVE the input in place of the bare
+    "say start an adventure" hint, for exactly as long as this browser has no character in
+    THIS page's world yet (see updateChoiceCard()). Reuses .world-card's own visual language
+    (same class as the Browse-worlds cards below) rather than inventing a new one, per the
+    task's own "no new fonts/colors" constraint — just denser, since it has to fit above the
+    input without pushing it below the fold. */
+ #chatChoiceCard{cursor:default;flex-shrink:0}
+ #chatChoiceCard .cc-opt{margin-bottom:9px}
+ #chatChoiceCard .cc-opt:last-child{margin-bottom:0}
+ #chatChoiceCard .cc-title{color:var(--ghost-bright);font-weight:600;font-size:12.5px}
+ #chatChoiceCard .cc-sub{color:var(--muted);font-size:11.5px;margin:1px 0 6px}
+ .choiceBtn{background:var(--link);color:var(--ghost-bright);border:1px solid var(--border);
+   border-radius:6px;padding:5px 12px;font:600 11.5px 'IBM Plex Mono',monospace;cursor:pointer}
+ .choiceBtn:hover{background:var(--visited)}
+ #choiceJoinInput{flex:1;background:var(--bg);border:1px solid var(--border);border-radius:6px;
+   padding:5px 8px;color:var(--text);font:11.5px 'IBM Plex Mono',monospace}
+ #chatChoiceCard a{color:var(--ghost-bright);text-decoration:underline;text-decoration-color:var(--ghost)}
 </style></head><body>
 <div id=staleBanner>⟳ This tab is running an older version of the page — <a href="#" onclick="location.reload();return false">refresh to update</a></div>
 <div id=itemTooltip></div>
@@ -306,7 +323,9 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
   <p><b>2. Reconnect</b> — Claude Code: run <code>/mcp</code>; Claude Desktop: restart it — so it picks up the new server.</p>
   <p><b>3. Say "start an adventure."</b> That's it. Your agent becomes the Dungeon Master — talk
   naturally ("go through the door," "attack it," "look around"), you never need game-engine
-  syntax. You're joining THIS shared world, live, with everyone else currently playing.</p>
+  syntax. You're joining THIS shared world, live, with everyone else currently playing. Want
+  your own instead? Just say so — your agent can call start_adventure with campaign_id="new"
+  to spin up a private world of your own and hand you back a link to share.</p>
   <p><b>4. Watch yourself play.</b> Your agent will hand you back a URL to <i>your own</i> live
   session (this same map, with your character highlighted and your log/inventory in the
   sidebar) — open it in a browser to watch your position update in real time as you play.</p>
@@ -334,10 +353,18 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
   </div>
   <div id=midTab-chat class=midTabBody>
    <div class=sub style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px">
-    <span>returning? you resume your last character automatically</span>
+    <!-- Persistent "which world am I in" label (e0b.10) — updated every tick() from /state's
+         campaign data, visible whether or not a character exists yet. Fixes a live prod
+         confusion: a player on a friend's world's page had no on-screen confirmation of
+         which world the chat pane itself was scoped to. -->
+    <span id=chatWorldLabel>Playing in: —</span>
     <a href="#" id=chatResetBtn title="Start over with a brand-new character — your current one stays in the world"
       style="color:var(--muted);text-decoration:underline dotted;white-space:nowrap;margin-left:8px">↺ new character</a>
    </div>
+   <!-- World-selection choice card (e0b.10) — hidden until updateChoiceCard() confirms this
+        browser has no character yet in THIS page's world. Content is filled in per-page
+        (main vs a specific /?campaign=X world) — see renderChoiceCardHtml(). -->
+   <div id=chatChoiceCard class=world-card style="display:none"></div>
    <div id=chatLog><div class=empty>say "start an adventure" to begin</div></div>
    <form id=chatForm>
     <input id=chatInput type=text autocomplete=off maxlength=500
@@ -435,6 +462,102 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
 const params = new URLSearchParams(location.search);
 const playerId = params.get('player');
 const campaignId = params.get('campaign') || 'main';
+
+// World-selection choice card + per-world chat state (e0b.10). Declared here (top of script,
+// ahead of tick()'s own first synchronous call a bit further down) rather than down near the
+// rest of the chat-pane wiring — those `const`s aren't initialized yet the FIRST time tick()
+// runs (tick() is invoked once immediately, before the script has finished executing top to
+// bottom), so anything tick() touches on a cold call has to already exist by here. Functions
+// below that reference chat DOM elements do their own document.getElementById lookups for the
+// same reason, rather than closing over consts declared later.
+let chatStarted = false;      // true once the player has taken ANY action this page-load —
+                               // clicking a choice-card button, or typing into the input
+                               // directly. Once true, the choice card never reappears this
+                               // pageview (the "no chat history client-side" half of the probe).
+let cardDismissed = false;    // set the instant a choice-card button is clicked.
+let cardRenderedFor = null;   // last render key the card's innerHTML was built for — avoids
+                               // rebuilding (and wiping whatever's mid-typed into
+                               // #choiceJoinInput) on every 1.5s poll once already showing.
+let newWorldPending = false;  // "Create my world" was clicked — sent as new_world:true on
+                               // exactly the NEXT /chat POST only, then cleared regardless of
+                               // the response (see chatForm's submit handler).
+
+function renderChoiceCardHtml(camp){
+  if (campaignId === 'main') {
+    return '<div class=cc-opt><div class=cc-title>⚔ Play in the shared world</div>'
+      + '<div class=cc-sub>one persistent world — everyone\\'s ghosts and traces</div>'
+      + '<button class=choiceBtn id=choicePlayBtn type=button>Play here</button></div>'
+      + '<div class=cc-opt><div class=cc-title>🌱 Forge your own world</div>'
+      + '<div class=cc-sub>yours to shape — share the link with friends</div>'
+      + '<button class=choiceBtn id=choiceCreateBtn type=button>Create my world</button></div>'
+      + '<div class=cc-opt style="margin-bottom:0"><div class=cc-title>🔗 Join a friend\\'s world</div>'
+      + '<div style="display:flex;gap:6px;margin-top:4px">'
+      + '<input id=choiceJoinInput placeholder="paste a world id">'
+      + '<button class=choiceBtn id=choiceJoinBtn type=button>Go</button></div></div>';
+  }
+  const theme = esc((camp && camp.theme) || 'an unnamed world');
+  return `<div class=cc-opt><div class=cc-title>You're visiting ${theme} <span class=sub>(${esc(campaignId)})</span></div>`
+    + '<button class=choiceBtn id=choicePlayBtn type=button style="margin-top:4px">Play in this world</button></div>'
+    + '<div class=cc-opt style="margin-bottom:0"><a href="/">← back to the main world</a></div>';
+}
+
+function dismissChoiceCard(){
+  chatStarted = true;
+  cardDismissed = true;
+  document.getElementById('chatChoiceCard').style.display = 'none';
+}
+
+// Called from tick() every poll (see below) with the freshly-fetched /state payload — the
+// probe is exactly the task's own wording: no character in THIS world yet, and no chat
+// history client-side (chatStarted) that would make the card reappearing mid-conversation
+// feel like a bug instead of a fresh-visit affordance.
+function updateChoiceCard(s){
+  const card = document.getElementById('chatChoiceCard');
+  const showCard = !s.you && !chatStarted && !cardDismissed;
+  if (!showCard) {
+    card.style.display = 'none';
+    cardRenderedFor = null;
+    return;
+  }
+  const renderKey = campaignId === 'main' ? 'main' : (campaignId + '|' + ((s.campaign && s.campaign.theme) || ''));
+  if (cardRenderedFor !== renderKey) {
+    card.innerHTML = renderChoiceCardHtml(s.campaign);
+    cardRenderedFor = renderKey;
+    const chatLogEl = document.getElementById('chatLog');
+    const chatEmpty = chatLogEl && chatLogEl.querySelector('.empty');
+    if (chatEmpty) chatEmpty.remove();
+  }
+  card.style.display = 'block';
+}
+
+document.getElementById('chatChoiceCard').addEventListener('click', (e) => {
+  if (e.target.id === 'choicePlayBtn') {
+    dismissChoiceCard();
+    const input = document.getElementById('chatInput');
+    if (input) input.focus();
+  } else if (e.target.id === 'choiceCreateBtn') {
+    dismissChoiceCard();
+    newWorldPending = true;
+    // addChatMessage is a hoisted function declaration (defined further down, alongside the
+    // rest of the chat-pane wiring) — safe to call here even though this listener can fire
+    // before that point in the script textually runs, since function declarations (unlike
+    // const/let) are fully hoisted with their body intact.
+    addChatMessage('system', "let's build your world — describe a theme, or say \\"surprise me\\"");
+    const input = document.getElementById('chatInput');
+    if (input) input.focus();
+  } else if (e.target.id === 'choiceJoinBtn') {
+    const joinInput = document.getElementById('choiceJoinInput');
+    const id = (joinInput && joinInput.value || '').trim();
+    if (id) location.href = '/?campaign=' + encodeURIComponent(id);
+  }
+});
+document.getElementById('chatChoiceCard').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && e.target.id === 'choiceJoinInput') {
+    const goBtn = document.getElementById('choiceJoinBtn');
+    if (goBtn) goBtn.click();
+  }
+});
+
 // W/H used to be hardcoded to 700x420, so on any screen wider than that the map's viewBox
 // only ever used a small fixed chunk of the actual #map box — the rest sat empty, and
 // fitToView's own math (bounded by that same stale W/H) could place nodes outside the box
@@ -881,6 +1004,16 @@ async function tick(){
   document.getElementById('worldInfo').innerHTML = camp
     ? `<b>${esc(camp.theme||'')}</b>${camp.name?` — <span>${esc(camp.name)}</span>`:''}<br>${esc(camp.premise||'')}`
     : '<span class=empty>no world seeded yet</span>';
+  // Choice card (e0b.10): show/refresh/hide based on this poll's "you" -- see
+  // updateChoiceCard's own comment for the exact probe. Persistent "which world" label right
+  // above it, always kept current regardless of whether the card itself is showing (fixes a
+  // live prod confusion: a player on a friend's world's page had no on-screen confirmation of
+  // which world the chat pane was actually scoped to).
+  updateChoiceCard(s);
+  const worldLabelTheme = (camp && camp.theme) || (campaignId === 'main' ? 'the shared world' : 'this world');
+  document.getElementById('chatWorldLabel').textContent = campaignId === 'main'
+    ? `Playing in: ${worldLabelTheme} (main)`
+    : `Playing in: ${worldLabelTheme} (${campaignId})`;
   const quests = s.quests||[];
   document.getElementById('questList').innerHTML = quests.length
     ? quests.map(q => {
@@ -1054,8 +1187,15 @@ document.getElementById('chatResetBtn').addEventListener('click', async (e) => {
   if (chatTurnInFlight) { addChatMessage('system', 'wait for the current turn to finish first.'); return; }
   if (!confirm('Start over with a brand-new character? Your current character stays in the world as a ghost.')) return;
   try{
-    const r = await fetch('/chat/reset', {method: 'POST', credentials: 'same-origin'});
+    // campaign (e0b.10): reset is per-world now -- resetting on THIS page must not touch this
+    // same browser's character in any OTHER world (see /chat/reset's own docstring).
+    const r = await fetch('/chat/reset', {
+      method: 'POST', credentials: 'same-origin',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({campaign: campaignId}),
+    });
     if(!r.ok){ const err = await r.json().catch(() => ({})); addChatMessage('error', err.error || `error ${r.status}`); return; }
+    chatStarted = true;  // never bring the choice card back after a deliberate reset
     chatLog.innerHTML = '';
     addChatMessage('system', 'fresh start — say "start an adventure" to begin anew.');
     chatInput.focus();
@@ -1069,11 +1209,20 @@ chatForm.addEventListener('submit', async (e) => {
   if (chatTurnInFlight) return;
   const text = chatInput.value.trim();
   if (!text) return;
+  chatStarted = true;  // real interaction happened -- the choice card never reappears now
+  // "Create my world" (e0b.10): sent on exactly this ONE upcoming turn, then cleared
+  // regardless of outcome -- captured into a local BEFORE the flag is reset so a slow/failed
+  // request can't leave it dangling into a later, unrelated turn.
+  const sendNewWorld = newWorldPending;
+  newWorldPending = false;
   addChatMessage('player', text);
   chatInput.value = '';
   chatTurnInFlight = true;
   chatInput.disabled = true;
   chatSendBtn.disabled = true;
+  // Set only when THIS turn's start_adventure lands in a brand-new world (see the {"type":
+  // "world",...} handling below) -- triggers the redirect once the stream finishes.
+  let redirectToCampaign = null;
   try{
     const r = await fetch('/chat', {
       method: 'POST',
@@ -1081,7 +1230,11 @@ chatForm.addEventListener('submit', async (e) => {
       credentials: 'same-origin',  // send/receive the dm_session cookie -- same-origin default
                                     // for same-origin fetches in most browsers, but explicit
                                     // here since this call MUST carry it to reuse the session.
-      body: JSON.stringify({message: text}),
+      // campaign (e0b.10): the chat operates in the world of the PAGE it's on, not a
+      // hardcoded "main" -- server validates it (400 if it's neither "main" nor an existing
+      // world). new_world: only ever honored server-side while this session has no character
+      // yet in this world.
+      body: JSON.stringify({message: text, campaign: campaignId, new_world: sendNewWorld}),
     });
     if(!r.ok){
       const err = await r.json().catch(() => ({}));
@@ -1114,6 +1267,13 @@ chatForm.addEventListener('submit', async (e) => {
         try{ ev = JSON.parse(line); } catch(parseErr){ continue; }
         if(ev.type === 'tool') addChatBreadcrumb(ev.name, ev.summary);
         else if(ev.type === 'text') addChatMessage('dm', ev.text);
+        // New-world flow (e0b.10): this turn's start_adventure just minted a brand-new world
+        // (session.campaign_id no longer matches the page we're on) -- tell the player, then
+        // redirect once the whole turn (including its final narration) has actually arrived.
+        else if(ev.type === 'world'){
+          addChatMessage('system', 'your world is ready — taking you there...');
+          redirectToCampaign = ev.campaign_id;
+        }
         // {"type":"done"} carries no content -- it's only the client's cue the turn is over,
         // which the surrounding try/finally already handles by re-enabling input below.
       }
@@ -1130,6 +1290,9 @@ chatForm.addEventListener('submit', async (e) => {
   // way, the very next /state poll (tick() already runs every 1.5s) now resolves "you" from
   // the SAME dm_session cookie this fetch just used, so the map/character panel light up with
   // no extra round trip needed here.
+  if (redirectToCampaign) {
+    location.href = '/?campaign=' + encodeURIComponent(redirectToCampaign);
+  }
 });
 </script></body></html>"""
 
@@ -1218,22 +1381,40 @@ async def chat(request: Request):
     """One player turn of the browser-DM loop, streamed back as NDJSON (one JSON object per
     line — EventSource can't POST, so this is a plain streamed fetch() response instead of
     SSE, see the module's other SSE use at /stream/events for contrast). Each line is exactly
-    the event shape dm_loop.handle_message yields ({"type":"tool",...} / {"type":"text",...}),
-    plus a final {"type":"done"} the client uses to know the turn is over and re-enable input.
+    the event shape dm_loop.handle_message yields ({"type":"tool",...} / {"type":"text",...} /
+    {"type":"world",...} — the last one only on a turn that just created a brand-new world,
+    see below), plus a final {"type":"done"} the client uses to know the turn is over and
+    re-enable input.
 
     Session handshake: session_id comes from the dm_session HttpOnly cookie; minted here (and
     set on the response) the first time a browser has none. player_id itself never appears
     anywhere in this response or gets accepted as a request field — see chat_sessions.py's
     module docstring for the full boundary.
 
+    PER-WORLD (e0b.10): the chat now operates in whatever world the PAGE it's on names — the
+    page's own JS sends its campaignId as the "campaign" body field every turn (defaults to
+    "main" for any older/bare client that omits it). Anything other than "main" must already
+    exist (campaign_exists) or this 400s — a typo'd/garbage campaign id would otherwise
+    silently mint a brand-new, permanently-empty DMSession pointed at a world nothing will
+    ever generate content in. One browser (one dm_session cookie) can hold an independent
+    DMSession — and an independent real character — in as many worlds as it visits; see
+    chat_sessions.py's module docstring for the full (session_id, campaign_id) key shape.
+
+    "new_world" (e0b.10): the choice card's "Create my world" button sends `new_world: true`
+    on its next turn. Honored ONLY while this (session, world) has no character yet
+    (session.player_id is None) — it flips session.pending_new_world, which dm_loop's
+    start_adventure tool wrapper reads to swap in campaign_id="new" for its own call. See
+    dm_loop.DMSession's docstring and _tool_start_adventure.
+
     Guards, in order: message length cap (413); kill switch (503, checked first, above);
-    per-IP sliding-window rate limit (429, chat_sessions.check_ip_rate_limit — e0b.4); the
-    per-session lifetime message cap (429, chat_sessions.session_cap_exceeded, backed by
-    state.py's web_session.message_count so it survives a redeploy — e0b.4); one turn in
-    flight per session (409, via chat_sessions.lock_for — checked-then-acquired with no
-    `await` in between, safe under asyncio's single-threaded scheduling); and the process-wide
-    chat_sessions.turn_semaphore protecting the single warm LLM worker from a burst of
-    simultaneous browser turns.
+    unknown campaign (400); per-IP sliding-window rate limit (429,
+    chat_sessions.check_ip_rate_limit — e0b.4); the per-(session, world) lifetime message cap
+    (429, chat_sessions.session_cap_exceeded, backed by state.py's
+    web_session_world.message_count so it survives a redeploy — e0b.4, widened per-world by
+    e0b.10); one turn in flight per (session, world) (409, via chat_sessions.lock_for —
+    checked-then-acquired with no `await` in between, safe under asyncio's single-threaded
+    scheduling); and the process-wide chat_sessions.turn_semaphore protecting the single warm
+    LLM worker from a burst of simultaneous browser turns.
     """
     if not _browser_dm_enabled():
         return JSONResponse({"error": "browser play is currently disabled"}, status_code=503)
@@ -1250,14 +1431,31 @@ async def chat(request: Request):
     if not message:
         return JSONResponse({"error": "message is required"}, status_code=400)
 
+    # Per-world (e0b.10): the page's own campaignId, not a hardcoded "main" — see this route's
+    # own docstring. Anything other than "main" must already exist; a bare/older client that
+    # sends no "campaign" field at all still gets the old main-only behavior for free.
+    campaign_id = (body.get("campaign") if isinstance(body, dict) else None) or "main"
+    if not isinstance(campaign_id, str):
+        campaign_id = "main"
+    if campaign_id != "main" and not server.world.campaign_exists(campaign_id):
+        return JSONResponse({"error": f'no world with id "{campaign_id}" exists'}, status_code=400)
+    new_world_requested = bool(body.get("new_world")) if isinstance(body, dict) else False
+
     session_id = request.cookies.get(chat_sessions.COOKIE_NAME)
     minted_cookie = session_id is None
     if minted_cookie:
         session_id = chat_sessions.new_session_id()
-    # get_or_create is where a returning browser's OWN character gets resumed (durable
-    # web_session mapping, e0b.4) if the in-memory store lost it to a redeploy — see
-    # chat_sessions.py's module docstring and _resume_from_durable_store.
-    session = chat_sessions.get_or_create(session_id)
+    # get_or_create is where a returning browser's OWN character IN THIS WORLD gets resumed
+    # (durable web_session_world mapping, e0b.4/e0b.10) if the in-memory store lost it to a
+    # redeploy — see chat_sessions.py's module docstring and _resume_from_durable_store.
+    session = chat_sessions.get_or_create(session_id, campaign_id)
+
+    # "Create my world" (e0b.10): only ever honored while THIS session has no character yet
+    # IN THIS WORLD — an established player can't retroactively hijack their own turn into
+    # abandoning a live character via some stray client replay. See DMSession.pending_new_world
+    # and dm_loop._tool_start_adventure for what happens with this flag next.
+    if new_world_requested and session.player_id is None:
+        session.pending_new_world = True
 
     ip = _client_ip(request)
     allowed, first_throttle = chat_sessions.check_ip_rate_limit(ip)
@@ -1268,18 +1466,20 @@ async def chat(request: Request):
         return JSONResponse({"error": RATE_LIMIT_MESSAGE}, status_code=429)
 
     # Lifetime cap check: peek the durable count WITHOUT incrementing it yet (a rejected
-    # request never counts as a used turn) — see World.touch_web_session for the actual
-    # increment, which only happens once the turn is allowed to run, below.
-    existing = server.world.get_web_session(session_id)
+    # request never counts as a used turn) — see World.touch_web_session_world for the actual
+    # increment, which only happens once the turn is allowed to run, below. Scoped to THIS
+    # world (session_id, campaign_id) — see chat_sessions.py's module docstring for why the
+    # cap is now counted per world rather than per browser overall.
+    existing = server.world.get_web_session_world(session_id, campaign_id)
     message_count = existing.message_count if existing else 0
-    exceeded, first_cap_hit = chat_sessions.session_cap_exceeded(session_id, message_count)
+    exceeded, first_cap_hit = chat_sessions.session_cap_exceeded((session_id, campaign_id), message_count)
     if exceeded:
         if first_cap_hit:
             _log_dm_event(ip, session.campaign_id, "dm.throttled",
                           f"per-session lifetime cap ({chat_sessions.MAX_SESSION_MESSAGES}) hit.")
         return JSONResponse({"error": SESSION_CAP_MESSAGE}, status_code=429)
 
-    lock = chat_sessions.lock_for(session_id)
+    lock = chat_sessions.lock_for(session_id, campaign_id)
     if lock.locked():
         return JSONResponse(
             {"error": "a turn is already in progress for this session"}, status_code=409)
@@ -1321,14 +1521,27 @@ async def chat(request: Request):
             # Durable bookkeeping for THIS turn: bump the lifetime-cap counter (regardless of
             # success/failure above — a failed turn still consumed a slot), and persist the
             # session_id -> player_id mapping once start_adventure has minted one (or refresh
-            # it if it already existed) — see state.py's web_session table / e0b.4.
+            # it if it already existed) — see state.py's web_session_world table / e0b.4/e0b.10.
+            #
+            # IMPORTANT ordering note (e0b.10): both calls use session.campaign_id — the world
+            # the turn actually ENDED in — NOT the campaign_id this request came in with. On a
+            # normal turn those are the same value. On a turn where "Create my world" just
+            # minted a brand-new world, dm_loop's start_adventure tool wrapper already updated
+            # session.campaign_id to the real new id (see _tool_start_adventure) BEFORE this
+            # finally block ever runs — dm_loop.handle_message's async generator is fully
+            # drained (the `async for` above only exits once it does) before we reach here, so
+            # there is no race: session.campaign_id is guaranteed settled by this point. That's
+            # what makes it correct to write the durable row under the NEW campaign_id — the
+            # page's client-side redirect (triggered by the {"type":"world",...} event) lands
+            # on /?campaign=<new-id>, and that page's very next /chat POST resolves
+            # get_web_session_world(session_id, new_id) straight to this same row.
             try:
-                server.world.touch_web_session(session_id)
+                server.world.touch_web_session_world(session_id, session.campaign_id)
                 if session.player_id:
-                    server.world.save_web_session(
-                        session_id, player_id=session.player_id, campaign_id=session.campaign_id)
+                    server.world.save_web_session_world(
+                        session_id, session.campaign_id, player_id=session.player_id)
             except Exception:
-                logger.exception("POST /chat: failed to persist web_session bookkeeping")
+                logger.exception("POST /chat: failed to persist web_session_world bookkeeping")
             yield json.dumps({"type": "done"}) + "\n"
             lock.release()
 
@@ -1339,9 +1552,11 @@ async def chat(request: Request):
         # explicitly here since this is a plain streamed response, not EventSourceResponse.
         headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"})
     if minted_cookie:
-        # 30 days — durable identity (e0b.4, state.py's web_session table) now lets a
-        # returning browser resume its OWN character across a redeploy, so the cookie itself
-        # is worth keeping around far longer than the in-memory session store ever survived.
+        # 30 days — durable identity (e0b.4, state.py's web_session_world table) now lets a
+        # returning browser resume its OWN character (in each world it visited) across a
+        # redeploy, so the cookie itself is worth keeping around far longer than the in-memory
+        # session store ever survived. One cookie/session_id anchors EVERY world this browser
+        # ever visits (e0b.10) — it is never rotated by a per-world reset, see POST /chat/reset.
         resp.set_cookie(chat_sessions.COOKIE_NAME, session_id, httponly=True, samesite="lax",
                         max_age=60 * 60 * 24 * 30)
     return resp
@@ -1349,31 +1564,44 @@ async def chat(request: Request):
 
 @app.post("/chat/reset")
 async def chat_reset(request: Request):
-    """The "new character" flow: sever this browser's identity (in-memory session + durable
-    web_session row) and rotate the cookie, so the next /chat message starts the normal
-    opening flow fresh. The old character is NOT deleted — it stays in the world as an
-    abandoned ghost, consistent with every other way a character gets left behind.
+    """The "new character" flow, now PER WORLD (e0b.10): sever this browser's identity in
+    exactly the ONE world named by the "campaign" body field (in-memory session + durable
+    web_session_world row for that (session_id, campaign_id) pair only), so the next /chat
+    message on THAT page starts the normal opening flow fresh. The old character is NOT
+    deleted — it stays in the world as an abandoned ghost, consistent with every other way a
+    character gets left behind.
 
-    Note the rotation intentionally resets the per-session lifetime message cap — a new
-    character is legitimately a new session. The per-IP sliding window still applies
-    unchanged, so this isn't a rate-limit bypass, only a budget-per-character reset."""
+    The dm_session cookie is deliberately NEVER rotated here anymore. Before multi-world, one
+    cookie meant one character, so rotating it on reset both discarded the old identity AND
+    handed back a clean slate in the same motion. Now one cookie anchors a browser across
+    EVERY world it's visited (chat_sessions.py's module docstring) — rotating it would sever
+    ALL of them, so resetting your character on a friend's world would silently also abandon
+    your character back in main. Scoping the drop to (session_id, campaign_id) is what makes
+    "reset THIS world only" possible; the per-(session, world) lifetime message cap resets
+    itself for free the moment the web_session_world row for this world is deleted (the next
+    turn just creates a fresh row starting at message_count=1). The per-IP sliding window
+    still applies unchanged, so this isn't a rate-limit bypass, only a budget-per-world reset."""
     if not _browser_dm_enabled():
         return JSONResponse({"error": "browser play is currently disabled"}, status_code=503)
+    try:
+        body = await request.json()
+    except Exception:
+        body = None
+    campaign_id = (body.get("campaign") if isinstance(body, dict) else None) or "main"
+    if not isinstance(campaign_id, str):
+        campaign_id = "main"
     session_id = request.cookies.get(chat_sessions.COOKIE_NAME)
     if session_id:
-        if chat_sessions.lock_for(session_id).locked():
+        if chat_sessions.lock_for(session_id, campaign_id).locked():
             return JSONResponse(
                 {"error": "a turn is still in progress — wait for it to finish first"},
                 status_code=409)
-        chat_sessions.drop(session_id)
+        chat_sessions.drop(session_id, campaign_id)
         try:
-            server.world.delete_web_session(session_id)
+            server.world.delete_web_session_world(session_id, campaign_id)
         except Exception:
-            logger.exception("POST /chat/reset: failed to delete web_session row")
-    resp = JSONResponse({"ok": True})
-    resp.set_cookie(chat_sessions.COOKIE_NAME, chat_sessions.new_session_id(), httponly=True,
-                    samesite="lax", max_age=60 * 60 * 24 * 30)
-    return resp
+            logger.exception("POST /chat/reset: failed to delete web_session_world row")
+    return JSONResponse({"ok": True})
 
 
 _EMPTY_STATE = {"rooms": [], "players": [], "character": None, "you": None, "current_room": None, "log": [], "quests": [], "flash_calls": 0, "campaign": None, "server_version": SERVER_VERSION}
@@ -1399,7 +1627,25 @@ def state(request: Request) -> JSONResponse:
     if not player_id:
         session_id = request.cookies.get(chat_sessions.COOKIE_NAME)
         if session_id:
-            session = chat_sessions.get(session_id)
+            # (e0b.10) chat_sessions.get_if_resumable is keyed by (session_id, campaign_id) —
+            # this already only ever returns a session that lives at THIS page's campaign_id,
+            # never a same-cookie session for some other world — AND (unlike a bare in-memory
+            # lookup) will resume an already-real character from the durable web_session_world
+            # row if the in-memory object isn't reachable under this exact key yet. That
+            # resume path is what makes the new-world redirect flow actually work end to end:
+            # the turn that just minted a brand-new world wrote its durable row under the NEW
+            # campaign_id (POST /chat's finally-bookkeeping), but the in-memory DMSession
+            # object is still only reachable under the OLD page's key — without the resume
+            # fallback here, the redirected page's first /state poll would show no character
+            # at all until the player's first /chat message there. See
+            # chat_sessions.get_if_resumable's own docstring for why this stays safe to call
+            # from a passive GET (it can only ever surface a character that TRULY exists).
+            # The session.campaign_id == campaign_id check stays anyway as a narrow safety net
+            # for one remaining transient window: mid-turn, right after start_adventure just
+            # minted a brand-new world but BEFORE the client has redirected, a /state poll on
+            # the OLD page (still keyed to the OLD campaign_id in _sessions) must not show the
+            # new world's character there a beat early.
+            session = chat_sessions.get_if_resumable(session_id, campaign_id)
             if session and session.player_id and session.campaign_id == campaign_id:
                 player_id = session.player_id
     try:
