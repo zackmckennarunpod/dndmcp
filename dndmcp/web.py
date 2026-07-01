@@ -1075,9 +1075,33 @@ async function tick(){
     document.getElementById('staleBanner').style.display = 'block';
   }
   const worldTag = campaignId !== 'main' ? `[world: ${campaignId}] ` : '';
-  const whereText = worldTag + (s.current_room ? ('You are in: '+(s.current_room.name||'')) : (playerId ? 'unknown player' : 'Spectating — hit ▶ Play to join, or connect your own agent'));
+  // Name WHO you are, not just where — a cookie-resumed character otherwise appears
+  // silently in the panels ("who is this??" — observed user confusion): the resume is a
+  // feature, but only if the page SAYS a resume happened.
+  const whereText = worldTag + (s.current_room
+    ? ('Playing as ' + ((s.you && s.you.name) || 'your character') + ' — in ' + (s.current_room.name||''))
+    : (playerId ? 'unknown player' : 'Spectating — hit ▶ Play to join, or connect your own agent'));
   document.getElementById('where').textContent = whereText;
   document.getElementById('whereInMap').textContent = whereText;
+  // First poll that finds a resumed character while the chat pane still shows its cold
+  // "say start an adventure" hint: replace it with an explicit welcome-back so all three
+  // panels (header, character card, chat) tell the SAME story about who you are. Direct
+  // getElementById on purpose — tick() runs once synchronously BEFORE the chat section's
+  // consts (chatLog etc.) initialize, and touching a TDZ const here would silently kill
+  // this whole first render inside tick's catch.
+  if (s.you && s.you.name && !chatWelcomedBack) {
+    const logEl = document.getElementById('chatLog');
+    if (logEl && logEl.querySelector('.empty')) {
+      chatWelcomedBack = true;
+      logEl.innerHTML = '';
+      const wb = document.createElement('div');
+      wb.className = 'chatMsg system';
+      wb.textContent = 'welcome back, ' + s.you.name + ' — your character here resumed ' +
+        'automatically. say "look around" to pick up where you left off, or hit ↺ new ' +
+        'character to start fresh.';
+      logEl.appendChild(wb);
+    }
+  }
   renderGraph(s.rooms||[], s.players||[], s.you||null);
   rebuildHighlightIndex(s);
   const camp = s.campaign;
@@ -1124,6 +1148,7 @@ async function tick(){
 }
 let lastFlashCalls = -1;
 let loadedVersion = null;
+let chatWelcomedBack = false;  // one-shot: the resumed-character welcome line (see tick())
 setInterval(tick,1500);tick();
 
 // Live world stream — every domain event, from every player's session, pushed here as it
