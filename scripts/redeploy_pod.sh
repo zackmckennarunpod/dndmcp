@@ -32,6 +32,10 @@ DNDMCP_STATE_DIR=/data DNDMCP_TRANSPORT=http PORT=8000 GUI_PORT=8002 DND_FLASH_L
   setsid nohup python3.11 -m dndmcp.app > /tmp/dndmcp.log 2>&1 < /dev/null &
 sleep 3
 echo '--- status ---'
-pgrep -af 'dndmcp.app' || echo 'FAILED TO START'
+# -fx here too (not plain -f): a substring match also catches the SSH wrapper's own bash -c
+# invocation, whose command-line text includes this whole script INCLUDING the RUNPOD_API_KEY
+# assignment above — printing that straight into whatever captured this script's stdout.
+# Learned the hard way: leaked a live prod API key into a terminal transcript this way.
+pgrep -afx 'python3.11 -m dndmcp.app' || echo 'FAILED TO START'
 tail -20 /tmp/dndmcp.log
 "
