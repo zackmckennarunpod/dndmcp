@@ -313,11 +313,12 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
  </div>
 </details>
 <main style="margin-top:16px">
- <div class=panel><h2>World map (shared, live)</h2><div class=sub id=whereInMap style="margin-bottom:2px">—</div><div class=sub style="margin-bottom:8px;opacity:.7">scroll + ⌘/Ctrl to zoom · drag to pan &nbsp;·&nbsp;
-  <span style="color:var(--ghost)">●</span> you
-  <span style="color:var(--visited)">●</span> explored
-  <span style="color:var(--dim)">●</span> ??? undiscovered
-  · a number = ghosts in that room right now</div><div id=map><span id=mapEmpty class=empty>no adventure yet — start one in your agent</span><div id=nodeTooltip></div></div></div>
+ <div class=panel><h2>World map (shared, live)</h2><div class=sub id=whereInMap style="margin-bottom:2px">—</div><div class=sub style="margin-bottom:4px;opacity:.85">
+  <span style="color:var(--ghost)">●</span> your room &nbsp;
+  <span style="color:var(--visited)">●</span> places you've been &nbsp;
+  <span style="color:var(--dim)">●</span>&thinsp;??? not yet discovered &nbsp;
+  <b style="color:var(--text)">2</b> = two players are in that room right now</div>
+<div class=sub style="margin-bottom:8px;opacity:.6">scroll + ⌘/Ctrl to zoom · drag to pan · click a room for details</div><div id=map><span id=mapEmpty class=empty>no adventure yet — start one in your agent</span><div id=nodeTooltip></div></div></div>
  <div class=panel>
   <div class=midTabbar>
    <button class=midTabBtn data-miditab=stream>Live world stream</button>

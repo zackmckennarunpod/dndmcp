@@ -375,6 +375,63 @@ _ITEM_JSON = ('{"name": short display name, "description": one factual sentence 
               '"reason": if not portable, one short in-world reason (e.g. "bolted to the floor"), else null}')
 
 
+_KIT_JSON = ('{"name": an evocative character first-or-full name fitting THIS world\'s theme/'
+             'premise — never reuse a name from the taken-names list below, '
+             '"items": array of exactly 3 starting possessions, functionally: [a light source, '
+             'a simple weapon, travel provisions] — each RESKINNED to this world (e.g. a '
+             'steampunk world gets an arc-lantern, not a torch), each as '
+             '{"name": short display name, "description": one factual sentence}}')
+
+
+def _kit_messages(theme: str, premise: str, klass: str,
+                  existing_names: list[str] | None = None) -> list[dict]:
+    premise_line = f" The world's premise: {premise}" if premise else ""
+    system = (f"{setting.GEN_BRIEF}\n\n"
+              f"You outfit a brand-new {klass} beginning a {theme} adventure in this "
+              f"setting.{premise_line} Invent their name and starting kit so both clearly "
+              f"belong to THIS world — never generic medieval-dungeon defaults unless the "
+              f"world genuinely is that. You reply with STRICT JSON only — no markdown code "
+              f"fences, no text outside the JSON object.")
+    taken = (f" Names already taken in this world (do not reuse): {', '.join(existing_names)}."
+             if existing_names else "")
+    user = f"Outfit the new character.{taken} Return JSON: {_KIT_JSON}"
+    return [{"role": "system", "content": system}, {"role": "user", "content": user}]
+
+
+async def generate_starting_kit(theme: str, premise: str, klass: str,
+                                existing_names: list[str] | None = None) -> dict:
+    """Theme-grounded character name + starter kit — replaces the one hardcoded torch/dagger/
+    rations set every character used to spawn with regardless of world (observed: three
+    characters in three different-themed worlds, identical name and inventory). Functional
+    slots stay fixed (light/weapon/provisions — game balance is unchanged); only the SKIN is
+    generated. Returns {"name": str|None, "items": [{"name","description"}...]|None, "via"} —
+    None fields mean the caller keeps the procedural default (Flash off/failed), same
+    reliability-first pattern as every other generator here."""
+    base = {"name": None, "items": None, "via": "procedural"}
+    gen = await flash_llm.generate(_kit_messages(theme, premise, klass, existing_names),
+                                   max_tokens=260, temperature=0.9)
+    if gen:
+        try:
+            data = json.loads(gen[gen.find("{"): gen.rfind("}") + 1])
+            name = str(data.get("name") or "").strip()
+            items = data.get("items")
+            cleaned = []
+            if isinstance(items, list):
+                for it in items[:3]:
+                    if isinstance(it, dict) and str(it.get("name") or "").strip():
+                        cleaned.append({"name": str(it["name"]).strip(),
+                                        "description": str(it.get("description") or "").strip()})
+            if name:
+                base["name"] = name
+            if len(cleaned) == 3:  # all-or-nothing: a partial kit reads worse than the default
+                base["items"] = cleaned
+            if base["name"] or base["items"]:
+                base["via"] = "flash"
+        except Exception:
+            logger.exception("generate_starting_kit: malformed Flash JSON, keeping procedural: %r", gen)
+    return base
+
+
 def _item_messages(description: str, theme: str, room_context: str) -> list[dict]:
     system = (f"{setting.GEN_BRIEF}\n\n"
               f"You are adjudicating a player's attempt to pick up an object in a {theme} dungeon "

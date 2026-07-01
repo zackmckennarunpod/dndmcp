@@ -361,9 +361,25 @@ async def start_adventure(theme: str = "gothic horror", character_name: str = "W
                           kind=gen.get("kind", ""), exit_descriptions=gen.get("exit_descriptions"))
     room = _require_room(camp.start_room)
     ch = game.new_character(character_name, character_class)
+    # Theme-grounded identity: the procedural kit is one hardcoded torch/dagger/rations set
+    # and the schema-default name is "Wanderer" — so every unnamed character in every world
+    # spawned identical (observed live, three worlds running). One Flash call reskins the
+    # kit's fixed functional slots (light/weapon/provisions) to THIS world and names the
+    # character when the caller didn't — a caller-chosen name is always respected. Falls
+    # back to the procedural defaults untouched when Flash is off/fails.
+    kit = await worldgen.generate_starting_kit(
+        camp.theme, camp.premise, ch["klass"],
+        existing_names=[p.name for p in world.players(camp.id)])
+    if kit["name"] and character_name in ("", "Wanderer"):
+        ch["name"] = kit["name"]
+    if kit["items"]:
+        ch["inventory"] = [{"id": uuid.uuid4().hex[:8], **item} for item in kit["items"]]
     char = world.new_character(player_id, camp.id, name=ch["name"], klass=ch["klass"], hp=ch["hp"],
                                ac=ch["ac"], stats=ch["stats"], inventory=ch["inventory"],
                                location_id=camp.start_room)
+    world.log("character.generated",
+             f"{char.name}'s identity and kit took shape ({kit['via']}).",
+             player_id=player_id, campaign_id=camp.id)
     world.mark_visited(camp.start_room)
     world.discover(player_id, camp.start_room)
     world.log("adventure.started", f"{char.name} the {char.klass} joined the adventure.",
