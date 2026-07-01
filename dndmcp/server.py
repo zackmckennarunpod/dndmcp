@@ -62,6 +62,11 @@ How to run the game:
   features, contents, and which exits are known vs unexplored. That's your notes, same as a
   human DM's — YOU write the actual scene in your own voice, richly, from those facts. Don't
   just relay the fields verbatim. Then ALWAYS end your turn with "What do you do?"
+- Exits come with a `descriptor` (the threshold itself — a door, archway, stairwell, gap —
+  part of THIS room, always safe to describe) plus, separately, whether it's `known`
+  (destination discovered) or not. Lead with the descriptor, not the compass word — "a warped
+  iron door to the north" beats "north → unexplored." Never invent what's beyond an
+  undiscovered exit, but the doorway itself is fair game since it's right in front of you.
 - The player explores by telling you their intent. Translate intent into tool calls:
     move there        -> move(direction)
     any check/attack  -> roll_dice / attack  (NEVER invent dice — always call the tool)
@@ -162,19 +167,26 @@ def be_the_dm() -> str:
     return DM_PERSONA + "\n\nGreet me and offer to begin an adventure."
 
 
-def _adjacent_rooms(room: Room) -> list[dict]:
-    """Per-exit info the agent needs to narrate/navigate honestly: does this exit lead
-    somewhere already generated (known — name it) or is it still unexplored (say so, don't
-    invent details)? This is what lets the DM distinguish "a passage fades into darkness"
-    from "the corridor back to the Iron-Barred Cell"."""
+def _adjacent_rooms(room: Room, player_id: str | None = None) -> list[dict]:
+    """Per-exit info the agent needs to narrate/navigate honestly: does THIS PLAYER know
+    what's beyond this exit (name it) or not (say so, don't invent details)? "Known" is
+    gated on world.has_discovered, NOT on whether the destination room row exists — the
+    background prefetch (_prefetch_frontier) world-builds every exit's destination the
+    instant a room is entered, well before any player has looked through that doorway, so
+    "exists in the DB" leaked real room names to players who'd never been there. `descriptor`
+    (the exit's physical threshold — door/archway/stairwell) is always safe to reveal,
+    discovered or not, since it describes THIS room, not what's beyond it."""
+    descriptors = world.room_exit_descriptions(room.id)
     out = []
     for direction, dest_id in room.exits.items():
         dest = world.room(dest_id)
+        known = dest is not None and player_id is not None and world.has_discovered(player_id, dest_id)
         out.append({
             "direction": direction,
-            "known": dest is not None,
-            "name": dest.name if dest else None,
-            "visited": dest.visited if dest else False,
+            "descriptor": descriptors.get(direction),
+            "known": known,
+            "name": dest.name if known and dest else None,
+            "visited": dest.visited if known and dest else False,
         })
     return out
 
@@ -208,12 +220,14 @@ def _render_scene(room: Room, *, player_id: str | None = None, ambient: bool = T
     lines.append("")
     lines.append(game.ascii_map(room.model_dump()))
     lines.append("\nExits:")
-    for adj in _adjacent_rooms(room):
+    for adj in _adjacent_rooms(room, player_id):
+        threshold = adj["descriptor"] or "an unmarked passage"
         if adj["known"]:
             status = "visited" if adj["visited"] else "known, not yet visited"
-            lines.append(f"  {adj['direction']} → {adj['name'].title()} ({status})")
+            lines.append(f"  {adj['direction']} → {threshold}, leading to {adj['name'].title()} ({status})")
         else:
-            lines.append(f"  {adj['direction']} → unexplored — do not invent what's there")
+            lines.append(f"  {adj['direction']} → {threshold} — beyond it is unexplored, "
+                         f"do not invent what's there")
     if with_art:
         a = art.generate(f"{room.name}: {room.description}", kind="scene")
         lines.append("\n" + a["ascii"])
@@ -262,13 +276,14 @@ async def start_adventure(theme: str = "gothic horror", character_name: str = "W
         world.upsert_room(room_id=start_id, campaign_id=target_id, name=gen["name"],
                           description=gen["description"], exits=gen["exits"],
                           contents=gen["contents"], features=gen.get("features"),
-                          kind=gen.get("kind", ""))
+                          kind=gen.get("kind", ""), exit_descriptions=gen.get("exit_descriptions"))
     room = _require_room(camp.start_room)
     ch = game.new_character(character_name, character_class)
     char = world.new_character(player_id, camp.id, name=ch["name"], klass=ch["klass"], hp=ch["hp"],
                                ac=ch["ac"], stats=ch["stats"], inventory=ch["inventory"],
                                location_id=camp.start_room)
     world.mark_visited(camp.start_room)
+    world.discover(player_id, camp.start_room)
     world.log("adventure.started", f"{char.name} the {char.klass} joined the adventure.",
               player_id=player_id)
     asyncio.create_task(_prefetch_frontier(room, camp.theme, camp.id, camp.salt))  # fire-and-forget
@@ -342,7 +357,8 @@ async def _generate_and_link(dest_id: str, theme: str, campaign_id: str, salt: s
     world.upsert_room(room_id=dest_id, campaign_id=campaign_id, name=new_room["name"],
                       description=new_room["description"], exits=new_room["exits"],
                       contents=new_room["contents"], features=new_room.get("features"),
-                      kind=new_room.get("kind", ""))
+                      kind=new_room.get("kind", ""),
+                      exit_descriptions=new_room.get("exit_descriptions"))
     world.log("room.generated", f"{new_room['name']} generated ({new_room.get('via', 'procedural')})",
              campaign_id=campaign_id)
 
@@ -381,6 +397,7 @@ async def move(player_id: str, direction: str) -> str:
                                  entry_from=direction, back_to_id=here.id)
     world.set_location(player_id, dest_id)
     world.mark_visited(dest_id)
+    world.discover(player_id, dest_id)
     dest = _require_room(dest_id)
     world.log("player.moved", f"{ch.name} moved {direction} into {dest.name}", player_id=player_id)
     asyncio.create_task(_prefetch_frontier(dest, camp.theme, camp.id, camp.salt))  # fire-and-forget

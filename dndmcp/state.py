@@ -181,6 +181,40 @@ class World:
         return {e["edge_type"]: e["to_id"] for e in self.edges_from("room", room_id, )
                 if e["to_type"] == "room"}
 
+    def room_exit_descriptions(self, room_id: str) -> dict[str, str]:
+        """Per-exit threshold descriptor (door/archway/stairwell text), stored in the same
+        edges as the exit link itself — the `metadata` column set_edges already supports,
+        previously unused. Safe to reveal even for undiscovered destinations (see discover()
+        below) since it describes THIS room's doorway, not what's beyond it."""
+        out = {}
+        for e in self.edges_from("room", room_id, ):
+            if e["to_type"] == "room" and e["metadata"]:
+                out[e["edge_type"]] = json.loads(e["metadata"])
+        return out
+
+    # --- per-player discovery (fog of war) --------------------------------------
+    # `world.mark_visited`/`Room.visited` is a single GLOBAL flag — in a shared multiplayer
+    # world that means a room visited by player A shows as "known"/named to player B who has
+    # never been there, the instant _prefetch_frontier world-builds it in the background
+    # (which happens well before any player actually looks through that doorway). This is a
+    # separate, per-(player, room) fact: has THIS character actually arrived here.
+    def discover(self, player_id: str, room_id: str) -> None:
+        if self.has_discovered(player_id, room_id):
+            return
+        self._c.execute(
+            "INSERT INTO edges (from_type,from_id,to_type,to_id,edge_type,metadata,created_at)"
+            " VALUES ('character',?,'room',?,'discovered',NULL,?)",
+            (player_id, room_id, time.time()),
+        )
+        self._c.commit()
+
+    def has_discovered(self, player_id: str, room_id: str) -> bool:
+        return self._c.execute(
+            "SELECT 1 FROM edges WHERE from_type='character' AND from_id=? AND to_type='room'"
+            " AND to_id=? AND edge_type='discovered'",
+            (player_id, room_id),
+        ).fetchone() is not None
+
     # --- campaign (one world; "main" is the default, others are created/joined by id) ------
     def create_campaign(self, campaign_id: str, *, theme: str, premise: str, start_room: str,
                         name: str = "") -> Campaign:
@@ -274,7 +308,7 @@ class World:
     def upsert_room(self, *, room_id: str, campaign_id: str = MAIN_CAMPAIGN_ID, name: str,
                     description: str, exits: dict[str, str], contents: list[dict],
                     image_ref: str | None = None, features: list[str] | None = None,
-                    kind: str = "") -> Room:
+                    kind: str = "", exit_descriptions: dict[str, str] | None = None) -> Room:
         room = Room(id=room_id, name=name, description=description, exits=exits,
                    contents=contents, image_ref=image_ref, features=features or [], kind=kind)
         self._c.execute(
@@ -291,8 +325,9 @@ class World:
         self._c.commit()
         # exits are edges now, not a JSON column — sync separately. Delete-then-insert: the
         # caller always passes the room's complete current exit set (same semantics the old
-        # JSON column had).
-        self.set_edges("room", room_id, "room", room.exits)
+        # JSON column had). exit_descriptions rides along as edge metadata (see
+        # room_exit_descriptions) — physical threshold text, safe to show pre-discovery.
+        self.set_edges("room", room_id, "room", room.exits, metadata=exit_descriptions)
         saved = self.room(room_id)  # re-read: picks up visited/COALESCE'd image_ref from the DB
         assert saved is not None, f"room {room_id} vanished immediately after its own upsert"
         return saved
@@ -320,8 +355,8 @@ class World:
 
     # --- entity (NPC identity — see models.Entity) -----------------------------
     def upsert_entity(self, *, entity_id: str, kind: str, name: str, location_id: str | None,
-                      disposition: str = "neutral", persona: str = "", goal: str = "",
-                      alive: bool = True) -> Entity:
+                      campaign_id: str = MAIN_CAMPAIGN_ID, disposition: str = "neutral",
+                      persona: str = "", goal: str = "", alive: bool = True) -> Entity:
         """Create or fully replace an entity's identity fields. Does NOT touch `memory` —
         use append_entity_memory for that, so re-generating a persona never loses history."""
         existing = self.entity(entity_id)
@@ -329,13 +364,13 @@ class World:
         ent = Entity(id=entity_id, kind=kind, name=name, location_id=location_id,
                     disposition=disposition, alive=alive, persona=persona, goal=goal, memory=memory)
         self._c.execute(
-            "INSERT INTO entity (id,kind,name,location_id,disposition,alive,persona,goal,memory)"
-            " VALUES (?,?,?,?,?,?,?,?,?)"
+            "INSERT INTO entity (id,campaign_id,kind,name,location_id,disposition,alive,persona,goal,memory)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?)"
             " ON CONFLICT(id) DO UPDATE SET kind=excluded.kind, name=excluded.name,"
             " location_id=excluded.location_id, disposition=excluded.disposition,"
             " alive=excluded.alive, persona=excluded.persona, goal=excluded.goal",
-            (ent.id, ent.kind, ent.name, ent.location_id, ent.disposition, int(ent.alive),
-             ent.persona, ent.goal, json.dumps(ent.memory)),
+            (ent.id, campaign_id, ent.kind, ent.name, ent.location_id, ent.disposition,
+             int(ent.alive), ent.persona, ent.goal, json.dumps(ent.memory)),
         )
         self._c.commit()
         return ent

@@ -39,6 +39,16 @@ _THEMES = {
                      "claw-marks gouged deep into the doorframe",
                      "a puddle reflecting torchlight that shouldn't be there",
                      "a child's doll, seated upright, facing the corner"],
+        # physical description of an exit's THRESHOLD (the doorway itself, part of the
+        # CURRENT room, already known) — distinct from what lies beyond it (unexplored,
+        # never invented). Split horizontal/vertical since up/down reads differently.
+        "exit_horizontal": ["a warped iron door hanging off one hinge",
+                            "a low stone archway", "a heavy door bound in tarnished brass",
+                            "a gap where the wall has crumbled away",
+                            "a narrow passage swallowed by fog"],
+        "exit_vertical": ["a spiral stair worn smooth by centuries of feet",
+                          "a rough-hewn shaft with a rotted rope ladder",
+                          "a crumbling stairwell vanishing into the dark"],
         # ambient events — the world doing things on its own
         "ambient": ["Somewhere far below, chanting rises and falls, then stops.",
                     "Your torch gutters; for a heartbeat the shadows lunge inward.",
@@ -61,6 +71,12 @@ _THEMES = {
                      "a rusted iron grate in the floor, dark air rising through it",
                      "bones picked clean, arranged in a deliberate spiral",
                      "an old campfire, ashes cold, a bedroll rotted to threads"],
+        "exit_horizontal": ["a low tunnel mouth", "a gap in the collapsed rock",
+                            "an archway of rough-cut stone", "a passage choked with roots",
+                            "a crack in the cavern wall just wide enough to pass"],
+        "exit_vertical": ["a rope-and-plank ladder descending into the dark",
+                          "a natural chimney in the rock, wide enough to climb",
+                          "a crude stairwell hacked from the stone"],
         "ambient": ["Water drips somewhere in the dark, steady as a heartbeat.",
                     "A low rumble passes through the stone and fades.",
                     "Far off, something heavy drags itself across rock.",
@@ -137,6 +153,12 @@ def generate_room(room_id: str, theme: str, *, entry_from: str | None = None, sa
         if entry_from in ("up", "down") and rng.random() < 0.5:
             exits.add(entry_from)
     exit_map = {d: f"{room_id}:{d}" for d in exits}
+    # Physical description of each exit's threshold — part of THIS room, safe to reveal
+    # regardless of whether the destination has been discovered yet (see server.py's
+    # _adjacent_rooms / world.discover). worldgen.py may override these with an LLM-generated
+    # descriptor per exit when Flash is on; this is the always-available procedural fallback.
+    exit_descriptions = {d: rng.choice(t["exit_vertical"] if d in ("up", "down")
+                                       else t["exit_horizontal"]) for d in exits}
 
     contents = []
     roll_kind = rng.random()
@@ -146,8 +168,8 @@ def generate_room(room_id: str, theme: str, *, entry_from: str | None = None, sa
                          "hp": hp, "max_hp": hp, "damage": dmg})
     elif roll_kind < 0.75:
         contents.append({"type": "loot", "id": uuid.uuid4().hex[:8], "name": rng.choice(t["loot"])})
-    return {"id": room_id, "name": name, "exits": exit_map, "contents": contents,
-            "description": f"You stand in {name_with_article(name)}.", "kind": ""}
+    return {"id": room_id, "name": name, "exits": exit_map, "exit_descriptions": exit_descriptions,
+            "contents": contents, "description": f"You stand in {name_with_article(name)}.", "kind": ""}
 
 
 def name_with_article(name: str) -> str:

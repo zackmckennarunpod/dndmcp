@@ -46,7 +46,11 @@ _ROOM_JSON = ('{"name": short evocative room name, "kind": one or two words (e.g
               '"atmosphere": one factual sentence of raw sensory detail (smell/sound/light) — '
               'NOT a full scene description, just the one true thing worth knowing, '
               '"feature": one specific examinable detail, "has_monster": true or false, '
-              '"notable_item": short item description or null}')
+              '"notable_item": short item description or null, '
+              '"exits": {"<direction>": short physical description (4-8 words) of THAT '
+              'exit\'s threshold as seen from THIS room — a door/archway/stairwell/gap, '
+              'material + condition, NOT what lies beyond it (unknown/unexplored) — one '
+              'entry per direction listed below, keys must match exactly}}')
 
 
 def _room_messages(theme: str, came_from: str | None, exits: list[str],
@@ -107,6 +111,14 @@ async def generate_room_content(room_id: str, theme: str, *, entry_from: str | N
                 if item:
                     base.setdefault("contents", []).append(
                         {"type": "loot", "id": uuid.uuid4().hex[:8], "name": str(item)})
+            # per-exit threshold descriptors — only override the procedural default for
+            # directions the model actually addressed AND that are real exits of this room;
+            # never trust an exit key the model invented on its own.
+            exit_text = data.get("exits")
+            if isinstance(exit_text, dict):
+                for direction, desc in exit_text.items():
+                    if direction in base["exits"] and isinstance(desc, str) and desc.strip():
+                        base.setdefault("exit_descriptions", {})[direction] = desc.strip()
             want_monster = bool(data.get("has_monster", want_monster))
             via = "flash"
         except Exception:
