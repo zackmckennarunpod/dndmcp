@@ -58,11 +58,13 @@ _THEMES = {
                     "The walls seem to breathe, very slowly, and you tell yourself it's the dark.",
                     "A whisper brushes your ear — your own name, in a voice you almost know."],
     },
-    "sundered weave": {
-        # The main world's theme: a civilization that mastered summoning — bound spirits
-        # called on a breath, dismissed on a breath, never idle a moment longer than needed.
-        # Then the Weave sundered. An allegory for on-demand compute (spin up, do the work,
-        # scale to zero) without naming it — the essence, not the joke.
+    "weave-binder": {
+        # The main world's theme — NOT a competing lore layer: setting.py's GEN_BRIEF already
+        # establishes the game-wide canon (the Ancients' Weave, the Sundering) in every
+        # generation prompt regardless of theme. This is the specific ANGLE main takes within
+        # that shared canon: binding-arts that summoned spirit-servants on demand, dismissed
+        # the instant the work was done. An allegory for on-demand compute (spin up, do the
+        # work, scale to zero) without naming it — the essence, not the joke.
         "rooms": ["forge-hall gone cold", "conjuror's atrium, circles scorched into the floor",
                   "spirit-warded archive", "collapsed summoning chamber",
                   "current-well, long since drained", "binding-yard littered with broken sigils",

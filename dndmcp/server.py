@@ -307,7 +307,7 @@ async def start_adventure(theme: str = "gothic horror", character_name: str = "W
         premise = premise or (f"A {theme} adventure. Something stirs in the dark, "
                               f"seeking what others feared to find.")
         camp = world.create_campaign(target_id, theme=theme, premise=premise, start_room=start_id)
-        gen = await worldgen.generate_room_content(start_id, theme, salt=camp.salt)
+        gen = await worldgen.generate_room_content(start_id, theme, salt=camp.salt, premise=camp.premise)
         await _maybe_spawn_entity_persona(gen, start_id, theme, [], campaign_id=target_id)  # no neighbors yet
         world.upsert_room(room_id=start_id, campaign_id=target_id, name=gen["name"],
                           description=gen["description"], exits=gen["exits"],
@@ -322,7 +322,7 @@ async def start_adventure(theme: str = "gothic horror", character_name: str = "W
     world.discover(player_id, camp.start_room)
     world.log("adventure.started", f"{char.name} the {char.klass} joined the adventure.",
               player_id=player_id)
-    asyncio.create_task(_prefetch_frontier(room, camp.theme, camp.id, camp.salt))  # fire-and-forget
+    asyncio.create_task(_prefetch_frontier(room, camp.theme, camp.id, camp.salt, camp.premise))  # fire-and-forget
     share_note = (f'\n\n🔗 **World id: `{camp.id}`** — share this so others can join THIS '
                  f'exact world (start_adventure with campaign_id="{camp.id}").'
                  if camp.id != MAIN_CAMPAIGN_ID else "")
@@ -354,15 +354,18 @@ _NPC_DENSITY_LIMIT = 2
 
 async def _maybe_spawn_entity_persona(new_room: dict, dest_id: str, theme: str,
                                       nearby_room_ids: list[str], *, campaign_id: str,
+                                      nearby: list[tuple[str, str]] | None = None,
                                       recent_events: list[str] | None = None) -> None:
     """If this room's procedural gen placed a monster, decide (deterministically, from what's
     already alive nearby) whether it's worth a full LLM persona, generate one, and store it
     as a first-class `entity` row. Mutates new_room['contents'] in place so the monster's
     display name matches its generated identity before the room is even saved — call this
     BEFORE world.upsert_room. `campaign_id` is required (not resolved from a player_id, since
-    this runs during background room-gen with no requesting player in scope). `recent_events`:
-    nearby log text (see _generate_and_link) so a freshly-spawned NPC's persona can react to
-    what's already happened around it, not invent one in a vacuum."""
+    this runs during background room-gen with no requesting player in scope). `nearby`
+    (name, kind) pairs and `recent_events` (nearby log text) are the SAME context
+    generate_room_content already gets for this room — a freshly-spawned NPC's persona
+    should be just as regionally/event-aware as the room it's appearing in, not invented
+    in a vacuum with less context than its own surroundings."""
     mon = next((c for c in new_room["contents"] if c.get("type") == "monster"), None)
     if not mon:
         return
@@ -371,7 +374,7 @@ async def _maybe_spawn_entity_persona(new_room: dict, dest_id: str, theme: str,
     kind = mon["name"]  # SRD species name (e.g. "Goblin") — capture before we overwrite it
     persona = await worldgen.generate_npc_persona(
         mon, theme, new_room["name"], new_room.get("kind", ""), new_room["description"],
-        recent_events=recent_events)
+        nearby=nearby, recent_events=recent_events)
     mon["name"] = persona["name"]
     world.upsert_entity(entity_id=mon["id"], campaign_id=campaign_id, kind=kind,
                         name=persona["name"], location_id=dest_id,
@@ -383,10 +386,12 @@ async def _maybe_spawn_entity_persona(new_room: dict, dest_id: str, theme: str,
 
 
 async def _generate_and_link(dest_id: str, theme: str, campaign_id: str, salt: str, *,
-                             entry_from: str, back_to_id: str) -> None:
+                             entry_from: str, back_to_id: str, premise: str = "") -> None:
     """Generate one room and apply the same bidirectional-link fix as the reactive path —
     used by both move() (reactive) and the fan-out prefetch (speculative) below. `salt` is
-    the owning campaign's — see game._seeded for why every room in a world must share it."""
+    the owning campaign's — see game._seeded for why every room in a world must share it.
+    `premise`: the campaign's premise text — see worldgen.generate_room_content for why a
+    bare theme label isn't enough grounding on its own."""
     nearby_full = _nearby_region(back_to_id, depth=2)
     nearby = [(name, kind) for name, kind, _rid in nearby_full]
     # Stigmergy feeding INTO generation, not just narration: what just happened in the room
@@ -397,10 +402,11 @@ async def _generate_and_link(dest_id: str, theme: str, campaign_id: str, salt: s
     recent_events = [_anonymized(e) for e in world.recent_log(
         5, campaign_id=campaign_id, subject_type="room", subject_id=back_to_id)]
     new_room = await worldgen.generate_room_content(
-        dest_id, theme, entry_from=entry_from, nearby=nearby, recent_events=recent_events, salt=salt)
+        dest_id, theme, entry_from=entry_from, nearby=nearby, recent_events=recent_events,
+        salt=salt, premise=premise)
     new_room["exits"][game.opposite_of(entry_from)] = back_to_id
     await _maybe_spawn_entity_persona(new_room, dest_id, theme, [rid for _, _, rid in nearby_full],
-                                      campaign_id=campaign_id, recent_events=recent_events)
+                                      campaign_id=campaign_id, nearby=nearby, recent_events=recent_events)
     world.upsert_room(room_id=dest_id, campaign_id=campaign_id, name=new_room["name"],
                       description=new_room["description"], exits=new_room["exits"],
                       contents=new_room["contents"], features=new_room.get("features"),
@@ -410,7 +416,8 @@ async def _generate_and_link(dest_id: str, theme: str, campaign_id: str, salt: s
              campaign_id=campaign_id)
 
 
-async def _prefetch_frontier(room: Room, theme: str, campaign_id: str, salt: str) -> None:
+async def _prefetch_frontier(room: Room, theme: str, campaign_id: str, salt: str,
+                             premise: str = "") -> None:
     """Fan out generation for every exit of `room` that doesn't exist yet, in parallel, so
     whichever way the player heads next it's already there — the Flash-burst story: the world
     builds itself ahead of you. Fire-and-forget; never blocks the caller's move/look response."""
@@ -418,7 +425,8 @@ async def _prefetch_frontier(room: Room, theme: str, campaign_id: str, salt: str
     if not missing:
         return
     await asyncio.gather(*(
-        _generate_and_link(dest_id, theme, campaign_id, salt, entry_from=d, back_to_id=room.id)
+        _generate_and_link(dest_id, theme, campaign_id, salt, entry_from=d, back_to_id=room.id,
+                           premise=premise)
         for d, dest_id in missing
     ), return_exceptions=True)
 
@@ -443,13 +451,13 @@ async def move(player_id: str, direction: str) -> str:
         # duplicate room on backtrack instead of returning you home. _generate_and_link
         # forces the real link.
         await _generate_and_link(dest_id, camp.theme, camp.id, camp.salt,
-                                 entry_from=direction, back_to_id=here.id)
+                                 entry_from=direction, back_to_id=here.id, premise=camp.premise)
     world.set_location(player_id, dest_id)
     world.mark_visited(dest_id)
     world.discover(player_id, dest_id)
     dest = _require_room(dest_id)
     world.log("player.moved", f"{ch.name} moved {direction} into {dest.name}", player_id=player_id)
-    asyncio.create_task(_prefetch_frontier(dest, camp.theme, camp.id, camp.salt))  # fire-and-forget
+    asyncio.create_task(_prefetch_frontier(dest, camp.theme, camp.id, camp.salt, camp.premise))  # fire-and-forget
     return _render_scene(dest, player_id=player_id)
 
 
@@ -659,15 +667,21 @@ async def talk_to(player_id: str, message: str, npc_name: str | None = None) -> 
         npc = npcs[0]
 
     camp = _require_campaign(ch.campaign_id)
+    # Computed once, shared by persona-gen (if needed below) AND the dialogue call — an NPC
+    # should be at least as regionally/event-aware as the room it's standing in, which
+    # already gets this same context (see _generate_and_link).
+    nearby_full = _nearby_region(room.id, depth=2)
+    nearby = [(name, kind) for name, kind, _rid in nearby_full]
+    recent_events = [_anonymized(e) for e in world.recent_log(
+        5, campaign_id=ch.campaign_id, subject_type="room", subject_id=room.id)]
     ent = world.entity(npc["id"])
     if not ent:
         # No persona yet — the spawn-time density gate skipped it, or this NPC predates the
         # feature. Generate one lazily now that a player actually cares enough to talk to it.
         kind = npc["name"]  # SRD species name before we overwrite it below
-        recent_events = [_anonymized(e) for e in world.recent_log(
-            5, campaign_id=ch.campaign_id, subject_type="room", subject_id=room.id)]
         gen = await worldgen.generate_npc_persona(npc, camp.theme, room.name, room.kind,
-                                                  room.description, recent_events=recent_events)
+                                                  room.description, nearby=nearby,
+                                                  recent_events=recent_events)
         npc["name"] = gen["name"]
         ent = world.upsert_entity(entity_id=npc["id"], campaign_id=ch.campaign_id, kind=kind,
                                   name=gen["name"], location_id=room.id,
@@ -679,7 +693,8 @@ async def talk_to(player_id: str, message: str, npc_name: str | None = None) -> 
 
     npc_for_llm = {**npc, "persona": ent.persona, "goal": ent.goal,
                   "disposition": ent.disposition, "conversation": ent.memory}
-    result = await worldgen.generate_npc_response(npc_for_llm, camp.theme, room.description, message)
+    result = await worldgen.generate_npc_response(npc_for_llm, camp.theme, room.description,
+                                                  message, recent_events=recent_events)
     world.append_entity_memory(ent.id, "player", message)
     world.append_entity_memory(ent.id, "npc", result["text"])
     world.log("npc.talked",
@@ -749,7 +764,7 @@ if os.environ.get("DNDMCP_DEV_TOOLS") == "1":
             return f"{from_room_id} already has an exit {direction} -> {here.exits[direction]}."
         dest_id = f"{from_room_id}:{direction}"
         await _generate_and_link(dest_id, camp.theme, campaign_id, camp.salt,
-                                 entry_from=direction, back_to_id=from_room_id)
+                                 entry_from=direction, back_to_id=from_room_id, premise=camp.premise)
         # _generate_and_link only wires the NEW room's own back-link — from_room_id didn't
         # have this direction before (that's the point), so add the forward edge ourselves,
         # preserving its existing exit descriptions (set_edges replaces the FULL set).

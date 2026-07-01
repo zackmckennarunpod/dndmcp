@@ -72,11 +72,19 @@ _ROOM_JSON = ('{"name": short evocative room name, "kind": one or two words (e.g
 
 def _room_messages(theme: str, came_from: str | None, exits: list[str],
                    nearby: list[tuple[str, str]] | None = None,
-                   recent_events: list[str] | None = None) -> list[dict]:
+                   recent_events: list[str] | None = None, premise: str = "") -> list[dict]:
+    # A bare theme label ("sundered weave") means nothing to a small model on its own — no
+    # training-data association for a made-up phrase, so it falls back to generic dungeon-
+    # crawl tropes (observed live: "sundered weave" alone produced "The Whispering Crypt,"
+    # ancient runes, a wooden door — none of it grounded in the actual premise). The
+    # campaign's premise text is what actually explains what the theme MEANS.
+    premise_line = f" The world's premise: {premise}" if premise else ""
     system = (f"{setting.GEN_BRIEF}\n\n"
-              f"You are the world-builder for a {theme} dungeon crawl in this setting. You invent "
-              f"what is TRUE about each room — facts for a Dungeon Master to narrate from, not "
-              f"finished prose. You reply with STRICT JSON only — no text outside the JSON object.")
+              f"You are the world-builder for a {theme} dungeon crawl in this setting.{premise_line} "
+              f"You invent what is TRUE about each room — facts for a Dungeon Master to narrate "
+              f"from, not finished prose — and every room must clearly belong to THIS premise, "
+              f"not generic dungeon-crawl dressing that could fit any setting. You reply with "
+              f"STRICT JSON only — no text outside the JSON object.")
     enter = f" the player enters from the {came_from}" if came_from else " the player descends into"
     context = ""
     if nearby:
@@ -96,7 +104,7 @@ def _room_messages(theme: str, came_from: str | None, exits: list[str],
 async def generate_room_content(room_id: str, theme: str, *, entry_from: str | None = None,
                                 nearby: list[tuple[str, str]] | None = None,
                                 recent_events: list[str] | None = None,
-                                salt: str = "") -> dict:
+                                salt: str = "", premise: str = "") -> dict:
     """Generate a room's content for the graph. Tries Flash (structured JSON); falls back
     to procedural. Returns game.generate_room's shape + `features` + a `via` marker.
 
@@ -106,7 +114,9 @@ async def generate_room_content(room_id: str, theme: str, *, entry_from: str | N
     FROM (see server.py's _generate_and_link) — lets a fight/discovery next door ripple into
     what this new room actually is, not just how it's narrated. `salt`: the owning campaign's
     salt (state.py Campaign.salt) — see game._seeded for why this must be passed through, not
-    just room_id alone."""
+    just room_id alone. `premise`: the campaign's own premise text (Campaign.premise) — a
+    theme LABEL alone isn't enough grounding for a small model on a made-up/unusual theme;
+    the premise is what actually explains what it means."""
     rng = game._seeded(room_id, salt)  # deterministic per (room_id, salt)
     base = game.generate_room(room_id, theme, entry_from=entry_from, salt=salt)  # procedural skeleton
 
@@ -117,7 +127,7 @@ async def generate_room_content(room_id: str, theme: str, *, entry_from: str | N
     # wholesale (same override pattern as want_monster below), never just adds on top of it —
     # otherwise a generic "pouch of gold" keeps surviving next to genuinely on-theme content.
     items = [c for c in base["contents"] if c.get("type") == "loot"]
-    messages = _room_messages(theme, entry_from, list(base["exits"].keys()), nearby, recent_events)
+    messages = _room_messages(theme, entry_from, list(base["exits"].keys()), nearby, recent_events, premise)
 
     # A single bad sample (malformed JSON) or a transient endpoint hiccup (cold start,
     # throttling — both observed in practice) shouldn't cost the room real content when a
@@ -139,14 +149,27 @@ async def generate_room_content(room_id: str, theme: str, *, entry_from: str | N
 
     if data is not None:
         try:
-            if data.get("name"):
-                base["name"] = data["name"]
-            if data.get("kind"):
-                base["kind"] = data["kind"]
+            # the model doesn't reliably return plain strings despite the schema — atmosphere
+            # in particular sometimes comes back as {"light": ..., "sound": ..., ...} instead
+            # of prose. Room.description is a required Pydantic str field, so an unnormalized
+            # dict here doesn't just look wrong, it CRASHES the whole call at upsert_room —
+            # this isn't cosmetic, it's the difference between a graceful procedural fallback
+            # and start_adventure/move throwing all the way up to the player.
+            def _normalize_text(raw) -> str:
+                if isinstance(raw, dict):
+                    return " ".join(str(v) for v in raw.values() if v)
+                if isinstance(raw, list):
+                    return " ".join(str(v) for v in raw if v)
+                return str(raw).strip() if raw else ""
+
+            if name := _normalize_text(data.get("name")):
+                base["name"] = name
+            if kind := _normalize_text(data.get("kind")):
+                base["kind"] = kind
             # `description` stays a raw FACT, not finished prose — the DM agent (whoever is
             # running the session) narrates from this, same as it would from a human DM's notes.
-            if data.get("atmosphere"):
-                base["description"] = data["atmosphere"]
+            if atmosphere := _normalize_text(data.get("atmosphere")):
+                base["description"] = atmosphere
             feats_from_flash = data.get("features")
             if isinstance(feats_from_flash, list):
                 for f in feats_from_flash:
@@ -329,17 +352,22 @@ async def generate_npc_persona(mon: dict, theme: str, room_name: str, room_kind:
            "via": "procedural"}
 
 
-def _npc_messages(npc: dict, theme: str, room_context: str, message: str) -> list[dict]:
+def _npc_messages(npc: dict, theme: str, room_context: str, message: str,
+                  recent_events: list[str] | None = None) -> list[dict]:
     traits = ", ".join(npc.get("traits", [])) or "no notable traits"
     persona_line = f" {npc['persona']}" if npc.get("persona") else ""
     goal_line = f" Right now they want: {npc['goal']}." if npc.get("goal") else ""
     disposition_line = (f" They are {npc['disposition']} toward strangers."
                         if npc.get("disposition") else "")
+    events_line = (f" Recently, nearby: {'; '.join(recent_events)}. React to this if it's "
+                   f"actually relevant to what's being said — don't force it in."
+                  if recent_events else "")
     system = (f"{setting.GEN_BRIEF}\n\n"
               f"You are voicing {npc['name']} in a {theme} dungeon crawl in this setting. "
-              f"Traits: {traits}.{persona_line}{goal_line}{disposition_line} Room: {room_context} "
-              f"Stay fully in character. Reply with ONLY the character's spoken words — "
-              f"no stage directions, no narration, no quotation marks. Keep it to 1-3 sentences.")
+              f"Traits: {traits}.{persona_line}{goal_line}{disposition_line} Room: {room_context}"
+              f"{events_line} Stay fully in character. Reply with ONLY the character's spoken "
+              f"words — no stage directions, no narration, no quotation marks. Keep it to 1-3 "
+              f"sentences.")
     messages = [{"role": "system", "content": system}]
     # prior turns are the conversation's memory — talk_to() fetches these from the entity
     # table (state.py Entity.memory) and passes them in via npc["conversation"] so this
@@ -351,11 +379,15 @@ def _npc_messages(npc: dict, theme: str, room_context: str, message: str) -> lis
     return messages
 
 
-async def generate_npc_response(npc: dict, theme: str, room_context: str, message: str) -> dict:
+async def generate_npc_response(npc: dict, theme: str, room_context: str, message: str,
+                                recent_events: list[str] | None = None) -> dict:
     """Generate one line of in-character NPC dialogue, informed by the conversation history
-    already stored on `npc` (via talk_to). Tries Flash; falls back to a generic in-character
-    line with no real continuity — without a model, there's nothing to generate FROM."""
-    messages = _npc_messages(npc, theme, room_context, message)
+    already stored on `npc` (via talk_to) and — same as room/persona generation — recent
+    events nearby, so an NPC can react to a fight or discovery instead of being blind to
+    everything but its own persona and past chat. Tries Flash; falls back to a generic
+    in-character line with no real continuity — without a model, there's nothing to
+    generate FROM."""
+    messages = _npc_messages(npc, theme, room_context, message, recent_events)
     gen = await flash_llm.generate(messages, max_tokens=120, temperature=0.9)
     if gen:
         return {"text": gen.strip().strip('"'), "via": "flash"}
