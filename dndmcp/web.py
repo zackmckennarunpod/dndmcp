@@ -63,6 +63,13 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
  .ch span.item{cursor:help;border-bottom:1px dotted var(--dim)}
  .log div{color:var(--muted);padding:2px 0;border-bottom:1px solid var(--border-soft);font-size:12px}
  .empty{color:var(--dim)}
+ /* Known-entity highlighting in free-text log/stream lines (see highlightKnown()) — one
+    color per category so "who / where / what" is readable at a glance, not one flat gray
+    sentence. Reuses the same palette meaning the graph already established (violet=rooms,
+    teal=ghosts/actors) rather than inventing a fourth unrelated color language. */
+ .hl-room{color:var(--visited);font-weight:600}
+ .hl-actor{color:var(--ghost);font-weight:600}
+ .hl-item{color:var(--warm);font-weight:600}
 #flashcount{color:var(--warm);font-weight:600;margin-left:auto;transition:transform .15s}
 #flashcount.pulse{transform:scale(1.3);color:var(--warm-bright)}
  #stream{display:flex;flex-direction:column-reverse;gap:0;height:120px;overflow-y:auto}
@@ -133,6 +140,38 @@ const playerId = params.get('player');
 const campaignId = params.get('campaign') || 'main';
 const W=700, H=420;
 function esc(s){ return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function escRegex(s){ return s.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&'); }
+
+// Highlight known entity names (rooms/actors/items) wherever they show up in free-text log
+// lines, so "Corrin Vale moved south into Dreadful Descent" reads at a glance instead of as
+// one flat gray sentence. Accumulates across the whole session (never resets) so older log
+// lines mentioning a room/monster that's since left the current snapshot stay highlighted.
+const highlightClassOf = {};
+let highlightTerms = [];
+let highlightRegex = null;
+function noteHighlightTerm(name, cls){
+  const key = name && String(name).trim();
+  if(!key || highlightClassOf[key]) return;
+  highlightClassOf[key] = cls;
+  highlightTerms.push(key);
+}
+function rebuildHighlightIndex(state){
+  const before = highlightTerms.length;
+  (state.rooms||[]).forEach(r => noteHighlightTerm(r.name, 'hl-room'));
+  (state.players||[]).forEach(p => noteHighlightTerm(p.name, 'hl-actor'));
+  (state.rooms||[]).forEach(r => (r.contents||[]).forEach(c =>
+    noteHighlightTerm(c.name, c.type==='monster' ? 'hl-actor' : 'hl-item')));
+  if(highlightTerms.length === before) return;  // nothing new -> keep the existing regex
+  // Longest-first so "Corrin Vale" matches whole, not just the "Corrin" substring of it.
+  const sorted = [...highlightTerms].sort((a,b) => b.length - a.length);
+  highlightRegex = new RegExp('(' + sorted.map(escRegex).join('|') + ')', 'g');
+}
+// Text passed in must ALREADY be HTML-escaped (esc()) -- this only wraps matches in spans,
+// it never introduces new unescaped content of its own.
+function highlightKnown(escapedText){
+  if(!highlightRegex) return escapedText;
+  return escapedText.replace(highlightRegex, m => `<span class="${highlightClassOf[m]||'hl-room'}">${m}</span>`);
+}
 
 // Real force-directed layout via d3-force — replaces a hand-rolled O(n^2) loop that fully
 // re-converged from scratch on every poll. d3-force uses a quadtree (Barnes-Hut) approximation
@@ -353,6 +392,7 @@ async function tick(){
   document.getElementById('where').textContent = whereText;
   document.getElementById('whereInMap').textContent = whereText;
   renderGraph(s.rooms||[], s.players||[], s.you||null);
+  rebuildHighlightIndex(s);
   const ch = s.character;
   const invHtml = (ch?.inventory||[]).map(it => {
     const name = typeof it === 'string' ? it : it.name;
@@ -360,7 +400,10 @@ async function tick(){
     return desc ? `<span class=item title="${esc(desc)}">${esc(name)}</span>` : `<span>${esc(name)}</span>`;
   }).join(', ');
   document.getElementById('char').innerHTML = ch? `<b>${esc(ch.name)}</b> <span>lvl ${ch.level} ${esc(ch.klass)}</span><br>HP ${ch.hp}/${ch.max_hp} · AC ${ch.ac}<br>${invHtml||'<span class=empty>empty-handed</span>'}`:'—';
-  document.getElementById('log').innerHTML=(s.log||[]).map(l=>`<div>${l.text}</div>`).join('')||'<div class=empty>—</div>';
+  // esc() FIRST, always -- this was previously raw l.text with no escaping at all, a stored-
+  // XSS gap (log_event's free-form agent-authored text would render as live HTML for every
+  // viewer). highlightKnown only wraps matches in spans; it never introduces new raw content.
+  document.getElementById('log').innerHTML=(s.log||[]).map(l=>`<div>${highlightKnown(esc(l.text))}</div>`).join('')||'<div class=empty>—</div>';
   const fc = document.getElementById('flashcount');
   const n = s.flash_calls||0;
   if(n !== lastFlashCalls){
@@ -386,7 +429,7 @@ es.addEventListener('world-event', (e) => {
   const div = document.createElement('div');
   div.className = 'new';
   const who = ev.player_id ? `<span class=who>${esc(ev.player_id.slice(0,6))}</span> ` : '';
-  div.innerHTML = `${who}${esc(ev.text)}`;
+  div.innerHTML = `${who}${highlightKnown(esc(ev.text))}`;
   streamEl.prepend(div);
   while (streamEl.children.length > 50) streamEl.lastChild.remove();
   setTimeout(() => div.classList.remove('new'), 900);
