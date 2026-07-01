@@ -203,7 +203,11 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
  <div class=body style="margin-top:10px">
   <p><b>1. Connect your agent</b> — pick whichever you use:</p>
   <div class=codebox><code id=codeCC>curl -fsSL https://ldghdgi0xxn6jj-8002.proxy.runpod.net/install.sh | bash</code><button class=copyCodeBtn data-target=codeCC>Copy</button></div>
-  <p class=sub style="margin:6px 0 14px">↑ <b>Claude Code</b> — one command, installs dndmcp pointed at this exact live shared world.</p>
+  <p class=sub style="margin:6px 0 14px">↑ <b>Claude Code (macOS/Linux/WSL)</b> — one command, installs dndmcp pointed at this exact live shared world.</p>
+  <div class=codebox><code id=codeCCWin>claude mcp add --transport http dndmcp -s user "https://ldghdgi0xxn6jj-8000.proxy.runpod.net/mcp"</code><button class=copyCodeBtn data-target=codeCCWin>Copy</button></div>
+  <p class=sub style="margin:6px 0 14px">↑ <b>Claude Code (Windows, PowerShell/cmd)</b> — the curl-and-pipe one-liner above needs a
+  Unix shell (WSL or Git Bash); this is the same underlying command run directly, no shell
+  wrapper needed.</p>
   <div class=codebox><pre id=codeCD>{
   "mcpServers": {
     "dndmcp": {
@@ -212,8 +216,9 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
     }
   }
 }</pre><button class=copyCodeBtn data-target=codeCD>Copy</button></div>
-  <p class=sub style="margin:6px 0 14px">↑ <b>Claude Desktop</b> — paste into <code>claude_desktop_config.json</code>
-  (macOS: <code>~/Library/Application Support/Claude/claude_desktop_config.json</code>), then restart the app.</p>
+  <p class=sub style="margin:6px 0 14px">↑ <b>Claude Desktop</b> — paste into <code>claude_desktop_config.json</code>, then restart
+  the app. macOS: <code>~/Library/Application Support/Claude/claude_desktop_config.json</code> —
+  Windows: <code>%APPDATA%\\Claude\\claude_desktop_config.json</code>.</p>
   <p><b>2. Reconnect</b> — Claude Code: run <code>/mcp</code>; Claude Desktop: restart it — so it picks up the new server.</p>
   <p><b>3. Say "start an adventure."</b> That's it. Your agent becomes the Dungeon Master — talk
   naturally ("go through the door," "attack it," "look around"), you never need game-engine
@@ -830,12 +835,14 @@ filterBtn.addEventListener('click', () => {
 });
 
 // Clicking the header counter opens the FULL Flash-call history on its own page (new tab) —
-// every call this world has ever made, uncapped, not a live-filtered view of the panel below
-// (that's what the "⚡ Flash calls only" toggle on the stream panel is for instead).
+// every call ANY world has ever made, uncapped, not a live-filtered view of the panel below
+// (that's what the "⚡ Flash calls only" toggle on the stream panel is for instead). No
+// ?campaign= here on purpose — the header number itself is now server-wide (see /state's
+// flash_calls query), so the page it opens must match that same total, not just this world's.
 document.getElementById('flashcount').style.cursor = 'pointer';
-document.getElementById('flashcount').title = 'Click to see every Flash call this world has made';
+document.getElementById('flashcount').title = 'Click to see every Flash call this server has ever made, across all worlds';
 document.getElementById('flashcount').addEventListener('click', () => {
-  window.open('/flash-calls?campaign='+encodeURIComponent(campaignId), '_blank');
+  window.open('/flash-calls', '_blank');
 });
 
 document.getElementById('metricsLink').addEventListener('click', () => {
@@ -994,11 +1001,14 @@ def state(request: Request) -> JSONResponse:
         # generation) and npc.talked (NPC dialogue) also call Flash — count all three so the
         # counter doesn't undercount just because personas are generated far more sparsely
         # (deterministic density gate — see server.py::_maybe_spawn_entity_persona).
+        # Deliberately NOT scoped to campaign_id, unlike everything else in this response —
+        # the header counter is meant to read as "how much real GPU work has this whole
+        # server done," not just the one world you happen to be viewing (same server-wide-
+        # by-default convention /metrics and /flash-calls use with no ?campaign= given).
         flash_calls = c.execute(
-            "SELECT COUNT(*) FROM log WHERE campaign_id=?"
-            " AND kind IN ('room.generated','entity.spawned','npc.talked','item.picked_up','story.exported')"
-            " AND text LIKE '%(flash)%'",
-            (campaign_id,),
+            "SELECT COUNT(*) FROM log"
+            " WHERE kind IN ('room.generated','entity.spawned','npc.talked','item.picked_up','story.exported')"
+            " AND text LIKE '%(flash)%'"
         ).fetchone()[0]
         return JSONResponse({"rooms": rooms, "players": players, "character": char,
                              "you": char, "current_room": (dict(cur) if cur else None), "log": log,
@@ -1073,16 +1083,21 @@ async def export_story(request: Request):
 
 @app.get("/flash-calls", response_class=HTMLResponse)
 def flash_calls_page(request: Request) -> str:
-    """Every Flash call this world has EVER made, in full, on its own page — not a capped/
-    truncated panel. What #flashcount in the header links to (opens in a new tab): the whole
-    history at once, not a live-filtered view of the existing stream."""
-    campaign_id = request.query_params.get("campaign") or "main"
+    """Every Flash call EVER made, in full, on its own page — not a capped/truncated panel.
+    What #flashcount in the header links to (opens in a new tab). With no ?campaign=, this is
+    the SERVER-WIDE list across every world — matching the header counter, which is now also
+    server-wide (see /state's flash_calls query). Pass ?campaign=X to scope down to one
+    world's own call history instead, same all-worlds-by-default convention /metrics uses."""
+    campaign_id = request.query_params.get("campaign")
+    all_worlds = not campaign_id
+    where = "WHERE text LIKE '%(flash)%'" if all_worlds else "WHERE campaign_id=? AND text LIKE '%(flash)%'"
+    args = () if all_worlds else (campaign_id,)
     c = _db()
     try:
         rows = c.execute(
-            "SELECT ts, kind, text, player_id, subject_type, subject_id FROM log"
-            " WHERE campaign_id=? AND text LIKE '%(flash)%' ORDER BY seq DESC",
-            (campaign_id,),
+            f"SELECT ts, kind, text, player_id, campaign_id, subject_type, subject_id FROM log"
+            f" {where} ORDER BY seq DESC",
+            args,
         ).fetchall()
     except sqlite3.OperationalError:
         rows = []
@@ -1092,13 +1107,16 @@ def flash_calls_page(request: Request) -> str:
     def row_html(r: sqlite3.Row) -> str:
         ts = datetime.datetime.fromtimestamp(r["ts"]).strftime("%Y-%m-%d %H:%M:%S") if r["ts"] else "?"
         who = f'<span class=who>{html.escape(r["player_id"][:6])}</span> ' if r["player_id"] else ""
+        world = (f'<span class=world>{html.escape(r["campaign_id"] or "main")}</span> '
+                if all_worlds else "")
         subj = (f'<span class=subj>{html.escape(r["subject_type"])}:{html.escape(r["subject_id"])}</span>'
                if r["subject_type"] else "")
         return (f'<div class=row><span class=ts>{ts}</span><span class=kind>{html.escape(r["kind"])}</span>'
-               f'{who}<span class=text>{html.escape(r["text"])}</span>{subj}</div>')
+               f'{world}{who}<span class=text>{html.escape(r["text"])}</span>{subj}</div>')
 
-    body = "".join(row_html(r) for r in rows) or '<div class=empty>No Flash calls yet in this world.</div>'
-    return f"""<!doctype html><html><head><meta charset=utf-8><title>Flash calls — {html.escape(campaign_id)}</title>
+    body = "".join(row_html(r) for r in rows) or '<div class=empty>No Flash calls yet.</div>'
+    title = "all worlds" if all_worlds else html.escape(campaign_id)
+    return f"""<!doctype html><html><head><meta charset=utf-8><title>Flash calls — {title}</title>
 <style>
 :root{{--bg:#0a0713;--panel:#150f24;--border:#2b2145;--border-soft:#221a38;--text:#e7e1f5;
   --muted:#8d7fae;--warm:#e8b339;--warm-bright:#f5cc66;--ghost:#4fd8c4;--ghost-bright:#8ff0e0}}
@@ -1110,12 +1128,13 @@ main{{padding:10px 20px}}
 .row{{display:flex;gap:12px;padding:7px 0;border-bottom:1px solid var(--border-soft);font-size:12.5px;align-items:baseline}}
 .ts{{color:var(--muted);flex-shrink:0;width:150px}}
 .kind{{color:var(--warm);flex-shrink:0;width:130px}}
+.world{{color:var(--warm-bright)}}
 .who{{color:var(--ghost)}}
 .subj{{color:var(--muted);margin-left:auto}}
 .text{{color:var(--text)}}
 .empty{{color:var(--muted);padding:20px 0}}
 </style></head><body>
-<header><h1>⚡ Flash calls</h1><span class=count>{len(rows)} total in this world</span></header>
+<header><h1>⚡ Flash calls</h1><span class=count>{len(rows)} total{' across all worlds' if all_worlds else ' in this world'}</span></header>
 <main>{body}</main>
 </body></html>"""
 
