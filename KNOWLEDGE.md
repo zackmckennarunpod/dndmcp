@@ -127,6 +127,30 @@ SDK has **no `GpuType.availability()` / `DataCenter.available_gpus()`**. The Fla
 
 ---
 
+## SSH into a SERVERLESS WORKER's underlying pod (verified Jul 1)
+Every serverless worker runs on a real pod, and it's reachable via SSH the exact same way a
+regular Pod is — it's just not listed in `myself.pods` (that only returns account-level Pods,
+not ephemeral worker instances), so you can't discover the pod id from `list-pods`.
+
+**How to get it:**
+1. Console: Endpoints → the endpoint → Workers tab → click a worker → its "Connect" panel shows
+   an SSH snippet like `ssh <podHostId>@ssh.runpod.io -i ~/.ssh/id_ed25519` — copy the pod id
+   from that URL/panel (that snippet uses the proxy gateway `ssh.runpod.io`, not direct TCP).
+2. Once you have the pod id, the SAME GraphQL query `pod_ssh.sh` already uses for regular pods
+   works unchanged: `pod(input:{podId:"<id>"}) { machine { podHostId } runtime { ports {...} } }`.
+   `machine.podHostId` IS the SSH gateway username (`ssh <podHostId>@ssh.runpod.io`) — no need
+   to separately resolve a changing host:port like the direct-TCP method (`pod_ssh.sh resolve`)
+   does; the proxy gateway is stable across restarts.
+3. `pod.name` on a worker-backed pod equals the **endpoint id** it belongs to — useful to confirm
+   you've got the right worker before SSHing in.
+
+No API call currently enumerates "workers → their pod ids" directly (checked — `endpoint`/`myself`
+queries don't expose it); the console's Workers tab is the only way to get the starting pod id.
+"Enable web terminal" (seen in the console's Connect panel) is a UI-only toggle, no GraphQL
+mutation found for it — turn it on by hand if you want that path instead of SSH.
+
+---
+
 ## DEV-HOST GOTCHA (gold from prior prep, `research/03`)
 Flash defaults ALL hosts to **prod** (`api.runpod.io`). A **dev** API key 401/404s unless you override all three:
 `RUNPOD_API_BASE_URL`, `RUNPOD_REST_*`, `RUNPOD_ENDPOINT_*` → `api.runpod.dev`. Bake this into the kit's env loader. (Hackathon will likely use a real/prod key — confirm which on the day.)
