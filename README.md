@@ -13,6 +13,7 @@ so hack day is **composition, not bootstrap**.
 | `flagship/lora_sweep.py` | The Tier-1 "beyond inference" beat — LoRA sweep fanned across workers |
 | `.claude/skills/forge/` | Local skill — load it (or `/forge`) to drive the kit with the verified API + gotchas |
 | `notes/` | Original strategy (prep-kit, deployment) |
+| `dndmcp/` | Separate project: a multiplayer D&D MCP server built on FORGE — see `dndmcp/SETUP.md` |
 
 ## Quickstart
 ```bash
@@ -29,6 +30,15 @@ forge.undeploy(tool.endpoint_name)
 ```
 
 MCP server for agents: `python -m forge.server` (stdio) → `gpu_available, gpu_mint, gpu_call, gpu_fanout, fleet_cost, fleet_cleanup`.
+
+## Also in this repo: DNDMCP
+
+`dndmcp/` is a separate, self-contained project built on top of FORGE — a multiplayer
+tabletop-RPG MCP server (FastMCP + FastAPI), with optional Flash-generated rooms/NPCs/art
+and a live world map GUI. It's not part of the FORGE kit itself; start at `dndmcp/SETUP.md`
+if that's what you're here for. Runs fully locally with zero Runpod account required
+(Flash generation is opt-in, off by default); `dndmcp/CLAUDE.md` covers operating the live
+hosted pod.
 
 ## Status — LIVE-VALIDATED on prod (Jun 26, runpod-flash 1.7.0)
 - ✅ Full spine proven end-to-end against the real account: **mint → call → cost → availability → safe teardown**, with zero leaked resources.

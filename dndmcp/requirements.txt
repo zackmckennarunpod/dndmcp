@@ -3,5 +3,8 @@ mcp>=1.2.0
 fastapi>=0.110.0
 uvicorn>=0.27.0
 sse-starlette>=2.0.0
+pydantic>=2.0.0
 # runpod-flash only needed when art.py calls Flash for GPU image gen (wired later)
 runpod-flash>=1.7.0
+# Pillow is optional: only imported (lazily, inside art.py's _image_to_ansi) when
+# DND_FLASH_ART=1 and a real generated image comes back. Not required for normal play.

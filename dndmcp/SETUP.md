@@ -35,22 +35,37 @@ on macOS), then restart the app:
 ## Local dev setup
 
 Play in your agent harness; watch the world map sync live in the browser. Both share one DB
-(`DNDMCP_STATE_DIR`), so the map reflects your moves automatically.
+(`DNDMCP_STATE_DIR`), so the map reflects your moves automatically. No Runpod account needed
+for any of this — Flash generation is opt-in (see "Optional env vars" below) and everything
+falls back to deterministic procedural content when it's off, which is the default.
 
-## 1. The GUI map (running now)
-The world map is served at **http://localhost:8001** — open it. It auto-refreshes (1.5s) and
-shows the world graph, your position (`[@]`), visited rooms (`[#]`), character, and recent log.
+Examples below use `<repo>` for wherever you cloned this — `cd` there first and either
+substitute the real path or just leave `<repo>` as a relative `.` if you're already in it.
 
-Start/restart the GUI manually with:
+## 0. Install
 ```bash
-cd ~/Developer/work/flash-hackathon
+cd <repo>
+python3 -m venv .venv
+.venv/bin/pip install -r dndmcp/requirements.txt
+```
+
+## 1. The GUI map
+The world map is served at **http://localhost:8001** — open it once it's running. It
+auto-refreshes (1.5s) and shows the world graph, your position (`[@]`), visited rooms
+(`[#]`), character, and recent log.
+
+Start it with:
+```bash
+cd <repo>
 DNDMCP_STATE_DIR=~/.dndmcp_dev GUI_PORT=8001 .venv/bin/python -m dndmcp.web
 ```
 
 ## 2. Attach the MCP server to Claude Desktop (stdio)
-Add the contents of `dndmcp/claude_desktop_config.snippet.json` to your Claude Desktop config:
+Copy `dndmcp/claude_desktop_config.snippet.json`, replacing every `<ABS_PATH_TO_YOUR_CLONE>`
+with the absolute path to `<repo>` (must be absolute — Claude Desktop doesn't resolve `~` or
+relative paths), then merge the `mcpServers.dndmcp` block into your Claude Desktop config:
 - macOS path: `~/Library/Application Support/Claude/claude_desktop_config.json`
-- Merge the `mcpServers.dndmcp` block in (keep any existing servers).
+- Keep any existing servers already in that file.
 - **Restart Claude Desktop.** It launches the stdio server per session, sharing `~/.dndmcp_dev`.
 
 Then in Claude Desktop: the `dndmcp` tools appear, and the DM persona (server instructions)
@@ -58,10 +73,10 @@ makes the agent act as your Dungeon Master. Say "start an adventure" and play �
 at :8001 update as you move.
 
 ## 3. Attach from a terminal harness (Claude Code etc.)
-Same stdio command:
+Same stdio command, with `<repo>` replaced by its absolute path:
 ```
-PYTHONPATH=~/Developer/work/flash-hackathon DNDMCP_STATE_DIR=~/.dndmcp_dev \
-  ~/Developer/work/flash-hackathon/.venv/bin/python -m dndmcp.server
+PYTHONPATH=<repo> DNDMCP_STATE_DIR=~/.dndmcp_dev \
+  <repo>/.venv/bin/python -m dndmcp.server
 ```
 
 ## 4. Dev loop
@@ -72,6 +87,20 @@ PYTHONPATH=~/Developer/work/flash-hackathon DNDMCP_STATE_DIR=~/.dndmcp_dev \
 - The world is shared/multiplayer: `start_adventure` joins the existing campaign if one is
   already running (does NOT wipe it) — a new player just gets their own character in it.
   To actually reset: `rm ~/.dndmcp_dev/campaign.db`.
+
+## Optional env vars
+None of these are required — everything works locally with just the install step above.
+| Var | Default | What |
+|---|---|---|
+| `DND_FLASH_LLM` | unset (off) | `1` to generate rooms/NPCs/items via Flash instead of the built-in procedural pool. Needs `RUNPOD_API_KEY`. |
+| `DND_FLASH_ART` | unset (off) | `1` to generate ANSI-rendered room art via Flash. Needs `RUNPOD_API_KEY` + Pillow (`pip install Pillow`). |
+| `DND_LLM_MODEL` | see `flash_llm.py` | Override the model Flash calls for room/NPC generation. |
+| `FLASH_NPC` / `FLASH_NPC_ENDPOINT_ID` | unset | Route `ask_npc` dialogue through a specific Flash endpoint instead of the shared pool. |
+| `RUNPOD_API_KEY` | unset | Required by any `DND_FLASH_*` flag above. On macOS, falls back to Keychain entry `runpod-api-key-prod` if unset — that fallback is a convenience for the original author's machine, not something to rely on elsewhere; just export the var. |
+| `DNDMCP_STATE_DIR` | `~/.dndmcp` | Where the SQLite world DB lives. |
+| `GUI_PORT` | `8001` | Port `dndmcp.web` binds to. |
+| `PORT` | `8000` | Port the MCP server binds to (HTTP transports only). |
+| `DNDMCP_TRANSPORT` | `stdio` | `http` to run the MCP server over streamable-HTTP instead of stdio (what the pod/container uses). |
 
 ## Pod / container (the "brain" for hosted play) — live
 

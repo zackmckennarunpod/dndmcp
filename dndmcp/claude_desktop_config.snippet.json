@@ -1,11 +1,11 @@
 {
   "mcpServers": {
     "dndmcp": {
-      "command": "/Users/zackmckenna/Developer/work/flash-hackathon/.venv/bin/python",
+      "command": "<ABS_PATH_TO_YOUR_CLONE>/.venv/bin/python",
       "args": ["-m", "dndmcp.server"],
       "env": {
-        "PYTHONPATH": "/Users/zackmckenna/Developer/work/flash-hackathon",
-        "DNDMCP_STATE_DIR": "/Users/zackmckenna/.dndmcp_dev"
+        "PYTHONPATH": "<ABS_PATH_TO_YOUR_CLONE>",
+        "DNDMCP_STATE_DIR": "<ABS_PATH_TO_YOUR_CLONE>/.dndmcp_dev"
       }
     }
   }
