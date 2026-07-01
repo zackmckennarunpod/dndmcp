@@ -105,6 +105,24 @@ class Quest(BaseModel):
     created_at: float = 0.0
 
 
+class WebSession(BaseModel):
+    """Durable session_id -> player_id mapping for the browser-chat identity (e0b.4) --
+    survives a redeploy even though chat_sessions._sessions (the in-memory DMSession store)
+    does not, see state.py's web_session table. session_id is the same value carried by the
+    dm_session HttpOnly cookie (chat_sessions.COOKIE_NAME); player_id is None until
+    start_adventure mints one for this browser session. message_count doubles as the
+    per-session lifetime-turn-cap counter (see chat_sessions.session_cap_exceeded) precisely
+    because it lives here, not in the in-memory store."""
+    model_config = ConfigDict(extra="forbid")
+
+    session_id: str
+    player_id: str | None = None
+    campaign_id: str | None = None
+    created_at: float = 0.0
+    last_seen: float = 0.0
+    message_count: int = 0
+
+
 class LogEntry(BaseModel):
     """A domain event. `kind` is dotted-namespace (e.g. "player.moved", "room.generated",
     "combat.resolved", "memory.noted") so the stream is filterable by category, not just by

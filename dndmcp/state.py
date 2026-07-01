@@ -20,7 +20,7 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-from .models import Campaign, Character, Entity, LogEntry, Quest, Room
+from .models import Campaign, Character, Entity, LogEntry, Quest, Room, WebSession
 
 # Set by the transport layer (server.py's ASGI middleware, web.py's request handlers) for the
 # duration of one inbound request, read by World.log() as its default for ip/session_id — a
@@ -57,7 +57,7 @@ def _state_dir() -> Path:
 # be additive (CREATE TABLE IF NOT EXISTS / ALTER TABLE ADD COLUMN), never a blanket drop.
 # If a genuinely breaking change is ever needed, write an explicit versioned migration step
 # instead of wiping; do not restore the old "wipe on any mismatch" behavior.
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 MAIN_CAMPAIGN_ID = "main"
 
@@ -177,6 +177,21 @@ class World:
                 steps TEXT DEFAULT '[]', given_by TEXT, created_by TEXT, created_at REAL
             );
             CREATE INDEX IF NOT EXISTS idx_quest_campaign ON quest(campaign_id);
+            -- Durable browser identity (e0b.4): session_id is the same value the dm_session
+            -- HttpOnly cookie carries (chat_sessions.COOKIE_NAME) -- this is what lets a
+            -- returning browser resume its OWN character across a redeploy even though
+            -- chat_sessions._sessions (the in-memory DMSession store, message history
+            -- included) does not survive one. player_id/campaign_id start NULL and are
+            -- filled in once start_adventure mints a player_id for this session (see
+            -- chat_sessions.py's resume path + web.py's POST /chat). message_count doubles
+            -- as the per-session lifetime-turn-cap counter precisely because it lives here
+            -- (SQLite), not in that in-memory store -- it survives the same redeploy the cap
+            -- is meant to survive.
+            CREATE TABLE IF NOT EXISTS web_session (
+                session_id TEXT PRIMARY KEY,
+                player_id TEXT, campaign_id TEXT,
+                created_at REAL, last_seen REAL, message_count INTEGER DEFAULT 0
+            );
             """
         )
         # rooms/character/log/entity predate multi-world and had no campaign_id column —
@@ -723,6 +738,53 @@ class World:
             (*params, n),
         ).fetchall()
         return [LogEntry.model_validate(dict(r)) for r in reversed(rows)]
+
+    # --- web_session (durable browser identity, e0b.4) --------------------------
+    def get_web_session(self, session_id: str) -> WebSession | None:
+        r = self._c.execute(
+            "SELECT * FROM web_session WHERE session_id=?", (session_id,)
+        ).fetchone()
+        return WebSession.model_validate(dict(r)) if r else None
+
+    def save_web_session(self, session_id: str, *, player_id: str, campaign_id: str) -> None:
+        """Persist (or update) the durable session_id -> player_id mapping -- called once a
+        browser session's start_adventure call mints a player_id (see web.py's POST /chat),
+        so a LATER redeploy that wipes chat_sessions._sessions still lets this same browser
+        resume the same character (chat_sessions._resume_from_durable_store reads this back).
+        Safe to call again on a session_id already seen via touch_web_session below (e.g. the
+        bare row that call creates before any character exists yet) -- upserts in place
+        rather than clobbering created_at/message_count."""
+        now = time.time()
+        self._c.execute(
+            "INSERT INTO web_session (session_id, player_id, campaign_id, created_at, last_seen, message_count)"
+            " VALUES (?,?,?,?,?,0)"
+            " ON CONFLICT(session_id) DO UPDATE SET player_id=excluded.player_id,"
+            " campaign_id=excluded.campaign_id, last_seen=excluded.last_seen",
+            (session_id, player_id, campaign_id, now, now),
+        )
+        self._c.commit()
+
+    def touch_web_session(self, session_id: str) -> int:
+        """Record one turn against this browser session: last_seen=now, message_count+=1 --
+        creates a bare row (player_id/campaign_id still NULL) the first time this session_id
+        is ever seen, e.g. a brand-new cookie whose very first message hasn't reached
+        start_adventure yet. Returns the NEW message_count -- this is what web.py's POST
+        /chat checks against the per-session lifetime cap (chat_sessions.session_cap_exceeded);
+        living in SQLite instead of the in-memory chat_sessions store is exactly what lets
+        that cap survive a redeploy rather than silently resetting to 0."""
+        now = time.time()
+        self._c.execute(
+            "INSERT INTO web_session (session_id, player_id, campaign_id, created_at, last_seen, message_count)"
+            " VALUES (?,NULL,NULL,?,?,1)"
+            " ON CONFLICT(session_id) DO UPDATE SET last_seen=excluded.last_seen,"
+            " message_count=web_session.message_count+1",
+            (session_id, now, now),
+        )
+        self._c.commit()
+        row = self._c.execute(
+            "SELECT message_count FROM web_session WHERE session_id=?", (session_id,)
+        ).fetchone()
+        return row["message_count"] if row else 0
 
     def snapshot(self, player_id: str) -> dict:
         """Full inspectable state for one player — the 'world remembers' proof. Dict-shaped at
