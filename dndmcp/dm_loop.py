@@ -115,6 +115,21 @@ a browser chat window. RULES, absolute:
 """
 
 
+# Pre-adventure "intake" mode (see handle_message): shown INSTEAD of SYSTEM_PROMPT while the
+# session has no character. Deliberately contains ZERO scenery vocabulary — observed live: the
+# 7B parroted SYSTEM_PROMPT's own exit-descriptor examples ("a warped iron door," "a spiral
+# stair") into a fully hallucinated room for a character that didn't exist yet. An instruction
+# not to invent scenery loses to in-context examples OF scenery; the fix is a prompt with
+# nothing to parrot, paired with a tool list where start_adventure is the only option.
+INTAKE_PROMPT = """You are the host welcoming a new player to a tabletop RPG, in a browser \
+chat. No game exists for this player yet — there are no rooms, no exits, no scenes, and \
+describing any is an error. Your only job: learn a short theme (e.g. 'gothic horror', \
+'deep-space salvage') and a character name + class, offering to invent any of them if the \
+player would rather you pick, then IMMEDIATELY call start_adventure with what you have. If \
+the player leaves anything up to you, choose something evocative yourself and call the tool \
+without asking again. Keep replies to 1-3 friendly sentences."""
+
+
 def create_session(campaign_id: str = MAIN_CAMPAIGN_ID) -> "DMSession":
     """Factory for one browser session. campaign_id defaults to the shared "main" world per
     this task's scope (browser sessions join the shared world for now — world-choice UI is a
@@ -266,6 +281,11 @@ TOOLS: list[dict] = [
             "note": {"type": "string"},
         }, "required": ["note"]}}},
 ]
+
+# Intake mode's entire tool surface: start_adventure alone. Paired with INTAKE_PROMPT (see
+# its comment) — a session with no character can't call move/attack/look because those tools
+# simply don't exist for it, which is a harder guarantee than any instruction.
+INTAKE_TOOLS: list[dict] = [t for t in TOOLS if t["function"]["name"] == "start_adventure"]
 
 
 # --- result sanitization -------------------------------------------------------------------
@@ -578,6 +598,30 @@ def _truncate_history(messages: list[dict]) -> list[dict]:
     return system + kept
 
 
+def _state_line(session: DMSession) -> str:
+    """One authoritative sentence of server-known session state, refreshed every turn (see
+    handle_message). The model must never have to infer whether an adventure exists, who the
+    character is, or whether they're alive — the server knows all three for free."""
+    if not session.player_id:
+        return ("[SERVER STATE] No character exists for this session yet. There are NO rooms, "
+                "exits, or scenes — do NOT describe or invent any. Your ONLY valid opening: "
+                "ask for a theme + character name/class (or offer to invent them), then call "
+                "start_adventure. Every other tool will fail until then.")
+    ch = server.world.character(session.player_id)
+    if not ch:
+        return ("[SERVER STATE] This session's character no longer exists (world was reset). "
+                "Treat as no character: offer to start_adventure a new one; invent nothing.")
+    if ch.hp <= 0:
+        return (f"[SERVER STATE] {ch.name} the {ch.klass} is DEAD (0 HP). Action tools will "
+                f"refuse. Narrate the aftermath if asked, and offer start_adventure for a "
+                f"new character.")
+    room = server.world.room(ch.location_id)
+    where = room.name if room else "an unknown place"
+    return (f"[SERVER STATE] Playing {ch.name} the {ch.klass}, HP {ch.hp}/{ch.max_hp}, "
+            f"currently in {where}. Narrate ONLY from tool results, never from memory of "
+            f"rooms not returned by a tool this session.")
+
+
 async def handle_message(session: DMSession, user_text: str) -> AsyncIterator[dict]:
     """Run one full player turn.
 
@@ -596,14 +640,33 @@ async def handle_message(session: DMSession, user_text: str) -> AsyncIterator[di
     forever against a model that can't recover, and returns whatever text the model already
     produced (often none, alongside a bad tool_calls message) or a safe in-character line.
     """
+    # SERVER-KNOWN STATE, injected fresh every turn — never model-inferred. Observed live
+    # without this: a fresh session asked "I want to go to the next room" got a fully
+    # HALLUCINATED room ("a sturdy wooden door to the north...") for a character that did
+    # not exist — the model had no in-context signal for "has an adventure started?", so it
+    # guessed, and guessed wrong. The server always knows; tell it. Old state lines are
+    # removed first so exactly one (current) line exists regardless of turn count.
+    session.messages = [m for m in session.messages
+                        if not (m.get("role") == "system"
+                                and str(m.get("content", "")).startswith("[SERVER STATE]"))]
+    session.messages.append({"role": "system", "content": _state_line(session)})
     session.messages.append({"role": "user", "content": user_text})
     tool_call_count = 0
     malformed_count = 0
 
     while True:
         session.messages = _truncate_history(session.messages)
+        # Intake mode while no character exists: swap in the scenery-free INTAKE_PROMPT
+        # (session.messages[0] is always the stored SYSTEM_PROMPT — swapped at CALL time
+        # only, the stored history keeps its real prompt) and offer start_adventure as the
+        # ONLY tool. The moment start_adventure lands mid-turn, session.player_id is set and
+        # the very next loop iteration proceeds in full DM mode with the full tool list.
+        in_intake = not session.player_id
+        call_messages = ([{"role": "system", "content": INTAKE_PROMPT}] + session.messages[1:]
+                         if in_intake else session.messages)
+        tools = (INTAKE_TOOLS if in_intake else TOOLS)
         try:
-            message = await _chat(session.messages, TOOLS)
+            message = await _chat(call_messages, tools)
         except Exception:
             logger.exception("dm_loop.handle_message: chat completion failed")
             yield {"type": "text",
