@@ -9,6 +9,10 @@ plumbing) rather than duplicated.
 
 Off by default (DND_FLASH_ART!=1) → callers fall back to the ASCII placeholder, so the game
 always works. Independent of DND_FLASH_LLM — art and world-gen toggle separately.
+
+enabled() also consults admin_flags — an SSH-side kill switch (scripts/pod_set_flag.sh) that
+takes effect with no restart, for backing this out fast if something goes wrong close to a
+deadline. DND_FLASH_ART is just the default; admin_flags can override it live either way.
 """
 
 from __future__ import annotations
@@ -16,13 +20,24 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import logging
 import os
 import urllib.request
 
-from . import flash_llm
+from . import admin_flags, flash_llm
 
-ENABLED = os.environ.get("DND_FLASH_ART", "0") == "1"
-IMAGE = "runpod/sdxl-turbo:latest"
+logger = logging.getLogger(__name__)
+
+_ENV_DEFAULT_ENABLED = os.environ.get("DND_FLASH_ART", "0") == "1"
+
+
+def enabled() -> bool:
+    return admin_flags.enabled("flash_art", default=_ENV_DEFAULT_ENABLED)
+# runpod/sdxl-turbo has exactly one published tag on Docker Hub — "dev" (there is no
+# "latest"). Deploying against ":latest" 400s with "Container image ... was not found on
+# the registry" every time — confirmed live, not a hypothetical. See
+# https://hub.docker.com/r/runpod/sdxl-turbo/tags
+IMAGE = "runpod/sdxl-turbo:dev"
 ENDPOINT_NAME = "dnd-art-sdxl-turbo"
 
 _STATE = {"endpoint_id": None}
@@ -86,7 +101,7 @@ async def generate_image(prompt: str, *, negative_prompt: str = "", width: int =
                          seed: int | None = None) -> bytes | None:
     """Generate via Flash (real SDXL-Turbo). Returns raw PNG bytes, or None (-> caller falls
     back to the ASCII placeholder) if disabled/error."""
-    if not ENABLED:
+    if not enabled():
         return None
     try:
         endpoint_id = await ensure()
@@ -97,11 +112,19 @@ async def generate_image(prompt: str, *, negative_prompt: str = "", width: int =
         loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(None, _runsync, endpoint_id, payload)
         if result.get("status") != "COMPLETED":
+            logger.warning("flash_art.generate_image: job status %r (not COMPLETED), "
+                           "falling back to placeholder", result.get("status"))
             return None
-        data_url = result["output"]["images"][0]["image"]
+        # worker-sdxl-turbo's actual response shape is `output`: a bare base64 PNG string
+        # (optionally data-URL-prefixed) — NOT the {"images": [{"image": ...}]} wrapper an
+        # earlier version of this code assumed (confirmed live: that assumption silently
+        # 500'd every real generation into the except below, with zero visible signal that
+        # art was ever "working" end-to-end until someone went and read the raw response).
+        data_url = result["output"]
         b64 = data_url.split(",", 1)[1] if data_url.startswith("data:") else data_url
         return base64.b64decode(b64)
     except Exception:
+        logger.warning("flash_art.generate_image: failed, falling back to placeholder", exc_info=True)
         return None
 
 

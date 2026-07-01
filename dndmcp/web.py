@@ -13,6 +13,7 @@ import datetime
 import html
 import json
 import os
+import re
 import subprocess
 import sqlite3
 import time
@@ -549,12 +550,15 @@ function centerOn(d){
 function showRoomInfo(d){
   const el = document.getElementById('roomInfo');
   if(!d.discovered){ el.innerHTML = '<span class=empty>??? — not discovered yet</span>'; return; }
+  const img = d.image_ref
+    ? `<img src="/art/${encodeURIComponent(d.image_ref)}.png" style="width:100%;border-radius:6px;image-rendering:pixelated">`
+    : '';
   const feats = (d.features||[]).map(f => `<div>• ${esc(f)}</div>`).join('');
   const monsters = (d.contents||[]).filter(c=>c.type==='monster')
     .map(c => `<div>⚔ ${esc(c.name)} (HP ${c.hp})</div>`).join('');
   const loot = (d.contents||[]).filter(c=>c.type==='loot')
     .map(c => `<div>✦ ${esc(c.name)}</div>`).join('');
-  el.innerHTML = `<b>${esc(d.name)}</b><br><span>${esc(d.description||'')}</span>${feats}${monsters}${loot}`;
+  el.innerHTML = `${img}<b>${esc(d.name)}</b><br><span>${esc(d.description||'')}</span>${feats}${monsters}${loot}`;
 }
 
 const simulation = d3.forceSimulation()
@@ -623,6 +627,7 @@ function renderGraph(rooms, players, you){
    const n = nodesById[r.id];
    n.name = r.name; n.visited = r.visited; n.discovered = r.discovered;
    n.description = r.description; n.features = r.features; n.contents = r.contents;
+   n.image_ref = r.image_ref;
    n.mine = you && r.id===you.location_id;
    n.count = (occupants[r.id]||[]).length;
  }
@@ -921,6 +926,29 @@ def install_script() -> Response:
     return Response(content=content, media_type="text/x-shellscript")
 
 
+# Room ids (which double as art cache refs — see server.py's _prefetch_room_art, ref=dest_id)
+# only ever contain lowercase letters, digits, ':', '.', '-' by this codebase's own convention
+# (e.g. "r0", "r0:north", "<campaign_id>:r0:north"). `ref` below comes straight off the URL
+# path, so it's validated against exactly that charset before ever touching the filesystem —
+# this is what rules out "/" and ".." path-traversal, not a blocklist of those specifically.
+_ART_REF_RE = re.compile(r"^[a-z0-9:.\-]+$")
+
+
+@app.get("/art/{ref}.png")
+def art_image(ref: str) -> Response:
+    """Serves a GPU-generated room image cached by dndmcp/art.py's prefetch() at
+    $DNDMCP_STATE_DIR/art/{ref}.png. 404s if disabled/not-yet-generated/never requested (same
+    "art always optional" contract as the rest of the art layer) or if `ref` fails the
+    charset check above."""
+    if "/" in ref or ".." in ref or not _ART_REF_RE.match(ref):
+        return Response(status_code=404)
+    state_dir = os.environ.get("DNDMCP_STATE_DIR", os.path.expanduser("~/.dndmcp"))
+    path = Path(state_dir) / "art" / f"{ref}.png"
+    if not path.is_file():
+        return Response(status_code=404)
+    return Response(content=path.read_bytes(), media_type="image/png")
+
+
 _EMPTY_STATE = {"rooms": [], "players": [], "character": None, "you": None, "current_room": None, "log": [], "quests": [], "flash_calls": 0, "campaign": None, "server_version": SERVER_VERSION}
 
 
@@ -967,6 +995,7 @@ def state(request: Request) -> JSONResponse:
                           "features": json.loads(r["features"] or "[]"),
                           "contents": json.loads(r["contents"] or "[]"),
                           "visited": bool(r["visited"]), "discovered": discovered,
+                          "image_ref": r["image_ref"],
                           "exits": exits_by_room.get(r["id"], {})})  # {direction: dest_room_id}
         # player_id IS the game's bearer credential -- server.py trusts it directly as the
         # only auth for move/attack/drop_item/delete_world/etc, no separate token or session.
@@ -1016,7 +1045,7 @@ def state(request: Request) -> JSONResponse:
         # by-default convention /metrics and /flash-calls use with no ?campaign= given).
         flash_calls = c.execute(
             "SELECT COUNT(*) FROM log"
-            " WHERE kind IN ('room.generated','entity.spawned','npc.talked','item.picked_up','story.exported')"
+            " WHERE kind IN ('room.generated','entity.spawned','npc.talked','item.picked_up','story.exported','art.generated')"
             " AND text LIKE '%(flash)%'"
         ).fetchone()[0]
         return JSONResponse({"rooms": rooms, "players": players, "character": char,
@@ -1172,11 +1201,11 @@ def metrics_page(request: Request) -> str:
         unique_ips = c.execute(
             f"SELECT COUNT(DISTINCT ip) FROM log {where_camp}"
             f" {'AND' if where_camp else 'WHERE'} ip IS NOT NULL", camp_args).fetchone()[0]
-        # Same three-kind Flash definition /state's header counter and /flash-calls use.
+        # Same Flash-kind definition /state's header counter and /flash-calls use.
         flash_calls = c.execute(
             f"SELECT COUNT(*) FROM log {where_camp}"
             f" {'AND' if where_camp else 'WHERE'} kind IN"
-            " ('room.generated','entity.spawned','npc.talked','item.picked_up','story.exported')"
+            " ('room.generated','entity.spawned','npc.talked','item.picked_up','story.exported','art.generated')"
             " AND text LIKE '%(flash)%'", camp_args).fetchone()[0]
         by_kind = c.execute(
             f"SELECT kind, COUNT(*) AS n FROM log {where_camp} GROUP BY kind ORDER BY n DESC LIMIT 20",
