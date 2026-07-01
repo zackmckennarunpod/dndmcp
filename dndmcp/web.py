@@ -126,16 +126,23 @@ function renderGraph(rooms, players, you){
  }
  for(const r of rooms){
    const n = nodesById[r.id];
-   n.name = r.name; n.visited = r.visited;
+   n.name = r.name; n.visited = r.visited; n.discovered = r.discovered;
    n.mine = you && r.id===you.location_id;
    n.count = (occupants[r.id]||[]).length;
  }
  const nodes = rooms.map(r => nodesById[r.id]);
 
+ // No persistent name labels on the graph — declutters it into a real "fog of war" map.
+ // Discovered rooms reveal their name on HOVER only (native SVG <title> tooltip, zero extra
+ // JS/DOM for the tooltip itself); undiscovered rooms show "???" outright, since there's no
+ // secret being protected there, just "you haven't been here yet." "You are here" is already
+ // conveyed by the gold node color + the header's "You are in: ..." line, so the graph node
+ // itself doesn't need its own always-visible label for that either.
  const nodeSel = nodeLayer.selectAll('g.node').data(nodes, d=>d.id)
    .join(enter => {
      const g = enter.append('g').attr('class','node');
      g.append('circle').attr('r',16).attr('stroke-width',2);
+     g.append('title');
      g.append('text').attr('class','label').attr('y',30).attr('text-anchor','middle')
        .attr('fill','#7d8794').attr('font-size',10);
      g.append('text').attr('class','count').attr('y',4).attr('text-anchor','middle')
@@ -145,7 +152,8 @@ function renderGraph(rooms, players, you){
  nodeSel.select('circle')
    .attr('fill', d=> d.mine ? '#f5a524' : (d.visited ? '#3b82f6' : '#1f2937'))
    .attr('stroke', d=> d.mine ? '#fcd34d' : '#475569');
- nodeSel.select('text.label').text(d=>d.name.slice(0,18));
+ nodeSel.select('title').text(d=> d.discovered ? d.name : '???');
+ nodeSel.select('text.label').text(d=> d.discovered ? '' : '???');
  nodeSel.select('text.count').text(d=> d.count ? d.count : '');
 
  // IMPORTANT: link objects' source/target start as plain id STRINGS. d3-force only rewrites
@@ -270,10 +278,23 @@ def state(request: Request) -> JSONResponse:
         ).fetchall():
             exits_by_room.setdefault(e["from_id"], {})[e["edge_type"]] = e["to_id"]
 
+        # Per-VIEWING-PLAYER discovery, not the global `visited` flag — a room another player
+        # generated/visited isn't "known" to you until you've actually been there yourself
+        # (character--discovered-->room edge, same mechanism server.py's _adjacent_rooms uses
+        # to gate spoilers). Spectating with no ?player= has no "you" to gate against, so fall
+        # back to the global flag (anyone-has-visited) rather than blanking the whole map.
+        discovered_ids: set[str] | None = None
+        if player_id:
+            discovered_ids = {row["to_id"] for row in c.execute(
+                "SELECT to_id FROM edges WHERE from_type='character' AND from_id=?"
+                " AND to_type='room' AND edge_type='discovered'", (player_id,)
+            ).fetchall()}
+
         rooms = []
         for r in c.execute("SELECT * FROM rooms WHERE campaign_id=?", (campaign_id,)).fetchall():
+            discovered = (r["id"] in discovered_ids) if discovered_ids is not None else bool(r["visited"])
             rooms.append({"id": r["id"], "name": r["name"],
-                          "visited": bool(r["visited"]),
+                          "visited": bool(r["visited"]), "discovered": discovered,
                           "exits": exits_by_room.get(r["id"], {})})  # {direction: dest_room_id}
         players = [{"player_id": p["player_id"], "name": p["name"], "location_id": p["location_id"]}
                    for p in c.execute(
