@@ -360,3 +360,31 @@ async def generate_npc_response(npc: dict, theme: str, room_context: str, messag
     if gen:
         return {"text": gen.strip().strip('"'), "via": "flash"}
     return {"text": f"{npc['name']} regards you, giving nothing away.", "via": "procedural"}
+
+
+def _story_messages(character_name: str, klass: str, theme: str, premise: str,
+                    timeline_text: str) -> list[dict]:
+    system = (f"{setting.GEN_BRIEF}\n\n"
+              f"You are writing the finished chronicle of one player's journey through a "
+              f"{theme} dungeon crawl in this setting, for them to keep afterward. You are "
+              f"given a raw timeline of what ACTUALLY happened, in order — turn it into a "
+              f"well-written short story in Markdown (use a title and a few section headers). "
+              f"Stay grounded in the real events: don't invent characters, items, or outcomes "
+              f"that aren't in the timeline, and don't skip the ending just because the "
+              f"timeline does — end wherever it currently leaves off, as a chapter break, not "
+              f"a forced conclusion. Reply with the Markdown story only, nothing else.")
+    user = (f"Character: {character_name}, a {klass}.\nWorld premise: {premise}\n\n"
+            f"Timeline of real events (chronological):\n{timeline_text}\n\n"
+            f"Write their story so far as Markdown.")
+    return [{"role": "system", "content": system}, {"role": "user", "content": user}]
+
+
+async def generate_story(character_name: str, klass: str, theme: str, premise: str,
+                         timeline_text: str) -> str | None:
+    """Synthesize a whole markdown story from a player's real event timeline (see
+    web.py's /export_story). Returns None if Flash is off/errors — caller falls back to a
+    plain procedural listing of the same timeline, same reliability-first pattern as
+    everything else in this module. Needs more headroom than a single room/line of dialogue
+    (this is a whole narrative), hence the much larger max_tokens."""
+    messages = _story_messages(character_name, klass, theme, premise, timeline_text)
+    return await flash_llm.generate(messages, max_tokens=1600, temperature=0.85)

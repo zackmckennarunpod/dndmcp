@@ -16,8 +16,10 @@ import sqlite3
 from pathlib import Path
 
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from sse_starlette.sse import EventSourceResponse
+
+from . import worldgen
 
 app = FastAPI(title="DNDMCP map")
 
@@ -137,7 +139,7 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
  <summary>🎲 Connect &amp; play — anyone can join, no account needed</summary>
  <div class=body>
   <p><b>1. Connect your agent</b> — pick whichever you use:</p>
-  <div class=codebox><code id=codeCC>curl -fsSL https://raw.githubusercontent.com/zackmckennarunpod/dndmcp/main/scripts/install_claude_code.sh | bash</code><button class=copyCodeBtn data-target=codeCC>Copy</button></div>
+  <div class=codebox><code id=codeCC>curl -fsSL https://ldghdgi0xxn6jj-8002.proxy.runpod.net/install.sh | bash</code><button class=copyCodeBtn data-target=codeCC>Copy</button></div>
   <p class=sub style="margin:6px 0 14px">↑ <b>Claude Code</b> — one command, installs dndmcp pointed at this exact live shared world.</p>
   <div class=codebox><pre id=codeCD>{
   "mcpServers": {
@@ -189,7 +191,8 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
  <div class=panel><h2>World map (shared, live)</h2><div class=sub id=whereInMap style="margin-bottom:8px">—</div><div id=map><span id=mapEmpty class=empty>no adventure yet — start one in your agent</span><div id=nodeTooltip></div></div></div>
  <aside style="display:flex;flex-direction:column;gap:16px">
   <div class=panel><h2>This world</h2><div class=ch id=worldInfo>—</div></div>
-  <div class=panel><h2>Character</h2><div class=ch id=char>—</div></div>
+  <div class=panel><h2>Character</h2><div class=ch id=char>—</div>
+   <button id=exportStoryBtn style="margin-top:10px;width:100%">📜 Export story</button></div>
   <div class=panel><h2>Selected room</h2><div class=ch id=roomInfo><span class=empty>click a room on the map</span></div></div>
   <div class=panel><h2>Recent</h2><div class=log id=log></div></div>
  </aside>
@@ -220,6 +223,33 @@ document.querySelectorAll('.copyCodeBtn').forEach(btn => {
     btn.classList.add('copied');
     setTimeout(() => { btn.textContent = original; btn.classList.remove('copied'); }, 1500);
   });
+});
+
+// Export story: /export_story runs this player's real event timeline through Flash to
+// synthesize a markdown narrative — can take a while (LLM call, possibly a cold start), so
+// the button shows real progress instead of looking hung.
+document.getElementById('exportStoryBtn').addEventListener('click', async () => {
+  const btn = document.getElementById('exportStoryBtn');
+  if (!playerId) { alert('Open this page with ?player=<your id> in the URL to export your own story.'); return; }
+  const original = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '📜 Writing your story… (can take up to a minute)';
+  try{
+    const r = await fetch('/export_story?campaign='+encodeURIComponent(campaignId)+'&player='+encodeURIComponent(playerId));
+    if(!r.ok){ const err = await r.json().catch(()=>({})); throw new Error(err.error || 'export failed'); }
+    const blob = await r.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'dndmcp-story.md';
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+  }catch(e){
+    alert('Could not export the story: ' + e.message);
+  }finally{
+    btn.disabled = false;
+    btn.textContent = original;
+  }
 });
 
 // own agent to call start_adventure(campaign_id=...), this GUI is spectator-only. "main"
@@ -607,6 +637,23 @@ def index() -> str:
     return PAGE
 
 
+@app.get("/install.sh")
+def install_script() -> Response:
+    """Serves scripts/install_claude_code.sh straight from this pod's own checkout.
+
+    The dndmcp GitHub repo is PRIVATE (verified) — raw.githubusercontent.com 404s for anyone
+    without repo access, which silently breaks the curl-install one-liner for literally
+    everyone except the repo owner. The pod already has this exact file on disk; serving it
+    here means the same one-liner works for any judge/player, no GitHub auth needed, and it
+    can never drift from what's actually deployed (same checkout redeploy_pod.sh updates)."""
+    script_path = Path(__file__).parent.parent / "scripts" / "install_claude_code.sh"
+    try:
+        content = script_path.read_text()
+    except FileNotFoundError:
+        content = "echo 'install script not found on this pod' >&2\nexit 1\n"
+    return Response(content=content, media_type="text/x-shellscript")
+
+
 _EMPTY_STATE = {"rooms": [], "players": [], "character": None, "you": None, "current_room": None, "log": [], "flash_calls": 0, "campaign": None, "server_version": SERVER_VERSION}
 
 
@@ -696,6 +743,50 @@ def state(request: Request) -> JSONResponse:
         return JSONResponse(_EMPTY_STATE)
     finally:
         c.close()
+
+
+@app.get("/export_story")
+async def export_story(request: Request):
+    """One player's real event timeline, synthesized into a markdown story via Flash
+    (worldgen.generate_story) — falls back to a plain chronological listing of the same
+    timeline if Flash is off/errors, same reliability-first pattern as everything else
+    (this always produces SOMETHING downloadable, just less polished without a model)."""
+    campaign_id = request.query_params.get("campaign") or "main"
+    player_id = request.query_params.get("player")
+    if not player_id:
+        return JSONResponse({"error": "?player=<id> is required to export a story"}, status_code=400)
+    c = _db()
+    try:
+        char = c.execute("SELECT * FROM character WHERE player_id=?", (player_id,)).fetchone()
+        if not char:
+            return JSONResponse({"error": "unknown player"}, status_code=404)
+        camp = c.execute("SELECT * FROM campaigns WHERE id=?", (campaign_id,)).fetchone()
+        # This player's own actions, PLUS world-level events with no player_id (room.generated
+        # etc.) that happened in this campaign — not other players' actions, this is THEIR
+        # story, not the whole world's. Chronological via seq (monotonic insert order).
+        events = c.execute(
+            "SELECT ts, kind, text FROM log WHERE campaign_id=? AND (player_id=? OR player_id IS NULL)"
+            " ORDER BY seq ASC", (campaign_id, player_id),
+        ).fetchall()
+    finally:
+        c.close()
+
+    theme = camp["theme"] if camp else "adventure"
+    premise = camp["premise"] if camp else ""
+    timeline_lines = [f"- {e['text']}" for e in events] or ["- (nothing has happened yet)"]
+    timeline_text = "\n".join(timeline_lines)
+
+    markdown = await worldgen.generate_story(char["name"], char["klass"], theme, premise, timeline_text)
+    via = "flash"
+    if not markdown:
+        via = "procedural"
+        markdown = (f"# {char['name']}'s Story\n\n*A {char['klass']} in a {theme} world.*\n\n"
+                   f"{premise}\n\n## Timeline\n\n{timeline_text}\n")
+
+    safe_name = "".join(ch for ch in char["name"] if ch.isalnum() or ch in " -_").strip() or "story"
+    return Response(content=markdown, media_type="text/markdown; charset=utf-8",
+                    headers={"Content-Disposition": f'attachment; filename="{safe_name}.md"',
+                             "X-Story-Via": via})
 
 
 @app.get("/stream/events")
