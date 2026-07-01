@@ -354,7 +354,8 @@ async def start_adventure(theme: str = "gothic horror", character_name: str = "W
                               f"seeking what others feared to find.")
         camp = world.create_campaign(target_id, theme=theme, premise=premise, start_room=start_id)
         gen = await worldgen.generate_room_content(start_id, theme, salt=camp.salt, premise=camp.premise)
-        await _maybe_spawn_entity_persona(gen, start_id, theme, [], campaign_id=target_id)  # no neighbors yet
+        await _maybe_spawn_entity_persona(gen, start_id, theme, [], campaign_id=target_id,
+                                          premise=camp.premise)  # no neighbors yet
         world.upsert_room(room_id=start_id, campaign_id=target_id, name=gen["name"],
                           description=gen["description"], exits=gen["exits"],
                           contents=gen["contents"], features=gen.get("features"),
@@ -467,6 +468,7 @@ def _spawn_phrase(name: str, kind: str) -> str:
 
 async def _maybe_spawn_entity_persona(new_room: dict, dest_id: str, theme: str,
                                       nearby_room_ids: list[str], *, campaign_id: str,
+                                      premise: str = "",
                                       nearby: list[tuple[str, str]] | None = None,
                                       recent_events: list[str] | None = None,
                                       deadline_s: float | None = None) -> None:
@@ -492,7 +494,8 @@ async def _maybe_spawn_entity_persona(new_room: dict, dest_id: str, theme: str,
     persona = await worldgen.generate_npc_persona(
         mon, theme, new_room["name"], new_room.get("kind", ""), new_room["description"],
         nearby=nearby, recent_events=recent_events,
-        existing_names=world.entity_names_in(campaign_id), deadline_s=deadline_s)
+        existing_names=world.entity_names_in(campaign_id), deadline_s=deadline_s,
+        premise=premise)
     mon["name"] = persona["name"]
     world.upsert_entity(entity_id=mon["id"], campaign_id=campaign_id, kind=kind,
                         name=persona["name"], location_id=dest_id,
@@ -525,11 +528,15 @@ async def _generate_and_link(dest_id: str, theme: str, campaign_id: str, salt: s
     # everyone's recent actions, including the very player who's about to walk through.
     recent_events = [_anonymized(e) for e in world.recent_log(
         5, campaign_id=campaign_id, subject_type="room", subject_id=back_to_id)]
+    # The origin room itself — _nearby_region excludes it (BFSes outward from it), yet it's
+    # the single most relevant tonal anchor: the room whose doorway is being stepped through.
+    origin = world.room(back_to_id)
     new_room = await worldgen.generate_room_content(
         dest_id, theme, entry_from=entry_from, nearby=nearby, recent_events=recent_events,
         salt=salt, premise=premise,
         existing_names=[name for _, name, _ in world.room_ids_in(campaign_id)],
-        deadline_s=deadline_s)
+        deadline_s=deadline_s,
+        entry_room=(origin.name, origin.kind) if origin else None)
     new_room["exits"][game.opposite_of(entry_from)] = back_to_id
     # Whatever's left of the budget after room-content generation (which can itself burn the
     # whole thing across retries) is what the persona call gets — never a fresh full budget,
@@ -537,6 +544,7 @@ async def _generate_and_link(dest_id: str, theme: str, campaign_id: str, salt: s
     persona_deadline = (max(deadline_s - (time.monotonic() - start), 0.0)
                         if deadline_s is not None else None)
     await _maybe_spawn_entity_persona(new_room, dest_id, theme, [rid for _, _, rid in nearby_full],
+                                      premise=premise,
                                       campaign_id=campaign_id, nearby=nearby,
                                       recent_events=recent_events, deadline_s=persona_deadline)
     world.upsert_room(room_id=dest_id, campaign_id=campaign_id, name=new_room["name"],
@@ -852,7 +860,8 @@ async def pick_up_item(player_id: str, item_id: str | None = None,
         # keeping the pre-seeded name rather than whatever name it might also return.
         camp = _require_campaign(ch.campaign_id)
         flavor = await worldgen.generate_item_content(match["name"], camp.theme,
-                                                       room_context=room.description)
+                                                       room_context=room.description,
+                                                       premise=camp.premise)
         desc = flavor.get("description", "")
         world.add_item(player_id, {"id": match.get("id") or uuid.uuid4().hex[:8],
                                    "name": match["name"], "description": desc})
@@ -870,7 +879,8 @@ async def pick_up_item(player_id: str, item_id: str | None = None,
     # Not pre-seeded loot — ask the world-builder (same procedural+Flash pattern as room-gen)
     # to adjudicate plausibility and flesh out what it actually is.
     camp = _require_campaign(ch.campaign_id)
-    item = await worldgen.generate_item_content(item_name, camp.theme, room_context=room.description)
+    item = await worldgen.generate_item_content(item_name, camp.theme, room_context=room.description,
+                                                premise=camp.premise)
     if not item["portable"]:
         reason = f" ({item['reason']})" if item.get("reason") else ""
         return f"You can't take that{reason}."
@@ -954,7 +964,8 @@ async def talk_to(player_id: str, message: str, npc_name: str | None = None) -> 
         gen = await worldgen.generate_npc_persona(npc, camp.theme, room.name, room.kind,
                                                   room.description, nearby=nearby,
                                                   recent_events=recent_events,
-                                                  existing_names=world.entity_names_in(ch.campaign_id))
+                                                  existing_names=world.entity_names_in(ch.campaign_id),
+                                                  premise=camp.premise)
         npc["name"] = gen["name"]
         ent = world.upsert_entity(entity_id=npc["id"], campaign_id=ch.campaign_id, kind=kind,
                                   name=gen["name"], location_id=room.id,
@@ -967,7 +978,9 @@ async def talk_to(player_id: str, message: str, npc_name: str | None = None) -> 
     npc_for_llm = {**npc, "persona": ent.persona, "goal": ent.goal,
                   "disposition": ent.disposition, "conversation": ent.memory}
     result = await worldgen.generate_npc_response(npc_for_llm, camp.theme, room.description,
-                                                  message, recent_events=recent_events)
+                                                  message, recent_events=recent_events,
+                                                  premise=camp.premise,
+                                                  speaker=f"{ch.name}, a {ch.klass}")
     world.append_entity_memory(ent.id, "player", message)
     world.append_entity_memory(ent.id, "npc", result["text"])
     world.log("npc.talked",
@@ -1074,7 +1087,8 @@ if os.environ.get("DNDMCP_DEV_TOOLS") == "1":
         kind = mon["name"]  # SRD species name, captured before persona overwrites it
         persona = await worldgen.generate_npc_persona(mon, camp.theme, room.name, room.kind,
                                                       room.description,
-                                                      existing_names=world.entity_names_in(campaign_id))
+                                                      existing_names=world.entity_names_in(campaign_id),
+                                                      premise=camp.premise)
         mon["name"] = persona["name"]
         world.upsert_entity(entity_id=mon["id"], campaign_id=campaign_id, kind=kind,
                             name=persona["name"], location_id=room_id,
@@ -1101,7 +1115,8 @@ if os.environ.get("DNDMCP_DEV_TOOLS") == "1":
         room = world.room(room_id)
         if not room:
             return f'No room {room_id!r} in world {campaign_id!r}.'
-        item = await worldgen.generate_item_content(item_name, camp.theme, room_context=room.description)
+        item = await worldgen.generate_item_content(item_name, camp.theme, room_context=room.description,
+                                                    premise=camp.premise)
         loot = {"type": "loot", "id": item.get("id") or uuid.uuid4().hex[:8], "name": item["name"]}
         room.contents.append(loot)
         world.upsert_room(room_id=room_id, campaign_id=campaign_id, name=room.name,
