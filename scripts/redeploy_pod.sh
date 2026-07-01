@@ -1,16 +1,10 @@
 #!/usr/bin/env bash
 # Redeploy DNDMCP on the live pod: git pull latest main, restart the app process.
-# Usage: scripts/redeploy_pod.sh <ssh_host> <ssh_port>
-# (host/port come from the pod's "SSH over exposed TCP" panel in the Runpod console —
-# they can change if the pod restarts, so this isn't hardcoded.)
+# Auto-resolves the pod's current SSH host:port (changes across restarts) via pod_ssh.sh.
 set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-HOST="${1:?usage: redeploy_pod.sh <host> <port>}"
-PORT="${2:?usage: redeploy_pod.sh <host> <port>}"
-KEY="${DNDMCP_SSH_KEY:-$HOME/.ssh/id_ed25519}"
-
-ssh -o StrictHostKeyChecking=accept-new -i "$KEY" -p "$PORT" root@"$HOST" bash -s <<'REMOTE'
-set -e
+"$SCRIPT_DIR/pod_ssh.sh" run '
 cd /app
 echo "--- git pull ---"
 git pull origin main
@@ -26,4 +20,4 @@ sleep 3
 echo "--- status ---"
 pgrep -af "dndmcp.app" || echo "FAILED TO START"
 tail -20 /tmp/dndmcp.log
-REMOTE
+'
