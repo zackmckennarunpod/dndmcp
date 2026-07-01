@@ -1100,51 +1100,69 @@ main{{padding:10px 20px}}
 
 @app.get("/metrics", response_class=HTMLResponse)
 def metrics_page(request: Request) -> str:
-    """System-wide counters for this world: event volume over time, unique players/IPs seen,
-    breakdown by event kind, and a per-player table (last seen, last IP, event count). All
-    derived from the existing `log`/`character` tables via aggregate queries — no new table,
-    same "just use what's there more fully" approach as the rest of EVENT_STREAM_SPEC.md.
+    """System-wide counters. With no ?campaign=, this is the SERVER-WIDE root: every world,
+    every character across all of them (with alive/dead status), not just "main" — a bare
+    /metrics link used to silently default to one world, which made every OTHER world's
+    activity invisible. Pass ?campaign=X (what the per-world header Metrics button does) to
+    scope back down to one world's own counters/players/kind-breakdown, same as before.
+    All derived from the existing `log`/`character`/`campaigns` tables via aggregate queries —
+    no new table, same "just use what's there more fully" approach as EVENT_STREAM_SPEC.md.
     Hackathon-demo surface, not an ops dashboard: counters + plain tables, no charting lib."""
-    campaign_id = request.query_params.get("campaign") or "main"
+    campaign_id = request.query_params.get("campaign")
+    all_worlds = not campaign_id
+    where_camp = "" if all_worlds else "WHERE campaign_id=?"
+    camp_args = () if all_worlds else (campaign_id,)
     c = _db()
     try:
         total_events = c.execute(
-            "SELECT COUNT(*) FROM log WHERE campaign_id=?", (campaign_id,)).fetchone()[0]
+            f"SELECT COUNT(*) FROM log {where_camp}", camp_args).fetchone()[0]
         unique_players = c.execute(
-            "SELECT COUNT(DISTINCT player_id) FROM log WHERE campaign_id=? AND player_id IS NOT NULL",
-            (campaign_id,)).fetchone()[0]
+            f"SELECT COUNT(DISTINCT player_id) FROM log {where_camp}"
+            f" {'AND' if where_camp else 'WHERE'} player_id IS NOT NULL", camp_args).fetchone()[0]
         unique_ips = c.execute(
-            "SELECT COUNT(DISTINCT ip) FROM log WHERE campaign_id=? AND ip IS NOT NULL",
-            (campaign_id,)).fetchone()[0]
+            f"SELECT COUNT(DISTINCT ip) FROM log {where_camp}"
+            f" {'AND' if where_camp else 'WHERE'} ip IS NOT NULL", camp_args).fetchone()[0]
         # Same three-kind Flash definition /state's header counter and /flash-calls use.
         flash_calls = c.execute(
-            "SELECT COUNT(*) FROM log WHERE campaign_id=?"
-            " AND kind IN ('room.generated','entity.spawned','npc.talked','item.picked_up','story.exported')"
-            " AND text LIKE '%(flash)%'",
-            (campaign_id,)).fetchone()[0]
+            f"SELECT COUNT(*) FROM log {where_camp}"
+            f" {'AND' if where_camp else 'WHERE'} kind IN"
+            " ('room.generated','entity.spawned','npc.talked','item.picked_up','story.exported')"
+            " AND text LIKE '%(flash)%'", camp_args).fetchone()[0]
         by_kind = c.execute(
-            "SELECT kind, COUNT(*) AS n FROM log WHERE campaign_id=? GROUP BY kind ORDER BY n DESC LIMIT 20",
-            (campaign_id,)).fetchall()
+            f"SELECT kind, COUNT(*) AS n FROM log {where_camp} GROUP BY kind ORDER BY n DESC LIMIT 20",
+            camp_args).fetchall()
         hourly = c.execute(
-            "SELECT strftime('%Y-%m-%d %H:00', ts, 'unixepoch') AS bucket, COUNT(*) AS n"
-            " FROM log WHERE campaign_id=? AND ts >= ? GROUP BY bucket ORDER BY bucket ASC",
-            (campaign_id, time.time() - 86400)).fetchall()
+            f"SELECT strftime('%Y-%m-%d %H:00', ts, 'unixepoch') AS bucket, COUNT(*) AS n"
+            f" FROM log {where_camp} {'AND' if where_camp else 'WHERE'} ts >= ?"
+            " GROUP BY bucket ORDER BY bucket ASC",
+            (*camp_args, time.time() - 86400)).fetchall()
+        # hp<=0 is the only "dead" signal a player character has (see server.py's attack() —
+        # there's no separate is_dead flag, damage() just clamps hp at 0 and narrates it).
         players = c.execute(
-            "SELECT ch.player_id AS player_id, ch.name AS name, ch.klass AS klass,"
+            "SELECT ch.player_id AS player_id, ch.campaign_id AS campaign_id, ch.name AS name,"
+            " ch.klass AS klass, ch.hp AS hp, ch.max_hp AS max_hp,"
             " (SELECT COUNT(*) FROM log WHERE player_id=ch.player_id AND campaign_id=ch.campaign_id) AS events,"
             " (SELECT MAX(ts) FROM log WHERE player_id=ch.player_id AND campaign_id=ch.campaign_id) AS last_seen,"
             " (SELECT ip FROM log WHERE player_id=ch.player_id AND campaign_id=ch.campaign_id"
             "  AND ip IS NOT NULL ORDER BY seq DESC LIMIT 1) AS last_ip"
-            " FROM character ch WHERE ch.campaign_id=? ORDER BY last_seen DESC",
-            (campaign_id,)).fetchall()
+            f" FROM character ch {where_camp} ORDER BY last_seen DESC", camp_args).fetchall()
+        worlds = c.execute(
+            "SELECT cp.id AS id, cp.name AS name, cp.theme AS theme,"
+            " (SELECT COUNT(*) FROM rooms WHERE campaign_id=cp.id) AS rooms,"
+            " (SELECT COUNT(*) FROM character WHERE campaign_id=cp.id) AS characters,"
+            " (SELECT COUNT(*) FROM log WHERE campaign_id=cp.id) AS events"
+            " FROM campaigns cp ORDER BY cp.created_at DESC"
+        ).fetchall() if all_worlds else []
     except sqlite3.OperationalError:
         total_events = unique_players = unique_ips = flash_calls = 0
-        by_kind = hourly = players = []
+        by_kind = hourly = players = worlds = []
     finally:
         c.close()
 
     def ts_fmt(ts: float | None) -> str:
         return datetime.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S") if ts else "—"
+
+    dead_count = sum(1 for p in players if (p["hp"] or 0) <= 0)
 
     kind_rows = "".join(
         f'<div class=row><span class=kind>{html.escape(r["kind"])}</span>'
@@ -1158,24 +1176,51 @@ def metrics_page(request: Request) -> str:
         for r in hourly
     ) or '<div class=empty>No events in the last 24h.</div>'
 
+    def status_html(p: sqlite3.Row) -> str:
+        dead = (p["hp"] or 0) <= 0
+        cls = "dead" if dead else "alive"
+        label = "💀 Dead" if dead else "🟢 Alive"
+        return f'<span class=status-{cls}>{label} ({p["hp"]}/{p["max_hp"]} HP)</span>'
+
     player_rows = "".join(
         f'<div class=row><span class=who>{html.escape(p["player_id"][:8])}</span>'
         f'<span class=pname>{html.escape(p["name"] or "?")} <span class=muted>({html.escape(p["klass"] or "?")})</span></span>'
+        + (f'<span class=world><a href="/?campaign={html.escape(p["campaign_id"])}">{html.escape(p["campaign_id"])}</a></span>' if all_worlds else "")
+        + f'<span class=status>{status_html(p)}</span>'
         f'<span class=n>{p["events"]} events</span>'
         f'<span class=ip>{html.escape(p["last_ip"] or "—")}</span>'
         f'<span class=ts>{ts_fmt(p["last_seen"])}</span></div>'
         for p in players
     ) or '<div class=empty>No players yet.</div>'
 
-    return f"""<!doctype html><html><head><meta charset=utf-8><title>Metrics — {html.escape(campaign_id)}</title>
+    world_rows = "".join(
+        f'<div class=row><span class=world><a href="/metrics?campaign={html.escape(w["id"])}">{html.escape(w["id"])}</a></span>'
+        f'<span class=pname>{html.escape(w["name"] or w["theme"] or "?")}</span>'
+        f'<span class=n>{w["rooms"]} rooms</span>'
+        f'<span class=n>{w["characters"]} chars</span>'
+        f'<span class=n>{w["events"]} events</span></div>'
+        for w in worlds
+    ) or '<div class=empty>No worlds yet.</div>'
+
+    title = "All worlds" if all_worlds else campaign_id
+    worlds_card = (
+        f'<div class=card><div class=num>{len(worlds)}</div><div class=label>Worlds</div></div>'
+        if all_worlds else ""
+    )
+    worlds_section = (
+        f'<section><h2>Worlds</h2>{world_rows}</section>' if all_worlds else ""
+    )
+
+    return f"""<!doctype html><html><head><meta charset=utf-8><title>Metrics — {html.escape(title)}</title>
 <style>
 :root{{--bg:#0a0713;--panel:#150f24;--border:#2b2145;--border-soft:#221a38;--text:#e7e1f5;
-  --muted:#8d7fae;--warm:#e8b339;--warm-bright:#f5cc66;--ghost:#4fd8c4;--ghost-bright:#8ff0e0}}
+  --muted:#8d7fae;--warm:#e8b339;--warm-bright:#f5cc66;--ghost:#4fd8c4;--ghost-bright:#8ff0e0;
+  --bad:#e85d5d;--bad-bright:#ff8a8a}}
 body{{margin:0;background:var(--bg);color:var(--text);font:13px 'IBM Plex Mono',ui-monospace,Menlo,monospace}}
 header{{padding:14px 20px;border-bottom:1px solid var(--border);display:flex;gap:12px;align-items:baseline}}
 h1{{font-size:16px;margin:0;color:var(--warm-bright)}}
 .count{{color:var(--muted)}}
-main{{padding:14px 20px;max-width:820px}}
+main{{padding:14px 20px;max-width:960px}}
 .cards{{display:flex;gap:14px;margin-bottom:22px;flex-wrap:wrap}}
 .card{{background:var(--panel);border:1px solid var(--border);border-radius:6px;padding:12px 18px;min-width:130px}}
 .card .num{{font-size:22px;color:var(--ghost-bright);font-weight:600}}
@@ -1186,25 +1231,36 @@ h2{{font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.0
 .kind{{color:var(--warm);flex-shrink:0;width:150px}}
 .bar{{flex:1;background:var(--border-soft);height:8px;border-radius:4px;overflow:hidden}}
 .bar span{{display:block;height:100%;background:var(--warm);border-radius:4px}}
-.n{{color:var(--text);flex-shrink:0;width:70px;text-align:right}}
+.n{{color:var(--text);flex-shrink:0;width:90px;text-align:right}}
 .ts{{color:var(--muted);flex-shrink:0;width:150px}}
 .who{{color:var(--ghost);flex-shrink:0;width:80px}}
 .pname{{flex:1}}
 .muted{{color:var(--muted)}}
 .ip{{color:var(--muted);flex-shrink:0;width:130px}}
+.world{{flex-shrink:0;width:110px}}
+.world a{{color:var(--ghost-bright)}}
+.status{{flex-shrink:0;width:150px}}
+.status-alive{{color:var(--ghost-bright)}}
+.status-dead{{color:var(--bad-bright)}}
 .empty{{color:var(--muted);padding:10px 0}}
 </style></head><body>
-<header><h1>📊 Metrics</h1><span class=count>{html.escape(campaign_id)}</span></header>
+<header><h1>📊 Metrics</h1><span class=count>{html.escape(title)}</span>
+{'<span class=count><a href="/metrics" style="color:var(--ghost-bright)">← all worlds</a></span>' if not all_worlds else ''}
+</header>
 <main>
 <div class=cards>
+{worlds_card}
  <div class=card><div class=num>{total_events}</div><div class=label>Events</div></div>
  <div class=card><div class=num>{unique_players}</div><div class=label>Players</div></div>
  <div class=card><div class=num>{unique_ips}</div><div class=label>Unique IPs</div></div>
  <div class=card><div class=num>{flash_calls}</div><div class=label>Flash calls</div></div>
+ <div class=card><div class=num>{len(players) - dead_count}</div><div class=label>Characters alive</div></div>
+ <div class=card><div class=num>{dead_count}</div><div class=label>Characters dead</div></div>
 </div>
+{worlds_section}
 <section><h2>Events by kind</h2>{kind_rows}</section>
 <section><h2>Activity, last 24h (hourly)</h2>{hour_rows}</section>
-<section><h2>Players</h2>{player_rows}</section>
+<section><h2>Characters{' — all worlds' if all_worlds else ''}</h2>{player_rows}</section>
 </main>
 </body></html>"""
 
