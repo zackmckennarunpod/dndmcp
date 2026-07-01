@@ -36,7 +36,10 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
  main{display:grid;grid-template-columns:1fr 280px;gap:16px;padding:16px 18px}
  .panel{background:#141a24;border:1px solid #222c3a;border-radius:10px;padding:14px}
  .panel h2{font-size:11px;text-transform:uppercase;letter-spacing:1px;color:#7d8794;margin:0 0 10px}
- #map{width:100%;height:420px;overflow:auto}
+ #map{width:100%;height:420px;overflow:auto;position:relative}
+ #nodeTooltip{position:absolute;pointer-events:none;background:#1c2532;border:1px solid #334155;
+   border-radius:6px;padding:4px 9px;font-size:12px;color:#e6edf3;display:none;z-index:10;
+   box-shadow:0 4px 12px rgba(0,0,0,.4)}
  .ch b{color:#e6edf3}.ch span{color:#7d8794}
  .ch span.item{cursor:help;border-bottom:1px dotted #475569}
  .log div{color:#9fb1c1;padding:2px 0;border-bottom:1px solid #1a2230;font-size:12px}
@@ -52,7 +55,7 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
 </style></head><body>
 <header><h1>⚔ DNDMCP</h1><span class=sub id=where>—</span><span id=flashcount>⚡ 0 Flash calls</span></header>
 <main>
- <div class=panel><h2>World map (shared, live)</h2><div id=map><span id=mapEmpty class=empty>no adventure yet — start one in your agent</span></div></div>
+ <div class=panel><h2>World map (shared, live)</h2><div class=sub id=whereInMap style="margin-bottom:8px">—</div><div id=map><span id=mapEmpty class=empty>no adventure yet — start one in your agent</span><div id=nodeTooltip></div></div></div>
  <aside style="display:flex;flex-direction:column;gap:16px">
   <div class=panel><h2>Character</h2><div class=ch id=char>—</div></div>
   <div class=panel><h2>Recent</h2><div class=log id=log></div></div>
@@ -138,21 +141,33 @@ function renderGraph(rooms, players, you){
  // secret being protected there, just "you haven't been here yet." "You are here" is already
  // conveyed by the gold node color + the header's "You are in: ..." line, so the graph node
  // itself doesn't need its own always-visible label for that either.
+ const tooltip = document.getElementById('nodeTooltip');
  const nodeSel = nodeLayer.selectAll('g.node').data(nodes, d=>d.id)
    .join(enter => {
-     const g = enter.append('g').attr('class','node');
+     const g = enter.append('g').attr('class','node').style('cursor','default');
      g.append('circle').attr('r',16).attr('stroke-width',2);
-     g.append('title');
      g.append('text').attr('class','label').attr('y',30).attr('text-anchor','middle')
        .attr('fill','#7d8794').attr('font-size',10);
      g.append('text').attr('class','count').attr('y',4).attr('text-anchor','middle')
        .attr('fill','#0b0e14').attr('font-size',10).attr('font-weight','bold');
+     // Custom hover tooltip, not a native SVG <title> — native SVG title tooltips are
+     // unreliable across browsers (inconsistent/missing in Chrome in particular). A plain
+     // positioned div driven by mouse events works everywhere.
+     g.on('mouseenter', function(event, d){
+       tooltip.textContent = d.discovered ? d.name : '???';
+       tooltip.style.display = 'block';
+     }).on('mousemove', function(event){
+       const rect = document.getElementById('map').getBoundingClientRect();
+       tooltip.style.left = (event.clientX - rect.left + 14) + 'px';
+       tooltip.style.top = (event.clientY - rect.top + 10) + 'px';
+     }).on('mouseleave', function(){
+       tooltip.style.display = 'none';
+     });
      return g;
    });
  nodeSel.select('circle')
    .attr('fill', d=> d.mine ? '#f5a524' : (d.visited ? '#3b82f6' : '#1f2937'))
    .attr('stroke', d=> d.mine ? '#fcd34d' : '#475569');
- nodeSel.select('title').text(d=> d.discovered ? d.name : '???');
  nodeSel.select('text.label').text(d=> d.discovered ? '' : '???');
  nodeSel.select('text.count').text(d=> d.count ? d.count : '');
 
@@ -201,7 +216,9 @@ async function tick(){
     + (playerId ? '&player='+encodeURIComponent(playerId) : '');
   const s = await (await fetch(url)).json();
   const worldTag = campaignId !== 'main' ? `[world: ${campaignId}] ` : '';
-  document.getElementById('where').textContent = worldTag + (s.current_room ? ('You are in: '+(s.current_room.name||'')) : (playerId ? 'unknown player' : 'spectating — no ?player= in link'));
+  const whereText = worldTag + (s.current_room ? ('You are in: '+(s.current_room.name||'')) : (playerId ? 'unknown player' : 'spectating — no ?player= in link'));
+  document.getElementById('where').textContent = whereText;
+  document.getElementById('whereInMap').textContent = whereText;
   renderGraph(s.rooms||[], s.players||[], s.you||null);
   const ch = s.character;
   const invHtml = (ch?.inventory||[]).map(it => {
