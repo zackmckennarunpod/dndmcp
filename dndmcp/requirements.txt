@@ -2,5 +2,6 @@
 mcp>=1.2.0
 fastapi>=0.110.0
 uvicorn>=0.27.0
+sse-starlette>=2.0.0
 # runpod-flash only needed when art.py calls Flash for GPU image gen (wired later)
 runpod-flash>=1.7.0

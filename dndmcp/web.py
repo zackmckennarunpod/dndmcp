@@ -8,6 +8,7 @@ position, character, and the log.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import sqlite3
@@ -15,6 +16,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
+from sse_starlette.sse import EventSourceResponse
 
 app = FastAPI(title="DNDMCP map")
 
@@ -41,6 +43,12 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
  .empty{color:#7d8794}
 #flashcount{color:#f5a524;font-weight:bold;margin-left:auto;transition:transform .15s}
 #flashcount.pulse{transform:scale(1.3);color:#fcd34d}
+ #stream{display:flex;flex-direction:column-reverse;gap:0;height:120px;overflow-y:auto}
+ #stream div{color:#9fb1c1;padding:2px 0;border-bottom:1px solid #1a2230;font-size:12px}
+ #stream div.new{animation:flash .8s ease-out}
+ #stream .who{color:#f5a524}
+ @keyframes flash{from{background:#f5a52433}to{background:transparent}}
+ #streamDot{width:8px;height:8px;border-radius:50%;background:#22c55e;display:inline-block;margin-right:6px}
 </style></head><body>
 <header><h1>⚔ DNDMCP</h1><span class=sub id=where>—</span><span id=flashcount>⚡ 0 Flash calls</span></header>
 <main>
@@ -50,6 +58,10 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
   <div class=panel><h2>Recent</h2><div class=log id=log></div></div>
  </aside>
 </main>
+<div style="padding:0 18px 18px">
+ <div class=panel><h2><span id=streamDot></span>Live world stream — every player, every session</h2>
+   <div id=stream><div class=empty>waiting for the world to move...</div></div></div>
+</div>
 <script src="https://d3js.org/d3.v7.min.js"></script>
 <script>
 const params = new URLSearchParams(location.search);
@@ -199,6 +211,27 @@ async function tick(){
 }
 let lastFlashCalls = -1;
 setInterval(tick,1500);tick();
+
+// Live world stream — every domain event, from every player's session, pushed here as it
+// happens. Deliberately unfiltered by playerId: this is the out-of-world view of the same
+// stigmergic mechanic that shows up in-game as "Traces of those who came before."
+const streamEl = document.getElementById('stream');
+const streamDot = document.getElementById('streamDot');
+const es = new EventSource('/stream/events');
+es.addEventListener('world-event', (e) => {
+  const ev = JSON.parse(e.data);
+  const empty = streamEl.querySelector('.empty');
+  if (empty) empty.remove();
+  const div = document.createElement('div');
+  div.className = 'new';
+  const who = ev.player_id ? `<span class=who>${esc(ev.player_id.slice(0,6))}</span> ` : '';
+  div.innerHTML = `${who}${esc(ev.text)}`;
+  streamEl.prepend(div);
+  while (streamEl.children.length > 50) streamEl.lastChild.remove();
+  setTimeout(() => div.classList.remove('new'), 900);
+});
+es.onerror = () => { streamDot.style.background = '#ef4444'; };
+es.onopen = () => { streamDot.style.background = '#22c55e'; };
 </script></body></html>"""
 
 
@@ -253,6 +286,40 @@ def state(request: Request) -> JSONResponse:
         return JSONResponse(_EMPTY_STATE)
     finally:
         c.close()
+
+
+@app.get("/stream/events")
+async def stream_events(request: Request):
+    """The world's live pulse: EVERY player's actions, unfiltered by who's watching, pushed to
+    every connected tab as they happen. This is the out-of-world view of the same stigmergic
+    mechanic that surfaces in-world as 'Traces of those who came before' (server.py's
+    _render_scene) — here you watch the whole shared world remember itself, live, across every
+    session at once. Must NOT filter by player_id — that would defeat the point."""
+    async def gen():
+        last_seq = 0
+        try:
+            c = _db()
+            last_seq = c.execute("SELECT COALESCE(MAX(seq), 0) FROM log").fetchone()[0]
+            c.close()
+        except Exception:
+            pass
+        while True:
+            if await request.is_disconnected():
+                break
+            try:
+                c = _db()
+                rows = c.execute(
+                    "SELECT seq, ts, kind, text, player_id, subject_type, subject_id"
+                    " FROM log WHERE seq > ? ORDER BY seq ASC", (last_seq,)
+                ).fetchall()
+                c.close()
+            except Exception:
+                rows = []
+            for r in rows:
+                last_seq = r["seq"]
+                yield {"event": "world-event", "data": json.dumps(dict(r))}
+            await asyncio.sleep(1)
+    return EventSourceResponse(gen())
 
 
 def main() -> None:
