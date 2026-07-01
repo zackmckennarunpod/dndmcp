@@ -130,6 +130,22 @@ def _nearby_region(from_room_id: str, *, depth: int = 2,
     return out
 
 
+def _anonymized(entry) -> str:
+    """A domain event's text as it should be surfaced to anyone other than its own actor —
+    other players are ghosts to each other (see web.py's "how this works" panel: you never
+    see or talk to them directly), never named individuals. `world.log(...)` calls bake the
+    acting character's actual name into `text` at write time (readable in the player's OWN
+    history), so this substitutes it back out at read time for every OTHER use: traces shown
+    to a different player, and recent-events context fed into generation (which shouldn't be
+    naming specific characters into freshly invented content either)."""
+    if not entry.player_id:
+        return entry.text
+    actor = world.character(entry.player_id)
+    if not actor:
+        return entry.text
+    return entry.text.replace(actor.name, "a previous traveler")
+
+
 def _require_room(room_id: str) -> Room:
     """A player's location_id / a room's exit target must always resolve — that's a game-logic
     invariant, not something to silently tolerate. Fail loudly if it's ever violated."""
@@ -225,7 +241,7 @@ def _render_scene(room: Room, *, player_id: str | None = None, ambient: bool = T
     if traces:
         lines.append("\nTraces of those who came before:")
         for t in traces:
-            lines.append(f"  - {t.text}")
+            lines.append(f"  - {_anonymized(t)}")
     if ambient:
         ch = world.character(player_id) if player_id else None
         camp = world.campaign(ch.campaign_id if ch else MAIN_CAMPAIGN_ID)
@@ -377,7 +393,7 @@ async def _generate_and_link(dest_id: str, theme: str, campaign_id: str, salt: s
     # a fight/discovery next door, not a blank slate. exclude_player_id is deliberately
     # omitted here — unlike _render_scene's viewer-facing traces, generation should see
     # everyone's recent actions, including the very player who's about to walk through.
-    recent_events = [e.text for e in world.recent_log(
+    recent_events = [_anonymized(e) for e in world.recent_log(
         5, campaign_id=campaign_id, subject_type="room", subject_id=back_to_id)]
     new_room = await worldgen.generate_room_content(
         dest_id, theme, entry_from=entry_from, nearby=nearby, recent_events=recent_events, salt=salt)
@@ -638,7 +654,7 @@ async def talk_to(player_id: str, message: str, npc_name: str | None = None) -> 
         # No persona yet — the spawn-time density gate skipped it, or this NPC predates the
         # feature. Generate one lazily now that a player actually cares enough to talk to it.
         kind = npc["name"]  # SRD species name before we overwrite it below
-        recent_events = [e.text for e in world.recent_log(
+        recent_events = [_anonymized(e) for e in world.recent_log(
             5, campaign_id=ch.campaign_id, subject_type="room", subject_id=room.id)]
         gen = await worldgen.generate_npc_persona(npc, camp.theme, room.name, room.kind,
                                                   room.description, recent_events=recent_events)
