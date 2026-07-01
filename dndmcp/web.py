@@ -85,6 +85,11 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
   It's a <b>stigmergic</b> system in the literal sense — coordination through traces left in
   the shared graph, not direct messages between whoever's generating content — the same
   mechanism ants use to build a colony without a blueprint or a foreman.</p>
+  <p>That's also the literal model for other players in this world: you never see or talk to
+  them directly — they're <b>ghosts</b>, visible only as a dot moving across this same map in
+  real time. The only way you affect each other is through the graph itself: drop something in
+  a room and it's really there — the next ghost to pass through can pick it up, same as any
+  other trace.</p>
  </div>
 </details>
 <main>

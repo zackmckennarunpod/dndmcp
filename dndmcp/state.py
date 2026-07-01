@@ -241,6 +241,24 @@ class World:
     def campaign_exists(self, campaign_id: str) -> bool:
         return self._c.execute("SELECT 1 FROM campaigns WHERE id=?", (campaign_id,)).fetchone() is not None
 
+    def delete_campaign(self, campaign_id: str) -> None:
+        """Wipe one world's rooms/characters/entities/log/edges + the campaign row itself.
+        Caller (server.py's delete_world) owns the "main"-guard and sole-player-check safety
+        rules — this method trusts it's already safe to call."""
+        player_ids = [r["player_id"] for r in self._c.execute(
+            "SELECT player_id FROM character WHERE campaign_id=?", (campaign_id,)).fetchall()]
+        if player_ids:
+            placeholders = ",".join("?" * len(player_ids))
+            self._c.execute(f"DELETE FROM edges WHERE from_id IN ({placeholders})", player_ids)
+        # room ids are namespaced "<campaign_id>:..." (game.py's room-id scheme), so this
+        # catches every "discovered" edge pointing into this world without a campaign_id
+        # column on edges itself.
+        self._c.execute("DELETE FROM edges WHERE to_id LIKE ?", (f"{campaign_id}:%",))
+        for table in ("rooms", "character", "log", "entity"):
+            self._c.execute(f"DELETE FROM {table} WHERE campaign_id=?", (campaign_id,))
+        self._c.execute("DELETE FROM campaigns WHERE id=?", (campaign_id,))
+        self._c.commit()
+
     # --- character (one row per player_id) -------------------------------------
     def new_character(self, player_id: str, campaign_id: str, *, name: str, klass: str, hp: int,
                       ac: int, stats: dict[str, int], inventory: list[dict],
@@ -290,6 +308,23 @@ class World:
         inv = (cur.inventory if cur else []) + [item]
         self._c.execute("UPDATE character SET inventory=? WHERE player_id=?", (json.dumps(inv), player_id))
         self._c.commit()
+
+    def remove_item(self, player_id: str, item_id: str) -> dict | None:
+        """Remove one item from inventory by id (see drop_item). Falls back to matching by
+        name for items with no "id" — the starting kit predates stable ids on inventory
+        items; live characters created before that fix still carry id-less items. Returns
+        the removed item dict, or None if no match was found."""
+        cur = self.character(player_id)
+        if not cur:
+            return None
+        key = lambda i: i.get("id") or i.get("name")
+        removed = next((i for i in cur.inventory if key(i) == item_id), None)
+        if not removed:
+            return None
+        inv = [i for i in cur.inventory if key(i) != item_id]
+        self._c.execute("UPDATE character SET inventory=? WHERE player_id=?", (json.dumps(inv), player_id))
+        self._c.commit()
+        return removed
 
     def players(self, campaign_id: str = MAIN_CAMPAIGN_ID) -> list[Character]:
         """All characters currently in ONE world (for the GUI's 'other players' view) — must

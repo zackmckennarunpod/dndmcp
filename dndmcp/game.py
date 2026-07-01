@@ -120,10 +120,15 @@ def new_character(name: str, klass: str) -> dict:
         return sum(sorted(random.randint(1, 6) for _ in range(4))[1:])
     stats = {s: stat() for s in ["STR", "DEX", "CON", "INT", "WIS", "CHA"]}
     hp = 8 + (stats["CON"] - 10) // 2
+    # Stable ids from the start — same pattern loot/monsters already get at creation (see
+    # generate_room's contents) — needed for drop_item to identify/remove a specific item.
     starting_kit = [
-        {"name": "a torch", "description": "casts a small circle of light; burns for hours yet."},
-        {"name": "a worn dagger", "description": "unremarkable, but sharp enough to matter."},
-        {"name": "rations", "description": "a few days' worth of dry, plain food."},
+        {"id": uuid.uuid4().hex[:8], "name": "a torch",
+         "description": "casts a small circle of light; burns for hours yet."},
+        {"id": uuid.uuid4().hex[:8], "name": "a worn dagger",
+         "description": "unremarkable, but sharp enough to matter."},
+        {"id": uuid.uuid4().hex[:8], "name": "rations",
+         "description": "a few days' worth of dry, plain food."},
     ]
     return {"name": name, "klass": klass, "hp": max(hp, 4), "ac": 12 + (stats["DEX"] - 10) // 2,
             "stats": stats, "inventory": starting_kit}

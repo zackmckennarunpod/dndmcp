@@ -78,6 +78,18 @@ How to run the game:
     move there        -> move(direction)
     any check/attack  -> roll_dice / attack  (NEVER invent dice — always call the tool)
     look around       -> look      check self -> character_sheet     recap -> get_state
+    leave/drop item   -> drop_item(player_id, item_name)
+- 0 HP is real death, not a scare: move/attack/talk_to/pick_up_item all refuse to proceed once
+  a character has fallen and hand back a clear restart message instead. Narrate the death
+  properly, then let the player choose: start_adventure again (same campaign_id, a fresh
+  character in this same persistent world) or delete_world (wipes their own custom world
+  entirely, so long as they're its only remaining player — never offer this for "main").
+- Players never see or talk to each other directly — only their live position on the map (a
+  "ghost" moving through the world, per the GUI). The ONLY way players affect each other is
+  through the shared graph itself: drop_item leaves something real in a room for whoever
+  arrives next to pick_up_item, and log_event traces work the same way. If a player asks to
+  "leave this for someone" or "signal" another player, that's drop_item or log_event — never
+  invent a way to message another player directly, there isn't one.
 - The player will do things none of the above cover — read a diary, examine something
   closely, search a corpse, notice a detail. ALWAYS call log_event(player_id, text) for
   these. It's what makes the moment durable (future players see it as a trace when they
@@ -142,6 +154,16 @@ def _require_campaign(campaign_id: str = MAIN_CAMPAIGN_ID) -> Campaign:
     camp = world.campaign(campaign_id)
     assert camp is not None, f"campaign {campaign_id!r} referenced but none exists yet"
     return camp
+
+
+def _dead_gate(ch) -> str | None:
+    """0 HP is death, not a flesh wound — every action tool calls this first and returns its
+    message instead of proceeding when the character has fallen. Returns None (proceed as
+    normal) while HP > 0."""
+    if ch.hp > 0:
+        return None
+    return (f"☠ {ch.name} has died. Call start_adventure(campaign_id={ch.campaign_id!r}) to "
+            f"begin a new character in this world, or delete_world to wipe it and start fresh.")
 
 
 def _gui_link() -> str:
@@ -406,6 +428,8 @@ async def move(player_id: str, direction: str) -> str:
     ch = world.character(player_id)
     if not ch:
         return "Unknown player_id. Call start_adventure first."
+    if dead := _dead_gate(ch):
+        return dead
     camp = _require_campaign(ch.campaign_id)
     direction = direction.strip().lower()
     here = _require_room(ch.location_id)
@@ -479,6 +503,8 @@ def attack(player_id: str, weapon_bonus: int = 3, damage_dice: str = "1d8") -> s
     ch = world.character(player_id)
     if not ch:
         return "Unknown player_id. Call start_adventure first."
+    if dead := _dead_gate(ch):
+        return dead
     room = _require_room(ch.location_id)
     monster = next((c for c in room.contents if c["type"] == "monster"), None)
     if not monster:
@@ -524,6 +550,8 @@ async def pick_up_item(player_id: str, item_name: str | None = None) -> str:
     ch = world.character(player_id)
     if not ch:
         return "Unknown player_id. Call start_adventure first."
+    if dead := _dead_gate(ch):
+        return dead
     room = _require_room(ch.location_id)
     loot = [c for c in room.contents if c["type"] == "loot"]
 
@@ -535,12 +563,13 @@ async def pick_up_item(player_id: str, item_name: str | None = None) -> str:
 
     if match:
         room.contents = [c for c in room.contents if c is not match]
-        world.upsert_room(room_id=room.id, name=room.name, description=room.description,
-                          exits=room.exits, contents=room.contents, features=room.features)
+        world.upsert_room(room_id=room.id, campaign_id=ch.campaign_id, name=room.name,
+                          description=room.description, exits=room.exits,
+                          contents=room.contents, features=room.features)
         # Pre-seeded loot only ever carries a name (game.py/worldgen.py room-gen never fills
         # in flavor text) — reuse the same Flash-backed adjudicator to get a description,
         # keeping the pre-seeded name rather than whatever name it might also return.
-        camp = _require_campaign()
+        camp = _require_campaign(ch.campaign_id)
         flavor = await worldgen.generate_item_content(match["name"], camp.theme,
                                                        room_context=room.description)
         desc = flavor.get("description", "")
@@ -556,7 +585,7 @@ async def pick_up_item(player_id: str, item_name: str | None = None) -> str:
 
     # Not pre-seeded loot — ask the world-builder (same procedural+Flash pattern as room-gen)
     # to adjudicate plausibility and flesh out what it actually is.
-    camp = _require_campaign()
+    camp = _require_campaign(ch.campaign_id)
     item = await worldgen.generate_item_content(item_name, camp.theme, room_context=room.description)
     if not item["portable"]:
         reason = f" ({item['reason']})" if item.get("reason") else ""
@@ -570,6 +599,33 @@ async def pick_up_item(player_id: str, item_name: str | None = None) -> str:
 
 
 @mcp.tool()
+def drop_item(player_id: str, item_name: str) -> str:
+    """Leave something from your inventory in your current room. This is the other half of
+    the stigmergic model this world runs on: players never talk to or see each other directly
+    (see the "ghosts" framing — you see their live position on the map, nothing more), but a
+    room is shared state, so whatever you drop here is really there for the NEXT player (or
+    you, later) to find and pick_up_item. No Flash call needed — the item already has its
+    description from whenever it was first picked up or generated."""
+    ch = world.character(player_id)
+    if not ch:
+        return "Unknown player_id. Call start_adventure first."
+    room = _require_room(ch.location_id)
+    match = next((i for i in ch.inventory if item_name.lower() in i["name"].lower()), None)
+    if not match:
+        return f"You aren't carrying anything called {item_name!r}."
+    item_id = match.get("id") or match["name"]  # matches remove_item's own fallback key
+    world.remove_item(player_id, item_id)
+    room.contents.append({"type": "loot", "id": match.get("id") or uuid.uuid4().hex[:8],
+                          "name": match["name"]})
+    world.upsert_room(room_id=room.id, campaign_id=ch.campaign_id, name=room.name,
+                      description=room.description, exits=room.exits,
+                      contents=room.contents, features=room.features)
+    world.log("item.dropped", f"{ch.name} left {match['name']} here.", player_id=player_id,
+             subject_type="room", subject_id=room.id)
+    return f"You set {match['name']} down."
+
+
+@mcp.tool()
 async def talk_to(player_id: str, message: str, npc_name: str | None = None) -> str:
     """Talk to a monster/NPC in your current room. Generates an in-character response.
     Identity and conversation memory live on the entity itself, not on you — since the world
@@ -578,6 +634,8 @@ async def talk_to(player_id: str, message: str, npc_name: str | None = None) -> 
     ch = world.character(player_id)
     if not ch:
         return "Unknown player_id. Call start_adventure first."
+    if dead := _dead_gate(ch):
+        return dead
     room = _require_room(ch.location_id)
     npcs = [c for c in room.contents if c["type"] == "monster"]
     if not npcs:
@@ -618,6 +676,30 @@ async def talk_to(player_id: str, message: str, npc_name: str | None = None) -> 
              f"{ch.name} talked to {npc['name']}: {message!r} ({result['via']}).",
              player_id=player_id, subject_type="entity", subject_id=ent.id)
     return f"💬 {npc['name']}: \"{result['text']}\""
+
+
+@mcp.tool()
+def delete_world(player_id: str) -> str:
+    """Permanently delete YOUR OWN custom world (every room/character/log/entity in it) so you
+    can start completely fresh. Two hard guards, not overridable by the caller:
+    - Refuses on the shared "main" world — too precious to wipe via self-service (see the
+      pod's scripts/reset_world.sh for that explicit, separately-gated admin action).
+    - Refuses if any OTHER player_id currently has a character in this campaign — only the
+      sole remaining player can wipe their own world; it's never safe to delete out from under
+      someone else's game."""
+    ch = world.character(player_id)
+    if not ch:
+        return "Unknown player_id. Call start_adventure first."
+    campaign_id = ch.campaign_id
+    if campaign_id == MAIN_CAMPAIGN_ID:
+        return 'Can\'t delete the shared "main" world — it\'s everyone\'s persistent default.'
+    others = [p for p in world.players(campaign_id) if p.player_id != player_id]
+    if others:
+        return (f"Can't delete this world — {len(others)} other player(s) are still in it. "
+                f"Only the sole remaining player can wipe a world.")
+    world.delete_campaign(campaign_id)
+    return (f"🗑 World {campaign_id!r} deleted. Call start_adventure(campaign_id=\"new\") to "
+            f"begin a brand-new one.")
 
 
 @mcp.tool()
