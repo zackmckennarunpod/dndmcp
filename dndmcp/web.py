@@ -58,6 +58,7 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
  <div class=panel><h2>World map (shared, live)</h2><div class=sub id=whereInMap style="margin-bottom:8px">—</div><div id=map><span id=mapEmpty class=empty>no adventure yet — start one in your agent</span><div id=nodeTooltip></div></div></div>
  <aside style="display:flex;flex-direction:column;gap:16px">
   <div class=panel><h2>Character</h2><div class=ch id=char>—</div></div>
+  <div class=panel><h2>Selected room</h2><div class=ch id=roomInfo><span class=empty>click a room on the map</span></div></div>
   <div class=panel><h2>Recent</h2><div class=log id=log></div></div>
  </aside>
 </main>
@@ -89,9 +90,29 @@ const zoomLayer = svg.append('g');
 const linkLayer = zoomLayer.append('g');
 const frontierLayer = zoomLayer.append('g');
 const nodeLayer = zoomLayer.append('g');
-svg.call(d3.zoom().scaleExtent([0.25, 4]).on('zoom', (event) => {
+const zoomBehavior = d3.zoom().scaleExtent([0.25, 4]).on('zoom', (event) => {
   zoomLayer.attr('transform', event.transform);
-}));
+});
+svg.call(zoomBehavior);
+
+// Click a node -> center the view on it (keeping current zoom level) and show its details
+// in the "Selected room" panel. Discovered rooms show real content; undiscovered ones stay
+// "???" here too (a click can't reveal what you haven't actually been to).
+function centerOn(d){
+  const k = d3.zoomTransform(svg.node()).k;
+  const t = d3.zoomIdentity.translate(W/2 - d.x*k, H/2 - d.y*k).scale(k);
+  svg.transition().duration(500).call(zoomBehavior.transform, t);
+}
+function showRoomInfo(d){
+  const el = document.getElementById('roomInfo');
+  if(!d.discovered){ el.innerHTML = '<span class=empty>??? — not discovered yet</span>'; return; }
+  const feats = (d.features||[]).map(f => `<div>• ${esc(f)}</div>`).join('');
+  const monsters = (d.contents||[]).filter(c=>c.type==='monster')
+    .map(c => `<div>⚔ ${esc(c.name)} (HP ${c.hp})</div>`).join('');
+  const loot = (d.contents||[]).filter(c=>c.type==='loot')
+    .map(c => `<div>✦ ${esc(c.name)}</div>`).join('');
+  el.innerHTML = `<b>${esc(d.name)}</b><br><span>${esc(d.description||'')}</span>${feats}${monsters}${loot}`;
+}
 
 const simulation = d3.forceSimulation()
   .force('charge', d3.forceManyBody().strength(-220))
@@ -138,21 +159,22 @@ function renderGraph(rooms, players, you){
  for(const r of rooms){
    const n = nodesById[r.id];
    n.name = r.name; n.visited = r.visited; n.discovered = r.discovered;
+   n.description = r.description; n.features = r.features; n.contents = r.contents;
    n.mine = you && r.id===you.location_id;
    n.count = (occupants[r.id]||[]).length;
  }
  const nodes = rooms.map(r => nodesById[r.id]);
 
  // No persistent name labels on the graph — declutters it into a real "fog of war" map.
- // Discovered rooms reveal their name on HOVER only (native SVG <title> tooltip, zero extra
- // JS/DOM for the tooltip itself); undiscovered rooms show "???" outright, since there's no
- // secret being protected there, just "you haven't been here yet." "You are here" is already
- // conveyed by the gold node color + the header's "You are in: ..." line, so the graph node
- // itself doesn't need its own always-visible label for that either.
+ // Discovered rooms reveal their name on HOVER (custom tooltip div, not native SVG <title> --
+ // that's unreliable across browsers) and full details on CLICK; undiscovered rooms show
+ // "???" outright either way, since there's no secret being protected, just "you haven't
+ // been here yet." "You are here" is already conveyed by the gold node color + the header's
+ // "You are in: ..." line, so the graph node itself doesn't need its own always-visible label.
  const tooltip = document.getElementById('nodeTooltip');
  const nodeSel = nodeLayer.selectAll('g.node').data(nodes, d=>d.id)
    .join(enter => {
-     const g = enter.append('g').attr('class','node').style('cursor','default');
+     const g = enter.append('g').attr('class','node').style('cursor','pointer');
      g.append('circle').attr('r',16).attr('stroke-width',2);
      g.append('text').attr('class','label').attr('y',30).attr('text-anchor','middle')
        .attr('fill','#7d8794').attr('font-size',10);
@@ -170,6 +192,9 @@ function renderGraph(rooms, players, you){
        tooltip.style.top = (event.clientY - rect.top + 10) + 'px';
      }).on('mouseleave', function(){
        tooltip.style.display = 'none';
+     }).on('click', function(event, d){
+       centerOn(d);
+       showRoomInfo(d);
      });
      return g;
    });
@@ -318,7 +343,9 @@ def state(request: Request) -> JSONResponse:
         rooms = []
         for r in c.execute("SELECT * FROM rooms WHERE campaign_id=?", (campaign_id,)).fetchall():
             discovered = (r["id"] in discovered_ids) if discovered_ids is not None else bool(r["visited"])
-            rooms.append({"id": r["id"], "name": r["name"],
+            rooms.append({"id": r["id"], "name": r["name"], "description": r["description"],
+                          "features": json.loads(r["features"] or "[]"),
+                          "contents": json.loads(r["contents"] or "[]"),
                           "visited": bool(r["visited"]), "discovered": discovered,
                           "exits": exits_by_room.get(r["id"], {})})  # {direction: dest_room_id}
         players = [{"player_id": p["player_id"], "name": p["name"], "location_id": p["location_id"]}
