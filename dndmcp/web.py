@@ -64,14 +64,14 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
 </style></head><body>
 <header><h1>⚔ DNDMCP</h1><span class=sub id=where>—</span><span id=flashcount>⚡ 0 Flash calls</span></header>
 <details class=panel style="margin:16px 18px 0">
- <summary>How this works</summary>
+ <summary>How this works — the Graph Context Engine underneath</summary>
  <div class=body>
   <p>Under the hood this isn't a D&amp;D-specific engine — it's a generic graph: every room,
   item, and NPC is a <b>node</b>, connections between them (an exit, ownership, a relationship)
-  are typed <b>edges</b>, and everything that happens is an append-only <b>event log</b>.
-  The D&amp;D adventure you're watching is one skin on that engine — the same server also runs
-  a Linear-style task graph (nodes = tickets, edges = links, same event log) with zero changes
-  to the underlying mechanics.</p>
+  are typed <b>edges</b>, and everything that happens is an append-only <b>event log</b>. We
+  call that substrate the <b>Graph Context Engine</b> — the D&amp;D adventure you're watching
+  is one skin on it — the same server also runs a Linear-style task graph (nodes = tickets,
+  edges = links, same event log) with zero changes to the underlying mechanics.</p>
   <p>That pattern isn't limited to games or tickets — it's the same substrate any long-running
   <b>agent workflow</b> needs: nodes for subtasks or artifacts, edges for dependencies between
   them, the event log for what's already been tried or decided. It's what lets an agent (or a
@@ -81,7 +81,10 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
   the LLM is never generating in isolation. It's fed the <b>surrounding graph context</b>:
   nearby already-generated nodes a couple hops out, and recent events near this spot, so
   whatever it invents stays consistent with what's already real instead of contradicting it.
-  That's the "world stream" below and the map itself: both are live views of that same graph.</p>
+  That's the "world stream" below and the map itself: both are live views of that same graph.
+  It's a <b>stigmergic</b> system in the literal sense — coordination through traces left in
+  the shared graph, not direct messages between whoever's generating content — the same
+  mechanism ants use to build a colony without a blueprint or a foreman.</p>
  </div>
 </details>
 <main>
