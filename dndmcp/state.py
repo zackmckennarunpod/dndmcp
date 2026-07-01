@@ -419,6 +419,21 @@ class World:
         # caller always passes the room's complete current exit set (same semantics the old
         # JSON column had). exit_descriptions rides along as edge metadata (see
         # room_exit_descriptions) — physical threshold text, safe to show pre-discovery.
+        #
+        # exit_descriptions=None vs {} are NOT the same thing, and callers rely on that.
+        # Most call sites (attack/pick_up_item/drop_item/talk_to in server.py) re-upsert a
+        # room to persist an unrelated change (HP, inventory, a new NPC persona) and pass
+        # `exits=room.exits` unchanged — they never think about descriptors at all, so they
+        # leave exit_descriptions at its None default. Because set_edges is a full
+        # delete-then-reinsert of this room's exit edges, treating "None" as "no metadata"
+        # would silently null out every descriptor (e.g. "a warped iron door") on every one
+        # of those calls, forever — there's no other path that ever restores them. So: None
+        # means "this caller didn't touch descriptors, preserve whatever's already there" —
+        # fetch the existing set BEFORE clobbering the edges. A caller that DOES pass a dict
+        # (including an explicitly empty {}) is asserting "this is the complete, authoritative
+        # descriptor set now" and wins outright, same as it always has.
+        if exit_descriptions is None:
+            exit_descriptions = self.room_exit_descriptions(room_id)
         self.set_edges("room", room_id, "room", room.exits, metadata=exit_descriptions)
         saved = self.room(room_id)  # re-read: picks up visited/COALESCE'd image_ref from the DB
         assert saved is not None, f"room {room_id} vanished immediately after its own upsert"

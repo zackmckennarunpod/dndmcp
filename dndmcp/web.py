@@ -202,12 +202,15 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
  <summary>🎲 How to connect &amp; play</summary>
  <div class=body style="margin-top:10px">
   <p><b>1. Connect your agent</b> — pick whichever you use:</p>
+  <p class=sub style="margin:10px 0 4px"><b>Claude Code — macOS / Linux / WSL:</b></p>
   <div class=codebox><code id=codeCC>curl -fsSL https://ldghdgi0xxn6jj-8002.proxy.runpod.net/install.sh | bash</code><button class=copyCodeBtn data-target=codeCC>Copy</button></div>
-  <p class=sub style="margin:6px 0 14px">↑ <b>Claude Code (macOS/Linux/WSL)</b> — one command, installs dndmcp pointed at this exact live shared world.</p>
+  <p class=sub style="margin:14px 0 4px"><b>Claude Code — Windows (PowerShell/cmd):</b> the curl-and-pipe
+  command above needs a Unix shell; this is the exact same install, run directly instead:</p>
   <div class=codebox><code id=codeCCWin>claude mcp add --transport http dndmcp -s user "https://ldghdgi0xxn6jj-8000.proxy.runpod.net/mcp"</code><button class=copyCodeBtn data-target=codeCCWin>Copy</button></div>
-  <p class=sub style="margin:6px 0 14px">↑ <b>Claude Code (Windows, PowerShell/cmd)</b> — the curl-and-pipe one-liner above needs a
-  Unix shell (WSL or Git Bash); this is the same underlying command run directly, no shell
-  wrapper needed.</p>
+  <p class=sub style="margin:14px 0 4px"><b>Claude Desktop — any OS:</b> paste this into
+  <code>claude_desktop_config.json</code>, then restart the app.<br>
+  macOS: <code>~/Library/Application Support/Claude/claude_desktop_config.json</code><br>
+  Windows: <code>%APPDATA%\\Claude\\claude_desktop_config.json</code></p>
   <div class=codebox><pre id=codeCD>{
   "mcpServers": {
     "dndmcp": {
@@ -216,9 +219,6 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
     }
   }
 }</pre><button class=copyCodeBtn data-target=codeCD>Copy</button></div>
-  <p class=sub style="margin:6px 0 14px">↑ <b>Claude Desktop</b> — paste into <code>claude_desktop_config.json</code>, then restart
-  the app. macOS: <code>~/Library/Application Support/Claude/claude_desktop_config.json</code> —
-  Windows: <code>%APPDATA%\\Claude\\claude_desktop_config.json</code>.</p>
   <p><b>2. Reconnect</b> — Claude Code: run <code>/mcp</code>; Claude Desktop: restart it — so it picks up the new server.</p>
   <p><b>3. Say "start an adventure."</b> That's it. Your agent becomes the Dungeon Master — talk
   naturally ("go through the door," "attack it," "look around"), you never need game-engine
@@ -968,7 +968,16 @@ def state(request: Request) -> JSONResponse:
                           "contents": json.loads(r["contents"] or "[]"),
                           "visited": bool(r["visited"]), "discovered": discovered,
                           "exits": exits_by_room.get(r["id"], {})})  # {direction: dest_room_id}
-        players = [{"player_id": p["player_id"], "name": p["name"], "location_id": p["location_id"]}
+        # player_id IS the game's bearer credential -- server.py trusts it directly as the
+        # only auth for move/attack/drop_item/delete_world/etc, no separate token or session.
+        # This /state response is public and unauthenticated (anyone with the URL can poll
+        # it), so shipping any OTHER player's full player_id here would let a stranger replay
+        # it against server.py and act as that character. Truncate to the same 6 chars the
+        # page already shows for every OTHER player (see the JS `who` span in the SSE handler
+        # below, and highlightKnown -- neither ever needs more than that to render). The
+        # viewer's OWN identity is unaffected: that still flows through the full, caller-
+        # supplied ?player= query param handled separately below, never through this list.
+        players = [{"player_id": p["player_id"][:6], "name": p["name"], "location_id": p["location_id"]}
                    for p in c.execute(
                        "SELECT player_id, name, location_id FROM character WHERE campaign_id=?",
                        (campaign_id,)).fetchall()]
@@ -1376,7 +1385,22 @@ async def stream_events(request: Request):
                 rows = []
             for r in rows:
                 last_seq = r["seq"]
-                yield {"event": "world-event", "data": json.dumps(dict(r))}
+                # player_id IS the game's bearer credential (see /state above) -- this SSE
+                # feed is the SAME public, unauthenticated surface, and dict(r) here pulls the
+                # raw log row straight from sqlite, full player_id included. The page's own JS
+                # only ever does ev.player_id.slice(0,6) for DISPLAY -- that's cosmetic, not a
+                # guarantee, since the full value is still sitting in the wire payload for
+                # anyone to read with devtools or curl. Truncate server-side before it ever
+                # leaves the process, same 6 chars the UI already shows, so there's nothing
+                # longer to capture. subject_id carries the identical credential when
+                # subject_type='character' (e.g. story.exported writes subject_id=player_id),
+                # so it needs the same treatment or it'd leak right back through that field.
+                payload = dict(r)
+                if payload.get("player_id"):
+                    payload["player_id"] = payload["player_id"][:6]
+                if payload.get("subject_type") == "character" and payload.get("subject_id"):
+                    payload["subject_id"] = payload["subject_id"][:6]
+                yield {"event": "world-event", "data": json.dumps(payload)}
             await asyncio.sleep(1)
     return EventSourceResponse(gen())
 
