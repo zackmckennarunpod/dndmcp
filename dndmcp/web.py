@@ -72,10 +72,15 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
   The D&amp;D adventure you're watching is one skin on that engine — the same server also runs
   a Linear-style task graph (nodes = tickets, edges = links, same event log) with zero changes
   to the underlying mechanics.</p>
-  <p>When the world needs new content — the next room, an NPC's response — the LLM is never
-  generating in isolation. It's fed the <b>surrounding graph context</b>: nearby
-  already-generated nodes a couple hops out, and recent events near this spot, so whatever it
-  invents stays consistent with what's already real in this world instead of contradicting it.
+  <p>That pattern isn't limited to games or tickets — it's the same substrate any long-running
+  <b>agent workflow</b> needs: nodes for subtasks or artifacts, edges for dependencies between
+  them, the event log for what's already been tried or decided. It's what lets an agent (or a
+  human) step away mid-task and pick up real context hours or days later instead of restarting
+  from a blank prompt — the same way this world remembers a player's choices between sessions.</p>
+  <p>When new content is needed — the next room, an NPC's response, the next step of a task —
+  the LLM is never generating in isolation. It's fed the <b>surrounding graph context</b>:
+  nearby already-generated nodes a couple hops out, and recent events near this spot, so
+  whatever it invents stays consistent with what's already real instead of contradicting it.
   That's the "world stream" below and the map itself: both are live views of that same graph.</p>
  </div>
 </details>
