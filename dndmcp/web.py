@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import subprocess
 import sqlite3
 from pathlib import Path
 
@@ -19,6 +20,23 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from sse_starlette.sse import EventSourceResponse
 
 app = FastAPI(title="DNDMCP map")
+
+
+def _server_version() -> str:
+    """Deployed commit, computed once at process start. A browser tab only fetches fresh
+    DATA via polling — it never reloads the page's own JS on its own — so a long-lived tab
+    left open across a redeploy silently keeps running stale rendering code against
+    whatever new shape /state now returns. Exposing this lets the client detect "the server
+    moved on since I loaded" and prompt a refresh instead of failing confusingly (e.g.
+    rendering only some of the graph's nodes)."""
+    try:
+        return subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=Path(__file__).parent,
+                              capture_output=True, text=True, timeout=5, check=True).stdout.strip()
+    except Exception:
+        return "unknown"
+
+
+SERVER_VERSION = _server_version()
 
 
 def _db() -> sqlite3.Connection:
@@ -72,6 +90,11 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
  .hl-item{color:var(--warm);font-weight:600}
 #flashcount{color:var(--warm);font-weight:600;margin-left:auto;transition:transform .15s}
 #flashcount.pulse{transform:scale(1.3);color:var(--warm-bright)}
+#shareBtn{background:var(--link);color:var(--ghost-bright);border:1px solid var(--border);
+  border-radius:6px;padding:5px 11px;font:600 12px 'IBM Plex Mono',monospace;cursor:pointer;
+  transition:background .15s}
+#shareBtn:hover{background:var(--visited)}
+#shareBtn.copied{background:var(--ghost);color:var(--bg)}
  #stream{display:flex;flex-direction:column-reverse;gap:0;height:120px;overflow-y:auto}
  #stream div{color:var(--muted);padding:2px 0;border-bottom:1px solid var(--border-soft);font-size:12px}
  #stream div.new{animation:flash .8s ease-out}
@@ -90,7 +113,9 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
  details.panel .body a{color:var(--ghost-bright);text-decoration:underline;text-decoration-color:var(--ghost)}
  details.panel .body p{margin:0 0 10px}
 </style></head><body>
-<header><h1>⚔ DNDMCP</h1><span class=sub id=where>—</span><span id=flashcount>⚡ 0 Flash calls</span></header>
+<header><h1>⚔ DNDMCP</h1><span class=sub id=where>—</span>
+ <span id=flashcount>⚡ 0 Flash calls</span>
+ <button id=shareBtn title="Copy this world's join link">🔗 Share</button></header>
 <details class=panel style="margin:16px 18px 0">
  <summary>How this works — the Graph Context Engine underneath</summary>
  <div class=body>
@@ -140,6 +165,26 @@ const params = new URLSearchParams(location.search);
 const playerId = params.get('player');
 const campaignId = params.get('campaign') || 'main';
 const W=700, H=420;
+
+// Share: copies join instructions, not just a URL — actually PLAYING requires the friend's
+// own agent to call start_adventure(campaign_id=...), this GUI is spectator-only. "main"
+// needs no id (the default world), so its share text skips campaign_id entirely.
+document.getElementById('shareBtn').addEventListener('click', async () => {
+  const watchUrl = location.origin + location.pathname + '?campaign=' + encodeURIComponent(campaignId);
+  const text = campaignId === 'main'
+    ? `Join my DNDMCP world: just start_adventure (no id needed, it's the shared default). Watch it live: ${watchUrl}`
+    : `Join my DNDMCP world: start_adventure with campaign_id="${campaignId}". Watch it live: ${watchUrl}`;
+  try{
+    await navigator.clipboard.writeText(text);
+    const btn = document.getElementById('shareBtn');
+    const original = btn.textContent;
+    btn.textContent = '✓ Copied';
+    btn.classList.add('copied');
+    setTimeout(() => { btn.textContent = original; btn.classList.remove('copied'); }, 1500);
+  }catch(e){
+    prompt('Copy this:', text);
+  }
+});
 function esc(s){ return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function escRegex(s){ return s.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&'); }
 
@@ -531,7 +576,8 @@ def state(request: Request) -> JSONResponse:
         ).fetchone()[0]
         return JSONResponse({"rooms": rooms, "players": players, "character": char,
                              "you": char, "current_room": (dict(cur) if cur else None), "log": log,
-                             "flash_calls": flash_calls, "campaign": campaign})
+                             "flash_calls": flash_calls, "campaign": campaign,
+                             "server_version": SERVER_VERSION})
     except sqlite3.OperationalError:
         # schema not initialized yet — no one has called start_adventure on this pod yet
         return JSONResponse(_EMPTY_STATE)
