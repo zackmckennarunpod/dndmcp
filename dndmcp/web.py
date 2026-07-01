@@ -129,6 +129,13 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
  details.panel .body b{color:var(--ghost-bright)}
  details.panel .body a{color:var(--ghost-bright);text-decoration:underline;text-decoration-color:var(--ghost)}
  details.panel .body p{margin:0 0 10px}
+ .world-card{display:block;background:var(--bg);border:1px solid var(--border-soft);border-radius:6px;
+   padding:9px 11px;margin-bottom:6px;text-decoration:none;cursor:pointer}
+ .world-card:hover{border-color:var(--ghost)}
+ .world-card .wc-theme{color:var(--ghost-bright);font-weight:600;font-size:12.5px}
+ .world-card .wc-meta{color:var(--muted);font-size:11px;float:right}
+ .world-card .wc-premise{color:var(--muted);font-size:11.5px;margin-top:3px;
+   display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
  details.panel .body code{background:var(--unvisited);padding:1px 5px;border-radius:4px;font-size:11.5px}
  .codebox{display:flex;align-items:flex-start;gap:8px;background:#0d0819;border:1px solid var(--border);
    border-radius:6px;padding:9px 11px;margin:4px 0}
@@ -163,6 +170,15 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
   <p><b>3. Say "start an adventure."</b> That's it. Your agent becomes the Dungeon Master — talk
   naturally ("go through the door," "attack it," "look around"), you never need game-engine
   syntax. You're joining THIS shared world, live, with everyone else currently playing.</p>
+ </div>
+</details>
+<details class=panel style="margin:0 18px 16px">
+ <summary>🌍 Browse other worlds</summary>
+ <div class=body>
+  <input id=worldSearch placeholder="Search by theme or premise..."
+    style="width:100%;box-sizing:border-box;background:var(--bg);border:1px solid var(--border);
+    border-radius:6px;padding:7px 10px;color:var(--text);font:12.5px 'IBM Plex Mono',monospace;margin-bottom:10px">
+  <div id=worldsList><div class=empty>Loading worlds…</div></div>
  </div>
 </details>
 <details class=panel style="margin:0 18px 0">
@@ -225,6 +241,42 @@ if (playerId) {
   // not the first thing they need. Still there (one click away), just not in the way.
   document.getElementById('connectPanel').removeAttribute('open');
 }
+
+// Browse other worlds: campaign ids are opaque hex strings — nobody finds a world they don't
+// already have a link to without this. Fetched once (worlds don't churn fast enough to need
+// the 1.5s tick's polling cadence); search filters the already-fetched list client-side.
+let allWorlds = [];
+function timeAgo(ts){
+  if(!ts) return 'no activity yet';
+  const mins = Math.floor((Date.now()/1000 - ts) / 60);
+  if(mins < 1) return 'just now';
+  if(mins < 60) return mins + 'm ago';
+  if(mins < 1440) return Math.floor(mins/60) + 'h ago';
+  return Math.floor(mins/1440) + 'd ago';
+}
+function renderWorlds(filter){
+  const q = (filter||'').toLowerCase();
+  const shown = allWorlds.filter(w =>
+    !q || (w.theme||'').toLowerCase().includes(q) || (w.premise||'').toLowerCase().includes(q));
+  const listEl = document.getElementById('worldsList');
+  if(!shown.length){ listEl.innerHTML = '<div class=empty>No worlds match.</div>'; return; }
+  listEl.innerHTML = shown.map(w => {
+    const isMain = w.id === 'main';
+    const href = '/?campaign=' + encodeURIComponent(w.id);
+    const label = isMain ? 'main (default shared world)' : w.id;
+    return `<a class=world-card href="${href}">`
+      + `<span class=wc-meta>${w.players} player${w.players===1?'':'s'} · ${esc(timeAgo(w.last_activity))}</span>`
+      + `<span class=wc-theme>${esc(w.theme||'untitled')}</span> <span class=sub>(${esc(label)})</span>`
+      + `<div class=wc-premise>${esc(w.premise||'')}</div></a>`;
+  }).join('');
+}
+fetch('/worlds').then(r => r.json()).then(worlds => {
+  allWorlds = worlds;
+  renderWorlds('');
+}).catch(() => {
+  document.getElementById('worldsList').innerHTML = '<div class=empty>Could not load worlds.</div>';
+});
+document.getElementById('worldSearch').addEventListener('input', (e) => renderWorlds(e.target.value));
 
 // Share: copies join instructions, not just a URL — actually PLAYING requires the friend's
 // Connect & play panel: generic copy-to-clipboard for the install command / Desktop config,
@@ -548,7 +600,7 @@ async function tick(){
     document.getElementById('staleBanner').style.display = 'block';
   }
   const worldTag = campaignId !== 'main' ? `[world: ${campaignId}] ` : '';
-  const whereText = worldTag + (s.current_room ? ('You are in: '+(s.current_room.name||'')) : (playerId ? 'unknown player' : 'spectating — no ?player= in link'));
+  const whereText = worldTag + (s.current_room ? ('You are in: '+(s.current_room.name||'')) : (playerId ? 'unknown player' : 'Spectating — connect your agent to the MCP server to start your own session'));
   document.getElementById('where').textContent = whereText;
   document.getElementById('whereInMap').textContent = whereText;
   renderGraph(s.rooms||[], s.players||[], s.you||null);
@@ -653,6 +705,32 @@ connectStream();
 @app.get("/", response_class=HTMLResponse)
 def index() -> str:
     return PAGE
+
+
+@app.get("/worlds")
+def worlds_list() -> JSONResponse:
+    """Every world that exists, with enough context to actually recognize one — theme,
+    premise, player count, last activity. Campaign ids are opaque hex strings; nobody finds
+    a world they don't already have a direct link to without this."""
+    c = _db()
+    try:
+        rows = c.execute(
+            "SELECT id, name, theme, premise, created_at FROM campaigns ORDER BY created_at DESC"
+        ).fetchall()
+        counts = dict(c.execute(
+            "SELECT campaign_id, COUNT(*) FROM character GROUP BY campaign_id"
+        ).fetchall())
+        activity = dict(c.execute(
+            "SELECT campaign_id, MAX(ts) FROM log GROUP BY campaign_id"
+        ).fetchall())
+    except sqlite3.OperationalError:
+        return JSONResponse([])
+    finally:
+        c.close()
+    worlds = [{"id": r["id"], "name": r["name"], "theme": r["theme"], "premise": r["premise"],
+              "players": counts.get(r["id"], 0), "last_activity": activity.get(r["id"]),
+              "created_at": r["created_at"]} for r in rows]
+    return JSONResponse(worlds)
 
 
 @app.get("/install.sh")
