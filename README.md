@@ -42,6 +42,15 @@ server-side DM agent loop (`dndmcp/dm_loop.py`) — a plain OpenAI-compatible to
 provider-agnostic — so you can play a full turn through a chat box with no agent of your own,
 against the same shared world and the same rules engine.
 
+**The GUI watches the agent play, live.** There's no special integration between "your agent"
+and "the map" — every MCP tool call (`move`, `attack`, `roll_dice`, `talk_to`, ...) just writes
+to the shared world DB, and the browser has no idea whether a human, an MCP agent, or the
+server's own DM loop made that write. The world map re-polls the DB every 1.5s, so a room your
+agent just walked into pops onto the graph a beat later with zero glue code. Separately, a
+live SSE-pushed world-event stream (`GET /stream/events`) fans out every action from every
+player's session to every open tab in real time — open the map, tell your agent to move or
+fight something, and watch it show up.
+
 **Rules are real, not vibes.** Monster stat blocks and conditions come from the vendored D&D
 5e SRD (`dndmcp/srd/`, loaded by `dndmcp/compendium.py`), so combat and creature stats are
 rules-accurate rather than model-hallucinated.
@@ -58,7 +67,7 @@ and rendered as ANSI art in-terminal (`dndmcp/flash_art.py`, `dndmcp/art.py`).
 | Layer | What |
 |---|---|
 | **Protocol** | [MCP](https://modelcontextprotocol.io) via [FastMCP](https://github.com/jlowin/fastmcp) (stdio and streamable-HTTP transports) |
-| **Server / GUI** | FastAPI + Uvicorn, server-sent events for live chat/log streaming |
+| **Server / GUI** | FastAPI + Uvicorn; map polls the shared DB every 1.5s, chat and the world-event feed are pushed live over SSE |
 | **State** | SQLite (world graph, campaigns, players, quests), Pydantic models over it |
 | **Rules** | Vendored D&D 5e SRD data (monsters, conditions) |
 | **GPU generation (optional)** | [Runpod Flash](https://runpod.io) — serverless vLLM for text/NPC generation, SDXL-Turbo for art |
