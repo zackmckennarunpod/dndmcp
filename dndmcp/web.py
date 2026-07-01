@@ -1192,9 +1192,7 @@ def metrics_page(request: Request) -> str:
             "SELECT ch.player_id AS player_id, ch.campaign_id AS campaign_id, ch.name AS name,"
             " ch.klass AS klass, ch.hp AS hp, ch.max_hp AS max_hp,"
             " (SELECT COUNT(*) FROM log WHERE player_id=ch.player_id AND campaign_id=ch.campaign_id) AS events,"
-            " (SELECT MAX(ts) FROM log WHERE player_id=ch.player_id AND campaign_id=ch.campaign_id) AS last_seen,"
-            " (SELECT ip FROM log WHERE player_id=ch.player_id AND campaign_id=ch.campaign_id"
-            "  AND ip IS NOT NULL ORDER BY seq DESC LIMIT 1) AS last_ip"
+            " (SELECT MAX(ts) FROM log WHERE player_id=ch.player_id AND campaign_id=ch.campaign_id) AS last_seen"
             f" FROM character ch {where_camp} ORDER BY last_seen DESC", camp_args).fetchall()
         worlds = c.execute(
             "SELECT cp.id AS id, cp.name AS name, cp.theme AS theme,"
@@ -1238,7 +1236,6 @@ def metrics_page(request: Request) -> str:
         + (f'<span class=world><a href="/?campaign={html.escape(p["campaign_id"])}">{html.escape(p["campaign_id"])}</a></span>' if all_worlds else "")
         + f'<span class=status>{status_html(p)}</span>'
         f'<span class=n>{p["events"]} events</span>'
-        f'<span class=ip>{html.escape(p["last_ip"] or "—")}</span>'
         f'<span class=ts>{ts_fmt(p["last_seen"])}</span></div>'
         for p in players
     ) or '<div class=empty>No players yet.</div>'
@@ -1286,7 +1283,6 @@ h2{{font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.0
 .who{{color:var(--ghost);flex-shrink:0;width:80px}}
 .pname{{flex:1}}
 .muted{{color:var(--muted)}}
-.ip{{color:var(--muted);flex-shrink:0;width:130px}}
 .world{{flex-shrink:0;width:110px}}
 .world a{{color:var(--ghost-bright)}}
 .status{{flex-shrink:0;width:150px}}
