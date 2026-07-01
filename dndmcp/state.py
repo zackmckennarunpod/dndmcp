@@ -167,6 +167,10 @@ class World:
         # pattern as every other additive column here.
         self._add_column_if_missing("log", "ip", "TEXT")
         self._add_column_if_missing("log", "session_id", "TEXT")
+        # Themed replacement for the raw SRD attack name (e.g. "static-charged prod" instead
+        # of "Scimitar") — the SRD is fantasy-only, so a sci-fi/steampunk/etc world's monster
+        # keeps rules-accurate mechanics but shouldn't narrate a medieval weapon mid-combat.
+        self._add_column_if_missing("entity", "attack_flavor", "TEXT DEFAULT ''")
         # Migrate the old singleton `campaign` row (id=1) into campaigns/"main", once — INSERT
         # OR IGNORE makes re-running this on every startup a no-op after the first time.
         self._c.execute(
@@ -452,24 +456,36 @@ class World:
     # --- entity (NPC identity — see models.Entity) -----------------------------
     def upsert_entity(self, *, entity_id: str, kind: str, name: str, location_id: str | None,
                       campaign_id: str = MAIN_CAMPAIGN_ID, disposition: str = "neutral",
-                      persona: str = "", goal: str = "", alive: bool = True) -> Entity:
+                      persona: str = "", goal: str = "", alive: bool = True,
+                      attack_flavor: str = "") -> Entity:
         """Create or fully replace an entity's identity fields. Does NOT touch `memory` —
         use append_entity_memory for that, so re-generating a persona never loses history."""
         existing = self.entity(entity_id)
         memory = existing.memory if existing else []
         ent = Entity(id=entity_id, kind=kind, name=name, location_id=location_id,
-                    disposition=disposition, alive=alive, persona=persona, goal=goal, memory=memory)
+                    disposition=disposition, alive=alive, persona=persona, goal=goal,
+                    memory=memory, attack_flavor=attack_flavor)
         self._c.execute(
-            "INSERT INTO entity (id,campaign_id,kind,name,location_id,disposition,alive,persona,goal,memory)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?)"
+            "INSERT INTO entity (id,campaign_id,kind,name,location_id,disposition,alive,persona,goal,memory,attack_flavor)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?)"
             " ON CONFLICT(id) DO UPDATE SET kind=excluded.kind, name=excluded.name,"
             " location_id=excluded.location_id, disposition=excluded.disposition,"
-            " alive=excluded.alive, persona=excluded.persona, goal=excluded.goal",
+            " alive=excluded.alive, persona=excluded.persona, goal=excluded.goal,"
+            " attack_flavor=excluded.attack_flavor",
             (ent.id, campaign_id, ent.kind, ent.name, ent.location_id, ent.disposition,
-             int(ent.alive), ent.persona, ent.goal, json.dumps(ent.memory)),
+             int(ent.alive), ent.persona, ent.goal, json.dumps(ent.memory), ent.attack_flavor),
         )
         self._c.commit()
         return ent
+
+    def entity_names_in(self, campaign_id: str) -> list[str]:
+        """Every name already used by a spawned NPC identity in this world — passed to
+        persona generation so it invents someone new instead of echoing an existing NPC (or,
+        worse, the prompt's own few-shot example name) into an unrelated creature."""
+        rows = self._c.execute(
+            "SELECT DISTINCT name FROM entity WHERE campaign_id=? AND name != ''", (campaign_id,)
+        ).fetchall()
+        return [r["name"] for r in rows]
 
     def entity(self, entity_id: str) -> Entity | None:
         r = self._c.execute("SELECT * FROM entity WHERE id=?", (entity_id,)).fetchone()

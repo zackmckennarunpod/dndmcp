@@ -73,14 +73,6 @@ def combat_profile(m: dict) -> dict:
             "cr": m.get("challenge_rating"), "traits": traits, "conversation": []}
 
 
-def encounter_from_names(names: list[str], rng: random.Random) -> dict | None:
-    """Pick one of these named SRD monsters (theme-curated) and return its combat profile."""
-    found = [m for m in (get_monster(n) for n in names) if m]
-    if not found:
-        return None
-    return combat_profile(rng.choice(found))
-
-
 def random_encounter(max_cr: float, rng: random.Random) -> dict | None:
     pool = [m for m in _monsters()
             if isinstance(m.get("challenge_rating"), (int, float)) and 0 < m["challenge_rating"] <= max_cr]

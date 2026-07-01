@@ -437,12 +437,13 @@ async def _maybe_spawn_entity_persona(new_room: dict, dest_id: str, theme: str,
     kind = mon["name"]  # SRD species name (e.g. "Goblin") — capture before we overwrite it
     persona = await worldgen.generate_npc_persona(
         mon, theme, new_room["name"], new_room.get("kind", ""), new_room["description"],
-        nearby=nearby, recent_events=recent_events)
+        nearby=nearby, recent_events=recent_events,
+        existing_names=world.entity_names_in(campaign_id))
     mon["name"] = persona["name"]
     world.upsert_entity(entity_id=mon["id"], campaign_id=campaign_id, kind=kind,
                         name=persona["name"], location_id=dest_id,
                         disposition=persona["disposition"], persona=persona["persona"],
-                        goal=persona["goal"])
+                        goal=persona["goal"], attack_flavor=persona.get("attack_flavor", ""))
     world.log("entity.spawned",
              f"{persona['name']} the {kind} appeared in {new_room['name']} ({persona['via']}).",
              campaign_id=campaign_id, subject_type="entity", subject_id=mon["id"])
@@ -466,7 +467,8 @@ async def _generate_and_link(dest_id: str, theme: str, campaign_id: str, salt: s
         5, campaign_id=campaign_id, subject_type="room", subject_id=back_to_id)]
     new_room = await worldgen.generate_room_content(
         dest_id, theme, entry_from=entry_from, nearby=nearby, recent_events=recent_events,
-        salt=salt, premise=premise)
+        salt=salt, premise=premise,
+        existing_names=[name for _, name, _ in world.room_ids_in(campaign_id)])
     new_room["exits"][game.opposite_of(entry_from)] = back_to_id
     await _maybe_spawn_entity_persona(new_room, dest_id, theme, [rid for _, _, rid in nearby_full],
                                       campaign_id=campaign_id, nearby=nearby, recent_events=recent_events)
@@ -685,11 +687,17 @@ def attack(player_id: str, weapon_bonus: int = 3, damage_dice: str = "1d8") -> s
             out.append(f"💀 The {monster['name']} falls!")
         else:
             out.append(f"The {monster['name']} has {monster['hp']} HP left.")
-    # monster strikes back with its REAL attack (bonus + damage dice from the SRD)
+    # monster strikes back with its REAL attack (bonus + damage dice from the SRD) — the
+    # NARRATED name prefers the entity's own themed attack_flavor over the raw SRD attack_name
+    # ("Scimitar", "Bite") when one was generated, so a reskinned sci-fi/steampunk/etc creature
+    # doesn't suddenly narrate a medieval weapon mid-combat, the exact moment the mismatch is
+    # most jarring.
     if monster["hp"] > 0:
         matk = game.resolve_attack(monster.get("attack_bonus", 3), ch.ac,
                                    monster.get("damage_dice", "1d6"))
-        atk_name = monster.get("attack_name", "attack")
+        ent = world.entity(monster["id"])
+        atk_name = (ent.attack_flavor if ent and ent.attack_flavor
+                   else monster.get("attack_name", "attack"))
         if matk["hit"]:
             new_hp = world.damage(player_id, matk["damage"])
             out.append(f"⚔ The {monster['name']}'s {atk_name} hits you for {matk['damage']}. You have {new_hp} HP.")
@@ -847,12 +855,13 @@ async def talk_to(player_id: str, message: str, npc_name: str | None = None) -> 
         kind = npc["name"]  # SRD species name before we overwrite it below
         gen = await worldgen.generate_npc_persona(npc, camp.theme, room.name, room.kind,
                                                   room.description, nearby=nearby,
-                                                  recent_events=recent_events)
+                                                  recent_events=recent_events,
+                                                  existing_names=world.entity_names_in(ch.campaign_id))
         npc["name"] = gen["name"]
         ent = world.upsert_entity(entity_id=npc["id"], campaign_id=ch.campaign_id, kind=kind,
                                   name=gen["name"], location_id=room.id,
                                   disposition=gen["disposition"], persona=gen["persona"],
-                                  goal=gen["goal"])
+                                  goal=gen["goal"], attack_flavor=gen.get("attack_flavor", ""))
         world.upsert_room(room_id=room.id, campaign_id=ch.campaign_id, name=room.name,
                           description=room.description, exits=room.exits,
                           contents=room.contents, features=room.features)
@@ -966,12 +975,13 @@ if os.environ.get("DNDMCP_DEV_TOOLS") == "1":
                 return "No matching monster found for a random pick."
         kind = mon["name"]  # SRD species name, captured before persona overwrites it
         persona = await worldgen.generate_npc_persona(mon, camp.theme, room.name, room.kind,
-                                                      room.description)
+                                                      room.description,
+                                                      existing_names=world.entity_names_in(campaign_id))
         mon["name"] = persona["name"]
         world.upsert_entity(entity_id=mon["id"], campaign_id=campaign_id, kind=kind,
                             name=persona["name"], location_id=room_id,
                             disposition=persona["disposition"], persona=persona["persona"],
-                            goal=persona["goal"])
+                            goal=persona["goal"], attack_flavor=persona.get("attack_flavor", ""))
         room.contents.append(mon)
         world.upsert_room(room_id=room_id, campaign_id=campaign_id, name=room.name,
                           description=room.description, exits=room.exits, contents=room.contents,
@@ -1002,6 +1012,22 @@ if os.environ.get("DNDMCP_DEV_TOOLS") == "1":
         world.log("item.spawned", f"{item['name']} appeared in {room.name} (dev-spawned).",
                  campaign_id=campaign_id, subject_type="room", subject_id=room_id)
         return f"✓ Spawned {item['name']} in {room_id} ({room.name})."
+
+    @mcp.tool()
+    def dev_delete_world(campaign_id: str) -> str:
+        """[DEV TOOL] Force-delete a world regardless of how many players are still in it or
+        whether its original creator is still around — the admin override for delete_world's
+        "sole remaining player" guard, for cleaning up abandoned/stuck/multi-player test
+        worlds that no single player can self-service anymore. Still refuses on "main" — that
+        guard is absolute, not overridable even here; wiping main goes through the pod's
+        scripts/reset_world.sh --yes instead, a separately-gated, explicit action."""
+        if campaign_id == MAIN_CAMPAIGN_ID:
+            return ('Can\'t delete the shared "main" world, even as an admin override — use '
+                    "scripts/reset_world.sh --yes for that.")
+        if not world.campaign_exists(campaign_id):
+            return f'No world with id "{campaign_id}" exists.'
+        world.delete_campaign(campaign_id)
+        return f"🗑 World {campaign_id!r} force-deleted (admin override)."
 
 
 @mcp.tool()

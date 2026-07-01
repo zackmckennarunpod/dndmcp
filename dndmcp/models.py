@@ -81,6 +81,7 @@ class Entity(BaseModel):
     persona: str = ""
     goal: str = ""
     memory: list[dict] = []  # [{"role": "player"|"npc", "content": ...}, ...]
+    attack_flavor: str = ""  # themed replacement for the raw SRD attack name in combat text
 
 
 class Quest(BaseModel):

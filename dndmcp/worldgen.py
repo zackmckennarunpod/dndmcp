@@ -22,26 +22,23 @@ from . import compendium, flash_llm, game, setting
 
 logger = logging.getLogger(__name__)
 
-# Theme → real SRD creatures that fit (so spawns are rules-accurate AND on-theme).
-_THEME_CREATURES = {
-    "gothic horror": ["Ghoul", "Skeleton", "Zombie", "Ghost", "Specter", "Shadow",
-                      "Wight", "Swarm of Rats", "Cultist", "Giant Rat"],
-    "default": ["Goblin", "Kobold", "Giant Spider", "Skeleton", "Giant Rat",
-                "Bandit", "Wolf", "Stirge"],
-}
-
-
-def _creatures_for(theme: str) -> list[str]:
-    for key in _THEME_CREATURES:
-        if key in (theme or "").lower():
-            return _THEME_CREATURES[key]
-    return _THEME_CREATURES["default"]
+# No hardcoded theme→creature table on purpose: a fixed Python mapping can only ever cover
+# the themes someone thought to enumerate, and a "sci-fi frontier" bandit swinging a Scimitar
+# (a real bug this replaced — see generate_room_content's monster_type handling below) just
+# means the list didn't happen to cover that theme. The model already gets the full theme +
+# premise in-context, so it invents the creature identity itself — anything from a classic SRD
+# name to something wholly new — and the code's only job is finding real mechanics to back it,
+# never deciding WHAT fits on its own behalf.
 
 
 # SKILL: describe_room — FACTS only, no pre-written narration. The Flash world-builder's job
 # is to invent what's true about the room; the DM AGENT (running the actual session) does the
 # narrating, in whatever voice fits the moment — not a canned ahead/left/right/center template.
-_ROOM_JSON = ('{"name": short evocative room name, "kind": one or two words (e.g. "cellar", '
+_ROOM_JSON = ('{"name": short evocative room name — grounded in THIS world\'s own distinctive '
+              'vocabulary (a specific noun/image from its premise), not a generic dungeon word '
+              '(echo, whisper, ancient, shadow, forgotten) unless the premise itself is built '
+              'from that word; must not repeat a name already used in this world (listed '
+              'below, if any), "kind": one or two words (e.g. "cellar", '
               '"great hall", "attic" — informs how it connects to the world), '
               '"atmosphere": 2-4 sentences of vivid, SPECIFIC sensory detail (sight, smell, '
               'sound, light, texture) — substantial enough to actually paint the room, not a '
@@ -52,7 +49,13 @@ _ROOM_JSON = ('{"name": short evocative room name, "kind": one or two words (e.g
               '"features": array of exactly 2 specific, examinable details — fixed, NOT '
               'portable (architecture, furniture, scenery), each tied to this world\'s actual '
               'theme/premise (not interchangeable with any other setting), '
-              '"has_monster": true or false, '
+              '"has_monster": true or false — most dungeons have SOME dangerous inhabitants '
+              'scattered through them; err toward true unless this specific room is clearly '
+              'safe (a study, a shrine, an empty cell), '
+              '"monster_type": if has_monster, the creature that lives here — invent something '
+              'that genuinely belongs to THIS world\'s theme/premise (a wholly new name/species '
+              'is great, not required to be a classic D&D monster), or null if has_monster is '
+              'false. This is flavor only; the game finds real stats separately, '
               '"notable_items": array of 1-2 SMALL, PORTABLE objects a player could actually '
               'pick up and carry — a scroll, a trinket, a tool, a coin pouch, a key, a '
               'weapon — distinct from features (which are fixed/scenery, never portable). '
@@ -72,7 +75,8 @@ _ROOM_JSON = ('{"name": short evocative room name, "kind": one or two words (e.g
 
 def _room_messages(theme: str, came_from: str | None, exits: list[str],
                    nearby: list[tuple[str, str]] | None = None,
-                   recent_events: list[str] | None = None, premise: str = "") -> list[dict]:
+                   recent_events: list[str] | None = None, premise: str = "",
+                   existing_names: list[str] | None = None) -> list[dict]:
     # A bare theme label ("sundered weave") means nothing to a small model on its own — no
     # training-data association for a made-up phrase, so it falls back to generic dungeon-
     # crawl tropes (observed live: "sundered weave" alone produced "The Whispering Crypt,"
@@ -84,7 +88,7 @@ def _room_messages(theme: str, came_from: str | None, exits: list[str],
               f"You invent what is TRUE about each room — facts for a Dungeon Master to narrate "
               f"from, not finished prose — and every room must clearly belong to THIS premise, "
               f"not generic dungeon-crawl dressing that could fit any setting. You reply with "
-              f"STRICT JSON only — no text outside the JSON object.")
+              f"STRICT JSON only — no markdown code fences, no text outside the JSON object.")
     enter = f" the player enters from the {came_from}" if came_from else " the player descends into"
     context = ""
     if nearby:
@@ -96,6 +100,11 @@ def _room_messages(theme: str, came_from: str | None, exits: list[str],
         # door can ripple into what THIS room is — the same fight/discovery a moment ago is
         # what makes a freshly-generated room feel like a continuation, not a blank slate.
         context += f" Recently, nearby: {'; '.join(recent_events)}."
+    if existing_names:
+        # Without this, two unrelated rooms in the same world can both land on "Rune Chamber"
+        # (observed live) — the model has no way to know a name is already taken since each
+        # room is generated as its own independent call.
+        context += f" Room names already used in this world (do not reuse): {', '.join(existing_names)}."
     user = (f"Generate the next room{enter}. Exits lead: {', '.join(exits) or 'none'}.{context} "
             f"Return JSON: {_ROOM_JSON}")
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
@@ -104,7 +113,8 @@ def _room_messages(theme: str, came_from: str | None, exits: list[str],
 async def generate_room_content(room_id: str, theme: str, *, entry_from: str | None = None,
                                 nearby: list[tuple[str, str]] | None = None,
                                 recent_events: list[str] | None = None,
-                                salt: str = "", premise: str = "") -> dict:
+                                salt: str = "", premise: str = "",
+                                existing_names: list[str] | None = None) -> dict:
     """Generate a room's content for the graph. Tries Flash (structured JSON); falls back
     to procedural. Returns game.generate_room's shape + `features` + a `via` marker.
 
@@ -116,26 +126,35 @@ async def generate_room_content(room_id: str, theme: str, *, entry_from: str | N
     salt (state.py Campaign.salt) — see game._seeded for why this must be passed through, not
     just room_id alone. `premise`: the campaign's own premise text (Campaign.premise) — a
     theme LABEL alone isn't enough grounding for a small model on a made-up/unusual theme;
-    the premise is what actually explains what it means."""
+    the premise is what actually explains what it means. `existing_names`: every room name
+    already used in this world (state.py's room_ids_in) — without this two independent
+    generation calls can both land on the same name (observed live: two different rooms both
+    named "Rune Chamber")."""
     rng = game._seeded(room_id, salt)  # deterministic per (room_id, salt)
     base = game.generate_room(room_id, theme, entry_from=entry_from, salt=salt)  # procedural skeleton
 
     via = "procedural"
     want_monster = any(c.get("type") == "monster" for c in base["contents"])
+    monster_type = ""  # set from Flash's own invented creature identity, if it gives one
     # `items` starts as whatever the procedural dice roll picked (0 or 1 loot dict from the
     # thin, theme-mismatched game.py pool) — the FALLBACK. If Flash succeeds it REPLACES this
     # wholesale (same override pattern as want_monster below), never just adds on top of it —
     # otherwise a generic "pouch of gold" keeps surviving next to genuinely on-theme content.
     items = [c for c in base["contents"] if c.get("type") == "loot"]
-    messages = _room_messages(theme, entry_from, list(base["exits"].keys()), nearby, recent_events, premise)
+    messages = _room_messages(theme, entry_from, list(base["exits"].keys()), nearby, recent_events,
+                              premise, existing_names)
 
     # A single bad sample (malformed JSON) or a transient endpoint hiccup (cold start,
     # throttling — both observed in practice) shouldn't cost the room real content when a
-    # retry would likely just work. Up to 3 attempts before accepting the procedural
-    # fallback; each attempt re-samples fresh (same prompt, model's own temperature=0.95
-    # variance), so a retry is a genuinely different roll, not a repeat of the same failure.
+    # retry would likely just work. Up to 4 attempts before accepting the procedural
+    # fallback (bumped from 3 — a visible quality cliff was observed live: a bare "You stand
+    # in a collapsed hall." fallback room wedged directly between two richly-described Flash
+    # rooms after 3 straight malformed-JSON samples); each attempt re-samples fresh (same
+    # prompt, model's own temperature=0.95 variance), so a retry is a genuinely different
+    # roll, not a repeat of the same failure.
     data = None
-    for attempt in range(3):
+    room_attempts = 4
+    for attempt in range(room_attempts):
         gen = await flash_llm.generate(messages, max_tokens=280, temperature=0.95)
         if not gen:
             continue  # Flash off, or a transport-level error already logged inside generate()
@@ -143,8 +162,8 @@ async def generate_room_content(room_id: str, theme: str, *, entry_from: str | N
             data = json.loads(gen[gen.find("{"): gen.rfind("}") + 1])
             break
         except Exception:
-            logger.warning("generate_room_content: malformed JSON on attempt %d/3, retrying: %r",
-                           attempt + 1, gen)
+            logger.warning("generate_room_content: malformed JSON on attempt %d/%d, retrying: %r",
+                           attempt + 1, room_attempts, gen)
             data = None
 
     if data is not None:
@@ -156,15 +175,33 @@ async def generate_room_content(room_id: str, theme: str, *, entry_from: str | N
             # this isn't cosmetic, it's the difference between a graceful procedural fallback
             # and start_adventure/move throwing all the way up to the player.
             def _normalize_text(raw) -> str:
+                def _sentence(v) -> str:
+                    # each dict value / list item is usually its own sensory fragment ("mossy
+                    # walls slick with moisture") with no terminal punctuation of its own — a
+                    # bare " ".join used to paste these together into one unpunctuated run-on
+                    # ("mossy walls slick with moisture faint whispers echo..."). Force each
+                    # fragment to read as its own sentence before joining.
+                    s = str(v).strip()
+                    if s and s[-1] not in ".!?":
+                        s += "."
+                    return s
+
                 if isinstance(raw, dict):
-                    return " ".join(str(v) for v in raw.values() if v)
+                    return " ".join(_sentence(v) for v in raw.values() if v)
                 if isinstance(raw, list):
-                    return " ".join(str(v) for v in raw if v)
+                    return " ".join(_sentence(v) for v in raw if v)
                 return str(raw).strip() if raw else ""
 
-            if name := _normalize_text(data.get("name")):
+            def _normalize_label(raw) -> str:
+                # name/kind/monster_type are short labels, not prose — _normalize_text's
+                # per-fragment period (needed so a joined multi-fragment atmosphere reads as
+                # sentences, not a run-on) is wrong here and was showing up literally as
+                # "Plague Rat." when the model returned one of these as a list of one.
+                return _normalize_text(raw).rstrip(".")
+
+            if name := _normalize_label(data.get("name")):
                 base["name"] = name
-            if kind := _normalize_text(data.get("kind")):
+            if kind := _normalize_label(data.get("kind")):
                 base["kind"] = kind
             # `description` stays a raw FACT, not finished prose — the DM agent (whoever is
             # running the session) narrates from this, same as it would from a human DM's notes.
@@ -216,6 +253,8 @@ async def generate_room_content(room_id: str, theme: str, *, entry_from: str | N
                 if isinstance(desc, str) and desc.strip():
                     base.setdefault("exit_descriptions", {})[direction] = desc.strip()
             want_monster = bool(data.get("has_monster", want_monster))
+            if want_monster:
+                monster_type = _normalize_label(data.get("monster_type"))
             via = "flash"
         except Exception:
             logger.exception("generate_room_content: valid JSON but error applying it, "
@@ -241,11 +280,26 @@ async def generate_room_content(room_id: str, theme: str, *, entry_from: str | N
     base["contents"] = [c for c in base["contents"] if c.get("type") not in ("monster", "loot")]
     base["contents"].extend(items)
     if want_monster:
-        mon = compendium.encounter_from_names(_creatures_for(theme), rng)
+        # The model invents WHAT lives here (monster_type, above) — never a hardcoded theme
+        # table deciding on its own behalf. The compendium's only job is finding REAL rules-
+        # accurate mechanics to back that identity: an exact/fuzzy name match first (get_monster
+        # already does both), and if the model's invented creature doesn't resemble anything in
+        # the SRD closely enough to match, a genuinely random level-appropriate stat block —
+        # keeping the model's own name/flavor on top of it either way.
+        mon = None
+        if monster_type:
+            found = compendium.get_monster(monster_type)
+            if found:
+                mon = compendium.combat_profile(found)
+                mon["name"] = monster_type
+        if mon is None:
+            rm = compendium.random_encounter(1.0, rng)
+            if rm:
+                if monster_type:
+                    rm["name"] = monster_type
+                mon = rm
         if mon:
             base["contents"].append(mon)
-        elif (rm := compendium.random_encounter(1.0, rng)):
-            base["contents"].append(rm)
     base["via"] = via
     return base
 
@@ -261,7 +315,7 @@ def _item_messages(description: str, theme: str, room_context: str) -> list[dict
               f"You are adjudicating a player's attempt to pick up an object in a {theme} dungeon "
               f"crawl in this setting. Decide what's TRUE about the object and whether it's actually "
               f"portable — most furniture/fixtures/scenery are NOT, most small objects ARE. "
-              f"You reply with STRICT JSON only — no text outside the JSON object.")
+              f"You reply with STRICT JSON only — no markdown code fences, no text outside the JSON object.")
     user = (f"The player tries to pick up: {description!r}. Room context: {room_context}\n"
             f"Return JSON: {_ITEM_JSON}")
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
@@ -297,22 +351,31 @@ async def generate_item_content(description: str, theme: str, room_context: str 
 
 
 _NPC_PERSONA_JSON = ('{"name": an individual proper name or title fitting this creature and '
-                     'setting (e.g. "Skarn the Ratcatcher", "Old Ember") — never just the '
-                     'species name, "persona": one or two TRUE sentences of personality/'
+                     'setting — invent something NEW every time, never just the species name, '
+                     'and never reuse a name already used in this world (listed below, if any), '
+                     '"persona": one or two TRUE sentences of personality/'
                      'background — temperament, a personal detail, what they want right now, '
                      '"goal": a short concrete want driving their behavior this scene, '
                      '"disposition": one of "hostile", "neutral", "ally" — how they regard '
-                     'strangers on sight}')
+                     'strangers on sight, '
+                     '"attack_flavor": a short NOUN PHRASE naming their weapon/attack, 2-4 '
+                     'words, NOT a sentence and no period — it slots directly into '
+                     '"<name>\'s <attack_flavor> hits you", so it must read like a weapon name '
+                     '(e.g. "a static-charged prod", "twin rusted cleavers", "crackling claws"), '
+                     'never a description of an action. Ground it in THIS world\'s theme, never '
+                     'a generic medieval weapon unless the world genuinely is that kind of '
+                     'place}')
 
 
 def _npc_persona_messages(mon: dict, theme: str, room_name: str, room_kind: str,
                           atmosphere: str, nearby: list[tuple[str, str]] | None = None,
-                          recent_events: list[str] | None = None) -> list[dict]:
+                          recent_events: list[str] | None = None,
+                          existing_names: list[str] | None = None) -> list[dict]:
     traits = ", ".join(mon.get("traits", [])) or "no notable traits"
     system = (f"{setting.GEN_BRIEF}\n\n"
               f"You invent the TRUE individual identity of one {theme} dungeon inhabitant for "
               f"a Dungeon Master to roleplay from — facts, not a finished performance. "
-              f"You reply with STRICT JSON only — no text outside the JSON object.")
+              f"You reply with STRICT JSON only — no markdown code fences, no text outside the JSON object.")
     context = (f"A {mon['name']} (traits: {traits}) is found in {room_name} ({room_kind}): "
               f"{atmosphere}")
     if nearby:
@@ -320,20 +383,31 @@ def _npc_persona_messages(mon: dict, theme: str, room_name: str, room_kind: str,
         context += f" Nearby, already-explored areas: {listed}."
     if recent_events:
         context += f" Recently: {'; '.join(recent_events)}."
+    if existing_names:
+        # Without this the model tends to echo its OWN prompt example back verbatim
+        # (observed live: "Skarn the Ratcatcher" — the old example string — showed up as the
+        # actual generated name for unrelated creatures in two different worlds) or reuse a
+        # name that already belongs to someone else in this world.
+        context += f" Names already used in this world (do not reuse): {', '.join(existing_names)}."
     user = f"{context}\nReturn JSON: {_NPC_PERSONA_JSON}"
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
 
 async def generate_npc_persona(mon: dict, theme: str, room_name: str, room_kind: str,
                                atmosphere: str, nearby: list[tuple[str, str]] | None = None,
-                               recent_events: list[str] | None = None) -> dict:
-    """LLM-generate an individual identity (name/persona/goal/disposition) for one spawned
-    SRD creature — the compendium gives mechanics (hp/ac/traits), this gives who they ARE.
-    Tries Flash; falls back to a bare generic identity (species as name, neutral) if
-    disabled/error — the entity row still gets created, just without flavor."""
+                               recent_events: list[str] | None = None,
+                               existing_names: list[str] | None = None) -> dict:
+    """LLM-generate an individual identity (name/persona/goal/disposition/attack_flavor) for
+    one spawned SRD creature — the compendium gives mechanics (hp/ac/traits/attack_name), this
+    gives who they ARE and how their attack should actually read in a world where "Scimitar"
+    or "Bite" might not fit (see server.py's attack(), which prefers attack_flavor when set).
+    Tries Flash; falls back to a bare generic identity (species as name, neutral, no flavor
+    override) if disabled/error — the entity row still gets created, just without flavor.
+    `existing_names`: every name already used by an NPC in this world (state.py's
+    entity_names_in) — keeps identities unique instead of colliding across creatures/worlds."""
     messages = _npc_persona_messages(mon, theme, room_name, room_kind, atmosphere,
-                                     nearby, recent_events)
-    gen = await flash_llm.generate(messages, max_tokens=200, temperature=0.9)
+                                     nearby, recent_events, existing_names)
+    gen = await flash_llm.generate(messages, max_tokens=220, temperature=0.9)
     if gen:
         try:
             data = json.loads(gen[gen.find("{"): gen.rfind("}") + 1])
@@ -344,12 +418,25 @@ async def generate_npc_persona(mon: dict, theme: str, room_name: str, room_kind:
                 disposition = str(data.get("disposition") or "neutral").strip().lower()
                 if disposition not in ("hostile", "neutral", "ally"):
                     disposition = "neutral"
+                # it slots into "<name>'s <attack_flavor> hits you" verbatim in combat text
+                # (see server.py's attack()) — a small model doesn't reliably stick to "short
+                # noun phrase" despite the schema (observed: a full descriptive sentence with
+                # its own period). Reject anything sentence-shaped rather than let broken
+                # grammar reach a player; the raw SRD attack_name is still a safe fallback.
+                attack_flavor = str(data.get("attack_flavor") or "").strip().rstrip(".")
+                if "." in attack_flavor or len(attack_flavor.split()) > 6:
+                    attack_flavor = ""
+                elif attack_flavor:
+                    # mid-sentence casing ("The Ostrov's An ancient blade hits you") reads
+                    # oddly capitalized — this phrase only ever appears embedded, never alone.
+                    attack_flavor = attack_flavor[0].lower() + attack_flavor[1:]
                 return {"name": data["name"], "persona": data.get("persona", ""),
-                       "goal": data.get("goal", ""), "disposition": disposition, "via": "flash"}
+                       "goal": data.get("goal", ""), "disposition": disposition,
+                       "attack_flavor": attack_flavor, "via": "flash"}
         except Exception:
             logger.exception("generate_npc_persona: malformed Flash JSON, using procedural default: %r", gen)
     return {"name": mon["name"], "persona": "", "goal": "", "disposition": "neutral",
-           "via": "procedural"}
+           "attack_flavor": "", "via": "procedural"}
 
 
 def _npc_messages(npc: dict, theme: str, room_context: str, message: str,
