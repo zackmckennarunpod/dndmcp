@@ -140,7 +140,7 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
 <header><h1>⚔ DNDMCP</h1><span class=sub id=where>—</span>
  <span id=flashcount>⚡ 0 Flash calls</span>
  <button id=shareBtn title="Copies instructions to paste into your agent (Claude Code/Desktop) running dndmcp">🔗 Share</button></header>
-<details open class=panel style="margin:16px 18px 16px">
+<details open id=connectPanel class=panel style="margin:16px 18px 16px">
  <summary>🎲 Connect &amp; play — anyone can join, no account needed</summary>
  <div class=body>
   <p><b>1. Connect your agent</b> — pick whichever you use:</p>
@@ -216,7 +216,12 @@ const playerId = params.get('player');
 const campaignId = params.get('campaign') || 'main';
 const W=700, H=420;
 
-if (playerId) document.getElementById('exportStoryBtn').style.display = 'block';
+if (playerId) {
+  document.getElementById('exportStoryBtn').style.display = 'block';
+  // Already connected and playing — the onboarding instructions are noise at this point,
+  // not the first thing they need. Still there (one click away), just not in the way.
+  document.getElementById('connectPanel').removeAttribute('open');
+}
 
 // Share: copies join instructions, not just a URL — actually PLAYING requires the friend's
 // Connect & play panel: generic copy-to-clipboard for the install command / Desktop config,
