@@ -320,7 +320,8 @@ async def _maybe_spawn_entity_persona(new_room: dict, dest_id: str, theme: str,
     world.upsert_entity(entity_id=mon["id"], kind=kind, name=persona["name"],
                         location_id=dest_id, disposition=persona["disposition"],
                         persona=persona["persona"], goal=persona["goal"])
-    world.log("entity.spawned", f"{persona['name']} the {kind} appeared in {new_room['name']}.",
+    world.log("entity.spawned",
+             f"{persona['name']} the {kind} appeared in {new_room['name']} ({persona['via']}).",
              subject_type="entity", subject_id=mon["id"])
 
 
@@ -564,8 +565,9 @@ async def talk_to(player_id: str, message: str, npc_name: str | None = None) -> 
     result = await worldgen.generate_npc_response(npc_for_llm, camp.theme, room.description, message)
     world.append_entity_memory(ent.id, "player", message)
     world.append_entity_memory(ent.id, "npc", result["text"])
-    world.log("npc.talked", f"{ch.name} talked to {npc['name']}: {message!r}", player_id=player_id,
-             subject_type="entity", subject_id=ent.id)
+    world.log("npc.talked",
+             f"{ch.name} talked to {npc['name']}: {message!r} ({result['via']}).",
+             player_id=player_id, subject_type="entity", subject_id=ent.id)
     return f"💬 {npc['name']}: \"{result['text']}\""
 
 

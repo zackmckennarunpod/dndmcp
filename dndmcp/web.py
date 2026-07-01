@@ -290,8 +290,13 @@ def state(request: Request) -> JSONResponse:
         log = [dict(r) for r in c.execute(
             "SELECT text FROM log WHERE campaign_id=? ORDER BY seq DESC LIMIT 8", (campaign_id,)
         ).fetchall()][::-1]
+        # room.generated is the highest-volume Flash use, but entity.spawned (NPC persona
+        # generation) and npc.talked (NPC dialogue) also call Flash — count all three so the
+        # counter doesn't undercount just because personas are generated far more sparsely
+        # (deterministic density gate — see server.py::_maybe_spawn_entity_persona).
         flash_calls = c.execute(
-            "SELECT COUNT(*) FROM log WHERE campaign_id=? AND kind='room.generated' AND text LIKE '%(flash)%'",
+            "SELECT COUNT(*) FROM log WHERE campaign_id=?"
+            " AND kind IN ('room.generated','entity.spawned','npc.talked') AND text LIKE '%(flash)%'",
             (campaign_id,),
         ).fetchone()[0]
         return JSONResponse({"rooms": rooms, "players": players, "character": char,
