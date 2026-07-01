@@ -193,14 +193,31 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
  <span id=flashcount>⚡ 0 Flash calls</span>
  <span id=metricsLink title="Click to see system-wide metrics for this world">📊 Metrics</span>
  <button id=shareBtn title="Copies instructions to paste into your agent (Claude Code/Desktop) running dndmcp">🔗 Share</button></header>
-<!-- Always-visible, one-line "grab and go" — the full step-by-step (Claude Desktop config,
-     etc.) still lives in the Connect & play tab below the map, for anyone who wants it; this
-     is just the single command most people actually need, without burying it in a click or
-     pushing the map down a scroll to show it. -->
-<div class=panel style="margin:16px 18px 0 18px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:10px 14px">
- <span class=sub style="white-space:nowrap">🎲 Copy to play:</span>
- <div class=codebox style="flex:1;margin:0;min-width:260px"><code id=codeTop>curl -fsSL https://ldghdgi0xxn6jj-8002.proxy.runpod.net/install.sh | bash</code><button class=copyCodeBtn data-target=codeTop>Copy</button></div>
-</div>
+<!-- A bare command means nothing if you don't already know what an MCP server is — so this
+     is a real dropdown with the full "what do I actually do" explanation, not a copy-paste
+     strip, and it lives right under the header instead of buried below the map. -->
+<details class=panel id=connectDetails style="margin:16px 18px 0 18px">
+ <summary>🎲 How to connect &amp; play</summary>
+ <div class=body style="margin-top:10px">
+  <p><b>1. Connect your agent</b> — pick whichever you use:</p>
+  <div class=codebox><code id=codeCC>curl -fsSL https://ldghdgi0xxn6jj-8002.proxy.runpod.net/install.sh | bash</code><button class=copyCodeBtn data-target=codeCC>Copy</button></div>
+  <p class=sub style="margin:6px 0 14px">↑ <b>Claude Code</b> — one command, installs dndmcp pointed at this exact live shared world.</p>
+  <div class=codebox><pre id=codeCD>{
+  "mcpServers": {
+    "dndmcp": {
+      "type": "http",
+      "url": "https://ldghdgi0xxn6jj-8000.proxy.runpod.net/mcp"
+    }
+  }
+}</pre><button class=copyCodeBtn data-target=codeCD>Copy</button></div>
+  <p class=sub style="margin:6px 0 14px">↑ <b>Claude Desktop</b> — paste into <code>claude_desktop_config.json</code>
+  (macOS: <code>~/Library/Application Support/Claude/claude_desktop_config.json</code>), then restart the app.</p>
+  <p><b>2. Reconnect</b> — Claude Code: run <code>/mcp</code>; Claude Desktop: restart it — so it picks up the new server.</p>
+  <p><b>3. Say "start an adventure."</b> That's it. Your agent becomes the Dungeon Master — talk
+  naturally ("go through the door," "attack it," "look around"), you never need game-engine
+  syntax. You're joining THIS shared world, live, with everyone else currently playing.</p>
+ </div>
+</details>
 <main style="margin-top:16px">
  <div class="panel colPanel"><h2>World map (shared, live)</h2><div class=sub id=whereInMap style="margin-bottom:8px">—</div><div id=map><span id=mapEmpty class=empty>no adventure yet — start one in your agent</span><div id=nodeTooltip></div></div></div>
  <div class="panel colPanel"><h2><span id=streamDot></span><span id=streamTitle>Live world stream</span></h2>
@@ -237,28 +254,8 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
 </details>
 <div class=panel style="margin:0 18px 16px">
  <div class=tabbar>
-  <button class=tabBtn data-tab=connect>🎲 Connect &amp; play</button>
   <button class=tabBtn data-tab=browse>🌍 Browse other worlds</button>
   <button class=tabBtn data-tab=howworks>❔ How this works</button>
- </div>
- <div class="tabBody body" id=tab-connect>
-  <p><b>1. Connect your agent</b> — pick whichever you use:</p>
-  <div class=codebox><code id=codeCC>curl -fsSL https://ldghdgi0xxn6jj-8002.proxy.runpod.net/install.sh | bash</code><button class=copyCodeBtn data-target=codeCC>Copy</button></div>
-  <p class=sub style="margin:6px 0 14px">↑ <b>Claude Code</b> — one command, installs dndmcp pointed at this exact live shared world.</p>
-  <div class=codebox><pre id=codeCD>{
-  "mcpServers": {
-    "dndmcp": {
-      "type": "http",
-      "url": "https://ldghdgi0xxn6jj-8000.proxy.runpod.net/mcp"
-    }
-  }
-}</pre><button class=copyCodeBtn data-target=codeCD>Copy</button></div>
-  <p class=sub style="margin:6px 0 14px">↑ <b>Claude Desktop</b> — paste into <code>claude_desktop_config.json</code>
-  (macOS: <code>~/Library/Application Support/Claude/claude_desktop_config.json</code>), then restart the app.</p>
-  <p><b>2. Reconnect</b> — Claude Code: run <code>/mcp</code>; Claude Desktop: restart it — so it picks up the new server.</p>
-  <p><b>3. Say "start an adventure."</b> That's it. Your agent becomes the Dungeon Master — talk
-  naturally ("go through the door," "attack it," "look around"), you never need game-engine
-  syntax. You're joining THIS shared world, live, with everyone else currently playing.</p>
  </div>
  <div class="tabBody body" id=tab-browse>
   <input id=worldSearch placeholder="Search by theme or premise..."
@@ -323,12 +320,11 @@ function showTab(name){
 }
 document.querySelectorAll('.tabBtn').forEach(b => b.addEventListener('click', () => showTab(b.dataset.tab)));
 // Only the bare, cold "main" link (no ?player=, the world everyone lands on by default)
-// should open with the onboarding pitch already showing. A link into a SPECIFIC shared
+// should open with the connect dropdown already expanded. A link into a SPECIFIC shared
 // world means someone was already invited there — the generic "anyone can join" pitch is
-// noise, and an already-playing character doesn't need it either. Otherwise no tab is
-// active by default; the map/world-info speaks first.
+// noise, and an already-playing character doesn't need it either.
 if (campaignId === 'main' && !playerId) {
-  showTab('connect');
+  document.getElementById('connectDetails').open = true;
 }
 
 // Browse other worlds: campaign ids are opaque hex strings — nobody finds a world they don't
