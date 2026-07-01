@@ -118,10 +118,27 @@ async def generate_room_content(room_id: str, theme: str, *, entry_from: str | N
     # otherwise a generic "pouch of gold" keeps surviving next to genuinely on-theme content.
     items = [c for c in base["contents"] if c.get("type") == "loot"]
     messages = _room_messages(theme, entry_from, list(base["exits"].keys()), nearby, recent_events)
-    gen = await flash_llm.generate(messages, max_tokens=280, temperature=0.95)
-    if gen:
+
+    # A single bad sample (malformed JSON) or a transient endpoint hiccup (cold start,
+    # throttling — both observed in practice) shouldn't cost the room real content when a
+    # retry would likely just work. Up to 3 attempts before accepting the procedural
+    # fallback; each attempt re-samples fresh (same prompt, model's own temperature=0.95
+    # variance), so a retry is a genuinely different roll, not a repeat of the same failure.
+    data = None
+    for attempt in range(3):
+        gen = await flash_llm.generate(messages, max_tokens=280, temperature=0.95)
+        if not gen:
+            continue  # Flash off, or a transport-level error already logged inside generate()
         try:
             data = json.loads(gen[gen.find("{"): gen.rfind("}") + 1])
+            break
+        except Exception:
+            logger.warning("generate_room_content: malformed JSON on attempt %d/3, retrying: %r",
+                           attempt + 1, gen)
+            data = None
+
+    if data is not None:
+        try:
             if data.get("name"):
                 base["name"] = data["name"]
             if data.get("kind"):
@@ -178,7 +195,8 @@ async def generate_room_content(room_id: str, theme: str, *, entry_from: str | N
             want_monster = bool(data.get("has_monster", want_monster))
             via = "flash"
         except Exception:
-            logger.exception("generate_room_content: malformed Flash JSON, keeping procedural: %r", gen)
+            logger.exception("generate_room_content: valid JSON but error applying it, "
+                             "keeping procedural: %r", data)
 
     # The generic procedural pool (game.py._THEMES) only really knows "gothic horror" and a
     # bland "default" bucket — for any custom/agent-authored theme (the common case once a
