@@ -290,11 +290,11 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
  <summary>🔌 Prefer your own agent? Connect Claude Code / Claude Desktop &amp; play through it</summary>
  <div class=body style="margin-top:10px">
   <p><b>1. Connect your agent</b> — pick whichever you use:</p>
-  <p class=sub style="margin:10px 0 4px"><b>Claude Code — macOS / Linux / WSL:</b></p>
-  <div class=codebox><code id=codeCC>curl -fsSL https://ldghdgi0xxn6jj-8002.proxy.runpod.net/install.sh | bash</code><button class=copyCodeBtn data-target=codeCC>Copy</button></div>
-  <p class=sub style="margin:14px 0 4px"><b>Claude Code — Windows (PowerShell/cmd):</b> the curl-and-pipe
-  command above needs a Unix shell; this is the exact same install, run directly instead:</p>
+  <p class=sub style="margin:10px 0 4px"><b>Claude Code — any OS:</b> one command, done:</p>
   <div class=codebox><code id=codeCCWin>claude mcp add --transport http dndmcp -s user "https://ldghdgi0xxn6jj-8000.proxy.runpod.net/mcp"</code><button class=copyCodeBtn data-target=codeCCWin>Copy</button></div>
+  <p class=sub style="margin:14px 0 4px"><b>or the shell one-liner</b> (macOS/Linux/WSL — runs exactly the
+  command above, plus a friendly confirmation):</p>
+  <div class=codebox><code id=codeCC>curl -fsSL https://ldghdgi0xxn6jj-8002.proxy.runpod.net/install.sh | bash</code><button class=copyCodeBtn data-target=codeCC>Copy</button></div>
   <p class=sub style="margin:14px 0 4px"><b>Claude Desktop — any OS:</b> paste this into
   <code>claude_desktop_config.json</code>, then restart the app.<br>
   macOS: <code>~/Library/Application Support/Claude/claude_desktop_config.json</code><br>

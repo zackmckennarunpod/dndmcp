@@ -19,7 +19,7 @@ import uuid
 
 from mcp.server.fastmcp import FastMCP
 
-from . import art, compendium, game, linear_gen, worldgen
+from . import art, compendium, game, linear_gen, pairing, worldgen
 from .linear_world import TicketWorld
 from .models import Campaign, Room
 from .state import MAIN_CAMPAIGN_ID, World, request_context
@@ -48,6 +48,10 @@ How to run the game:
   shareable world id. ALWAYS restate ALL of these plainly in your own reply, near the top —
   don't leave them buried in the raw tool output where the player might miss them. Same goes
   for get_state or any other call that surfaces the link again later.
+- If the player's setup message mentions a PAIRING CODE (a two-word phrase like "ember-fox" —
+  it comes from the live map's setup wizard), call claim_pairing(player_id, code) right after
+  start_adventure so the map page recognizes their character. If no code was mentioned, never
+  ask for one — the game works identically without it.
 - The tools hand you FACTS, not finished prose: a room's name, kind, one atmosphere note,
   features, contents, and which exits are known vs unexplored. That's your notes, same as a
   human DM's — YOU write the actual scene in your own voice, richly, from those facts. Don't
@@ -396,6 +400,25 @@ async def start_adventure(theme: str = "gothic horror", character_name: str = "W
             f"(HP {char.hp}, AC {char.ac}).\n\n**player_id: `{player_id}`** — pass this to every "
             f"other tool call.{share_note}\n\n🗺 Watch your adventure live: {map_link}\n\n"
             + _render_scene(room, player_id=player_id))
+
+
+@mcp.tool()
+def claim_pairing(player_id: str, code: str) -> str:
+    """Link this player's character to an onboarding pairing code from the live map's setup
+    wizard. Call this IMMEDIATELY after start_adventure whenever the player mentioned a
+    pairing code (a two-word phrase like "ember-fox") anywhere in their setup message — it
+    lets the map page they're looking at recognize their character and hand them their own
+    live map link. Entirely optional: if no code was mentioned, never ask for one; the game
+    works identically without it."""
+    ch = world.character(player_id)
+    if not ch:
+        return "Unknown player_id. Call start_adventure first."
+    if pairing.claim(code, player_id=player_id, name=ch.name, campaign_id=ch.campaign_id):
+        return (f"✓ Paired. The map page {ch.name}'s player has open will now recognize them "
+                f"and show their personal live link — no need to relay anything else.")
+    return ("That pairing code is unknown, expired, or already used. Not a problem for the "
+            "game itself — tell the player they can mint a fresh code from the map page's "
+            "setup wizard if they still want the pairing, and carry on with the adventure.")
 
 
 @mcp.tool()
