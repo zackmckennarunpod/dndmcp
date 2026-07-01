@@ -38,7 +38,11 @@ case "${1:-resolve}" in
   run)
     read -r HOST PORT <<< "$(resolve)"
     [ -n "$HOST" ] || { echo "Could not resolve pod SSH endpoint (is it running?)" >&2; exit 1; }
-    ssh -o StrictHostKeyChecking=accept-new -i "$KEY" -p "$PORT" root@"$HOST" "$2"
+    # RUNPOD_POD_ID isn't auto-injected into this pod's container (verified: unset in both an
+    # SSH login shell and the running app's own /proc/<pid>/environ) — export it ourselves so
+    # anything launched via `run` (redeploy_pod.sh included) gets the real pod-proxy URL instead
+    # of falling back to localhost (see server.py's _gui_link()).
+    ssh -o StrictHostKeyChecking=accept-new -i "$KEY" -p "$PORT" root@"$HOST" "export RUNPOD_POD_ID='$POD_ID'; $2"
     ;;
   *)
     echo "usage: $0 {resolve|run <cmd>}" >&2; exit 1
