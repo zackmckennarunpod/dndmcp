@@ -63,10 +63,10 @@ _THEMES = {
         # called on a breath, dismissed on a breath, never idle a moment longer than needed.
         # Then the Weave sundered. An allegory for on-demand compute (spin up, do the work,
         # scale to zero) without naming it — the essence, not the joke.
-        "rooms": ["a forge-hall gone cold", "a conjuror's atrium, circles scorched into the floor",
-                  "a spirit-warded archive", "a collapsed summoning chamber",
-                  "a current-well, long since drained", "a binding-yard littered with broken sigils",
-                  "a scribe's cell, ledgers of names left unfinished"],
+        "rooms": ["forge-hall gone cold", "conjuror's atrium, circles scorched into the floor",
+                  "spirit-warded archive", "collapsed summoning chamber",
+                  "current-well, long since drained", "binding-yard littered with broken sigils",
+                  "scribe's cell, ledgers of names left unfinished"],
         "monsters": [("unbound wisp", 6, 3), ("echo-bound sentinel", 15, 5),
                      ("feral current-hound", 10, 4), ("scorched familiar", 8, 3)],
         "loot": ["a cracked binding-sigil, still warm", "a spool of current-thread",
