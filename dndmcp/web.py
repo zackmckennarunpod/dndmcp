@@ -250,7 +250,7 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
      is a real dropdown with the full "what do I actually do" explanation, not a copy-paste
      strip, and it lives right under the header instead of buried below the map. -->
 <details class=panel id=connectDetails style="margin:16px 18px 0 18px">
- <summary>🎲 How to connect &amp; play</summary>
+ <summary>🔌 Prefer your own agent? Connect Claude Code / Claude Desktop &amp; play through it</summary>
  <div class=body style="margin-top:10px">
   <p><b>1. Connect your agent</b> — pick whichever you use:</p>
   <p class=sub style="margin:10px 0 4px"><b>Claude Code — macOS / Linux / WSL:</b></p>
@@ -428,16 +428,21 @@ document.querySelectorAll('.midTabBtn').forEach(b => b.addEventListener('click',
 
 // Kill switch check (DND_BROWSER_DM): only reveal the "Play here" tab once the server
 // confirms browser play is actually on. Fails closed (pane stays hidden) on any fetch error.
+// When it IS on, a cold visitor (no ?player=) lands with the chat tab already selected and
+// focused — browser play is the zero-friction front door now, so the first thing a new
+// visitor sees must be "type here to play", not a wall of install commands. The connect
+// panel below stays collapsed for the same reason (it USED to auto-expand for cold main
+// visits, which pushed the entire game below the fold — observed live, confusing) — the
+// BYO-agent path stays one labeled click away, just no longer the landing experience.
 fetch('/chat/enabled').then(r => r.json()).then(d => {
-  if (d.enabled) document.getElementById('chatTabBtn').style.display = '';
+  if (!d.enabled) return;
+  document.getElementById('chatTabBtn').style.display = '';
+  if (!playerId) {
+    showMidTab('chat');
+    const input = document.getElementById('chatInput');
+    if (input) input.focus();
+  }
 }).catch(() => {});
-// Only the bare, cold "main" link (no ?player=, the world everyone lands on by default)
-// should open with the connect dropdown already expanded. A link into a SPECIFIC shared
-// world means someone was already invited there — the generic "anyone can join" pitch is
-// noise, and an already-playing character doesn't need it either.
-if (campaignId === 'main' && !playerId) {
-  document.getElementById('connectDetails').open = true;
-}
 
 // Browse other worlds: campaign ids are opaque hex strings — nobody finds a world they don't
 // already have a link to without this. Fetched once (worlds don't churn fast enough to need
@@ -819,7 +824,7 @@ async function tick(){
     document.getElementById('staleBanner').style.display = 'block';
   }
   const worldTag = campaignId !== 'main' ? `[world: ${campaignId}] ` : '';
-  const whereText = worldTag + (s.current_room ? ('You are in: '+(s.current_room.name||'')) : (playerId ? 'unknown player' : 'Spectating — connect your agent to the MCP server to start your own session'));
+  const whereText = worldTag + (s.current_room ? ('You are in: '+(s.current_room.name||'')) : (playerId ? 'unknown player' : 'Spectating — hit 🎲 Play here to join from your browser, or connect your own agent below'));
   document.getElementById('where').textContent = whereText;
   document.getElementById('whereInMap').textContent = whereText;
   renderGraph(s.rooms||[], s.players||[], s.you||null);
