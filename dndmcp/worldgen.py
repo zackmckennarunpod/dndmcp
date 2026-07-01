@@ -24,6 +24,16 @@ from . import compendium, flash_llm, game, setting
 
 logger = logging.getLogger(__name__)
 
+# A level-1 solo player must never be handed a monster built for a full high-level party.
+# _RANDOM_ENCOUNTER_MAX_CR bounds the procedural "no specific monster requested" pool.
+# _MAX_MATCHED_MONSTER_CR bounds what a fuzzy name match (get_monster, which does NOT itself
+# filter by CR) is allowed to hand back before we reject it and fall back to random_encounter —
+# set a bit above the random pool's cap so an intentionally "small but scary-named" match (e.g.
+# a low-CR "Specter") isn't rejected, while a genuinely high-CR fuzzy hit (e.g. "Dragon"
+# matching an ancient dragon) is.
+_RANDOM_ENCOUNTER_MAX_CR = 1.0
+_MAX_MATCHED_MONSTER_CR = 2.0
+
 # No hardcoded theme→creature table on purpose: a fixed Python mapping can only ever cover
 # the themes someone thought to enumerate, and a "sci-fi frontier" bandit swinging a Scimitar
 # (a real bug this replaced — see generate_room_content's monster_type handling below) just
@@ -331,11 +341,24 @@ async def generate_room_content(room_id: str, theme: str, *, entry_from: str | N
         mon = None
         if monster_type:
             found = compendium.get_monster(monster_type)
+            # get_monster does substring/fuzzy matching with NO CR filter — the model's
+            # invented monster_type (e.g. "dragon", "specter") can fuzzy-match the first SRD
+            # entry containing that substring at ANY CR, including monsters built for a
+            # whole party of high-level characters (HP 150+, +14 to hit). Handing that to a
+            # level-1 solo player is an unwinnable, unfair death sentence. Reject the match
+            # if it's over-leveled and fall through to the same CR-capped random_encounter
+            # path used below when there's no monster_type at all.
+            if found and found.get("challenge_rating") is not None \
+                    and found["challenge_rating"] > _MAX_MATCHED_MONSTER_CR:
+                logger.info("generate_room_content: rejecting over-CR fuzzy match %r (CR %s) "
+                           "for monster_type %r, falling back to random_encounter",
+                           found.get("name"), found.get("challenge_rating"), monster_type)
+                found = None
             if found:
                 mon = compendium.combat_profile(found)
                 mon["name"] = monster_type
         if mon is None:
-            rm = compendium.random_encounter(1.0, rng)
+            rm = compendium.random_encounter(_RANDOM_ENCOUNTER_MAX_CR, rng)
             if rm:
                 if monster_type:
                     rm["name"] = monster_type
