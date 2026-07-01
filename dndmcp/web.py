@@ -487,23 +487,68 @@ setInterval(tick,1500);tick();
 // Live world stream — every domain event, from every player's session, pushed here as it
 // happens. Deliberately unfiltered by playerId: this is the out-of-world view of the same
 // stigmergic mechanic that shows up in-game as "Traces of those who came before."
+//
+// Reconnectable so the Flash-only toggle can swap filters live: default mode only ever shows
+// events from "now" forward (matches the SSE endpoint's default), but Flash-only mode passes
+// backfill=1 so clicking it actually shows the world's FULL Flash-call history, not just
+// whatever happens to arrive after you click.
 const streamEl = document.getElementById('stream');
 const streamDot = document.getElementById('streamDot');
-const es = new EventSource('/stream/events?campaign='+encodeURIComponent(campaignId));
-es.addEventListener('world-event', (e) => {
-  const ev = JSON.parse(e.data);
-  const empty = streamEl.querySelector('.empty');
-  if (empty) empty.remove();
-  const div = document.createElement('div');
-  div.className = 'new';
-  const who = ev.player_id ? `<span class=who>${esc(ev.player_id.slice(0,6))}</span> ` : '';
-  div.innerHTML = `${who}${highlightKnown(esc(ev.text))}`;
-  streamEl.prepend(div);
-  while (streamEl.children.length > 50) streamEl.lastChild.remove();
-  setTimeout(() => div.classList.remove('new'), 900);
+const streamTitle = document.getElementById('streamTitle');
+const filterBtn = document.getElementById('streamFilterBtn');
+let es = null;
+let flashOnly = false;
+let streamCaughtUp = true;
+
+function connectStream(){
+  if (es) es.close();
+  streamEl.innerHTML = '<div class=empty>waiting for the world to move...</div>';
+  let url = '/stream/events?campaign='+encodeURIComponent(campaignId);
+  if (flashOnly) url += '&flash_only=1&backfill=1';
+  es = new EventSource(url);
+  es.addEventListener('world-event', (e) => {
+    const ev = JSON.parse(e.data);
+    const empty = streamEl.querySelector('.empty');
+    if (empty) empty.remove();
+    const div = document.createElement('div');
+    const who = ev.player_id ? `<span class=who>${esc(ev.player_id.slice(0,6))}</span> ` : '';
+    div.innerHTML = `${who}${highlightKnown(esc(ev.text))}`;
+    streamEl.prepend(div);
+    while (streamEl.children.length > 50) streamEl.lastChild.remove();
+    // backfilled rows arrive all at once on connect — only flash the ones that show up
+    // AFTER that initial catch-up, same "something just happened" cue as the default mode.
+    if (!flashOnly || streamCaughtUp) {
+      div.classList.add('new');
+      setTimeout(() => div.classList.remove('new'), 900);
+    }
+  });
+  es.onerror = () => { streamDot.style.background = '#ef4444'; };
+  es.onopen = () => {
+    streamDot.style.background = '#22c55e';
+    streamCaughtUp = false;
+    setTimeout(() => { streamCaughtUp = true; }, 800);
+  };
+}
+
+filterBtn.addEventListener('click', () => {
+  flashOnly = !flashOnly;
+  filterBtn.classList.toggle('active', flashOnly);
+  filterBtn.textContent = flashOnly ? '✕ Showing Flash calls only' : '⚡ Flash calls only';
+  streamTitle.textContent = flashOnly
+    ? "Flash calls — every GPU generation call this world has made"
+    : 'Live world stream — every player, every session';
+  connectStream();
 });
-es.onerror = () => { streamDot.style.background = '#ef4444'; };
-es.onopen = () => { streamDot.style.background = '#22c55e'; };
+
+// Clicking the header counter jumps straight to the (now Flash-filtered) stream panel —
+// "see all the flash calls that were made" in one click, not a separate view to hunt for.
+document.getElementById('flashcount').style.cursor = 'pointer';
+document.getElementById('flashcount').addEventListener('click', () => {
+  if (!flashOnly) filterBtn.click();
+  document.getElementById('streamSection').scrollIntoView({behavior:'smooth', block:'start'});
+});
+
+connectStream();
 </script></body></html>"""
 
 
