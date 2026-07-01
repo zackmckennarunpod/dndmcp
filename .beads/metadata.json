@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "server",
+  "dolt_database": "flash_hackathon",
+  "project_id": "009b1b06-d05f-49f1-b819-fc176024e176"
+}
