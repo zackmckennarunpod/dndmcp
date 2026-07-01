@@ -28,7 +28,12 @@ mkdir -p /data
 # setsid fully detaches into a new session so the SSH channel can close immediately —
 # nohup+disown alone can still hold the channel open waiting on inherited fds, hanging
 # the ssh command until it is killed (learned the hard way: showed up as exit 255).
-DNDMCP_STATE_DIR=/data DNDMCP_TRANSPORT=http PORT=8000 GUI_PORT=8002 DND_FLASH_LLM=1 RUNPOD_API_KEY='$RUNPOD_API_KEY' \
+# DND_LLM_ENDPOINT/DND_LLM_MODEL: ALL game generation (world-gen + browser DM) runs on the
+# one 7B endpoint now — one warm worker instead of two, and 7B beats the 1.5B on JSON/tool
+# compliance (fewer malformed-sample retries). The model value must match that endpoint's
+# own loaded MODEL_NAME; flash_llm resolves the endpoint by name and never reconfigures it.
+DNDMCP_STATE_DIR=/data DNDMCP_TRANSPORT=http PORT=8000 GUI_PORT=8002 DND_FLASH_LLM=1 \
+  DND_LLM_ENDPOINT=dnd-dm-vllm DND_LLM_MODEL='Qwen/Qwen2.5-7B-Instruct' RUNPOD_API_KEY='$RUNPOD_API_KEY' \
   setsid nohup python3.11 -m dndmcp.app > /tmp/dndmcp.log 2>&1 < /dev/null &
 sleep 3
 echo '--- status ---'

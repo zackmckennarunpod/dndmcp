@@ -15,6 +15,7 @@ import json
 import os
 import secrets
 import sqlite3
+import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -68,9 +69,30 @@ class World:
 
     def __init__(self, db_path: str | Path | None = None):
         self.path = Path(db_path) if db_path else _state_dir() / "campaign.db"
-        self._c = sqlite3.connect(str(self.path))
-        self._c.row_factory = sqlite3.Row
+        self._local = threading.local()
         self._init()
+
+    @property
+    def _c(self) -> sqlite3.Connection:
+        # One connection PER THREAD, created lazily. A single shared connection breaks the
+        # moment World is used off its creating thread: the pod runs MCP on the main thread
+        # and the GUI on a daemon thread (app.py), and the browser-DM chat path (web.py ->
+        # dm_loop -> server.py tool functions) drives THIS object from the GUI thread —
+        # sqlite3's default check_same_thread=True makes that an instant ProgrammingError.
+        # Thread-local connections + WAL make cross-thread use safe without a global lock:
+        # WAL lets a reader and a writer proceed concurrently instead of blocking each other
+        # (the GUI polls every 1.5s while the game writes constantly), and the 5s busy
+        # timeout absorbs the rare write-write collision instead of surfacing "database is
+        # locked" mid-turn. WAL is a persistent property of the DB file; setting it on every
+        # connection is an idempotent no-op after the first.
+        conn = getattr(self._local, "conn", None)
+        if conn is None:
+            conn = sqlite3.connect(str(self.path), timeout=5)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=5000")
+            self._local.conn = conn
+        return conn
 
     def _init(self) -> None:
         # Additive only — every statement below is idempotent (IF NOT EXISTS), so re-running

@@ -59,7 +59,11 @@ SERVER_VERSION = _server_version()
 
 def _db() -> sqlite3.Connection:
     state_dir = os.environ.get("DNDMCP_STATE_DIR", os.path.expanduser("~/.dndmcp"))
-    c = sqlite3.connect(str(Path(state_dir) / "campaign.db"))
+    # timeout=5: the game process writes constantly; without a busy timeout a read that
+    # lands mid-write surfaces as "database is locked" and blanks the map for that poll.
+    # WAL (set persistently by state.World's connections) makes these reads non-blocking
+    # in the common case; the timeout covers the rest.
+    c = sqlite3.connect(str(Path(state_dir) / "campaign.db"), timeout=5)
     c.row_factory = sqlite3.Row
     return c
 
