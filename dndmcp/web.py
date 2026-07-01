@@ -90,11 +90,18 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
  .hl-item{color:var(--warm);font-weight:600}
 #flashcount{color:var(--warm);font-weight:600;margin-left:auto;transition:transform .15s}
 #flashcount.pulse{transform:scale(1.3);color:var(--warm-bright)}
+#staleBanner{display:none;background:var(--warm);color:#1a1206;font-weight:600;font-size:12.5px;
+  padding:7px 18px;text-align:center}
+#staleBanner a{color:#1a1206;text-decoration:underline}
 #shareBtn{background:var(--link);color:var(--ghost-bright);border:1px solid var(--border);
   border-radius:6px;padding:5px 11px;font:600 12px 'IBM Plex Mono',monospace;cursor:pointer;
   transition:background .15s}
 #shareBtn:hover{background:var(--visited)}
 #shareBtn.copied{background:var(--ghost);color:var(--bg)}
+#streamFilterBtn{background:transparent;color:var(--muted);border:1px solid var(--border);
+  border-radius:5px;padding:2px 9px;font:600 10.5px 'IBM Plex Mono',monospace;cursor:pointer;
+  text-transform:none;letter-spacing:0}
+#streamFilterBtn.active{background:var(--warm);color:#1a1206;border-color:var(--warm)}
  #stream{display:flex;flex-direction:column-reverse;gap:0;height:120px;overflow-y:auto}
  #stream div{color:var(--muted);padding:2px 0;border-bottom:1px solid var(--border-soft);font-size:12px}
  #stream div.new{animation:flash .8s ease-out}
@@ -113,6 +120,7 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
  details.panel .body a{color:var(--ghost-bright);text-decoration:underline;text-decoration-color:var(--ghost)}
  details.panel .body p{margin:0 0 10px}
 </style></head><body>
+<div id=staleBanner>⟳ This tab is running an older version of the page — <a href="#" onclick="location.reload();return false">refresh to update</a></div>
 <header><h1>⚔ DNDMCP</h1><span class=sub id=where>—</span>
  <span id=flashcount>⚡ 0 Flash calls</span>
  <button id=shareBtn title="Copy this world's join link">🔗 Share</button></header>
@@ -155,8 +163,9 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
   <div class=panel><h2>Recent</h2><div class=log id=log></div></div>
  </aside>
 </main>
-<div style="padding:0 18px 18px">
- <div class=panel><h2><span id=streamDot></span>Live world stream — every player, every session</h2>
+<div style="padding:0 18px 18px" id=streamSection>
+ <div class=panel><h2><span id=streamDot></span><span id=streamTitle>Live world stream — every player, every session</span>
+   <button id=streamFilterBtn style="margin-left:10px">⚡ Flash calls only</button></h2>
    <div id=stream><div class=empty>waiting for the world to move...</div></div></div>
 </div>
 <script src="https://d3js.org/d3.v7.min.js"></script>
@@ -433,6 +442,14 @@ async function tick(){
   const url = '/state?campaign='+encodeURIComponent(campaignId)
     + (playerId ? '&player='+encodeURIComponent(playerId) : '');
   const s = await (await fetch(url)).json();
+  // Detect "the server redeployed since this tab loaded" — a long-lived tab only ever
+  // fetches fresh DATA here, it never re-fetches its own JS, so stale rendering code can
+  // silently misbehave against a data shape it wasn't written for (e.g. only some of the
+  // graph's nodes drawing). Surface a refresh prompt instead of failing confusingly.
+  if(loadedVersion === null){ loadedVersion = s.server_version; }
+  else if(s.server_version && s.server_version !== loadedVersion){
+    document.getElementById('staleBanner').style.display = 'block';
+  }
   const worldTag = campaignId !== 'main' ? `[world: ${campaignId}] ` : '';
   const whereText = worldTag + (s.current_room ? ('You are in: '+(s.current_room.name||'')) : (playerId ? 'unknown player' : 'spectating — no ?player= in link'));
   document.getElementById('where').textContent = whereText;
@@ -464,6 +481,7 @@ async function tick(){
  }catch(e){}
 }
 let lastFlashCalls = -1;
+let loadedVersion = null;
 setInterval(tick,1500);tick();
 
 // Live world stream — every domain event, from every player's session, pushed here as it
@@ -494,7 +512,7 @@ def index() -> str:
     return PAGE
 
 
-_EMPTY_STATE = {"rooms": [], "players": [], "character": None, "you": None, "current_room": None, "log": [], "flash_calls": 0, "campaign": None}
+_EMPTY_STATE = {"rooms": [], "players": [], "character": None, "you": None, "current_room": None, "log": [], "flash_calls": 0, "campaign": None, "server_version": SERVER_VERSION}
 
 
 @app.get("/state")
@@ -599,12 +617,22 @@ async def stream_events(request: Request):
     Optional filters (EVENT_STREAM_SPEC.md #4 — a separate capability layered on top, same
     feed mechanism): ?player_id=  (one player's own events), ?subject_type=&subject_id=
     (one room/npc's history), ?kind_prefix=  (e.g. "flash." for system/GPU events vs
-    everything else). Combine freely; each is AND'd in."""
+    everything else). Combine freely; each is AND'd in.
+
+    ?flash_only=1: text LIKE '%(flash)%' — the same condition /state's flash_calls counter
+    uses, but as a stream filter (Flash calls span several `kind`s — room.generated,
+    entity.spawned, npc.talked, item.picked_up — so kind_prefix alone can't isolate them).
+
+    ?backfill=1: start from seq 0 instead of "now" — without this, a fresh connection only
+    ever sees events from the moment it opened, same as the default stream. Backfill is what
+    makes "click the Flash counter, see every call this world has ever made" possible."""
     campaign_id = request.query_params.get("campaign") or "main"
     player_id = request.query_params.get("player_id")
     subject_type = request.query_params.get("subject_type")
     subject_id = request.query_params.get("subject_id")
     kind_prefix = request.query_params.get("kind_prefix")
+    flash_only = request.query_params.get("flash_only") == "1"
+    backfill = request.query_params.get("backfill") == "1"
 
     where = ["campaign_id = ?"]
     params: list[object] = [campaign_id]
@@ -617,16 +645,19 @@ async def stream_events(request: Request):
     if kind_prefix:
         where.append("kind LIKE ?")
         params.append(f"{kind_prefix}%")
+    if flash_only:
+        where.append("text LIKE '%(flash)%'")
     extra_where = (" AND " + " AND ".join(where)) if where else ""
 
     async def gen():
         last_seq = 0
-        try:
-            c = _db()
-            last_seq = c.execute("SELECT COALESCE(MAX(seq), 0) FROM log").fetchone()[0]
-            c.close()
-        except Exception:
-            pass
+        if not backfill:
+            try:
+                c = _db()
+                last_seq = c.execute("SELECT COALESCE(MAX(seq), 0) FROM log").fetchone()[0]
+                c.close()
+            except Exception:
+                pass
         while True:
             if await request.is_disconnected():
                 break
