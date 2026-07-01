@@ -478,12 +478,18 @@ document.querySelectorAll('.midTabBtn').forEach(b => b.addEventListener('click',
 // visits, which pushed the entire game below the fold — observed live, confusing) — the
 // BYO-agent path stays one labeled click away, just no longer the landing experience.
 fetch('/chat/enabled').then(r => r.json()).then(d => {
-  // ?player= means this tab is the companion map for someone ALREADY playing through their
-  // own MCP agent — offering the browser chat there would just mint a confusing second
-  // character alongside the one their agent drives. Hide the tab entirely for them; the
-  // bare URL (no ?player=) is always one click away if they genuinely want browser play.
-  if (!d.enabled || playerId) return;
+  if (!d.enabled) return;
+  // The tab is ALWAYS available once browser play is on — a visitor may want to play here
+  // regardless of how they arrived. But only a cold visit (no ?player=) auto-SELECTS it:
+  // ?player= means this tab is the companion map for someone already playing through their
+  // own MCP agent, so it lands on the live stream instead, and the chat carries a note that
+  // playing here is a separate browser character, not a handle on their agent's session.
   document.getElementById('chatTabBtn').style.display = '';
+  if (playerId) {
+    addChatMessage('system', "heads up: you're watching an agent-driven session — playing " +
+      'here starts a separate browser character, not control of that one.');
+    return;
+  }
   showMidTab('chat');
   const input = document.getElementById('chatInput');
   if (input) input.focus();
