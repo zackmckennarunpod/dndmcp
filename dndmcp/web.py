@@ -52,8 +52,33 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
  #stream .who{color:#f5a524}
  @keyframes flash{from{background:#f5a52433}to{background:transparent}}
  #streamDot{width:8px;height:8px;border-radius:50%;background:#22c55e;display:inline-block;margin-right:6px}
+ details.panel{margin:0 18px 16px;cursor:default}
+ details.panel summary{cursor:pointer;font-size:11px;text-transform:uppercase;letter-spacing:1px;
+   color:#7d8794;list-style:none;display:flex;align-items:center;gap:6px}
+ details.panel summary::-webkit-details-marker{display:none}
+ details.panel summary::before{content:'▸';transition:transform .15s}
+ details.panel[open] summary::before{content:'▾'}
+ details.panel .body{margin-top:10px;color:#9fb1c1;line-height:1.6;font-size:12.5px}
+ details.panel .body b{color:#e6edf3}
+ details.panel .body p{margin:0 0 10px}
 </style></head><body>
 <header><h1>⚔ DNDMCP</h1><span class=sub id=where>—</span><span id=flashcount>⚡ 0 Flash calls</span></header>
+<details class=panel style="margin:16px 18px 0">
+ <summary>How this works</summary>
+ <div class=body>
+  <p>Under the hood this isn't a D&amp;D-specific engine — it's a generic graph: every room,
+  item, and NPC is a <b>node</b>, connections between them (an exit, ownership, a relationship)
+  are typed <b>edges</b>, and everything that happens is an append-only <b>event log</b>.
+  The D&amp;D adventure you're watching is one skin on that engine — the same server also runs
+  a Linear-style task graph (nodes = tickets, edges = links, same event log) with zero changes
+  to the underlying mechanics.</p>
+  <p>When the world needs new content — the next room, an NPC's response — the LLM is never
+  generating in isolation. It's fed the <b>surrounding graph context</b>: nearby
+  already-generated nodes a couple hops out, and recent events near this spot, so whatever it
+  invents stays consistent with what's already real in this world instead of contradicting it.
+  That's the "world stream" below and the map itself: both are live views of that same graph.</p>
+ </div>
+</details>
 <main>
  <div class=panel><h2>World map (shared, live)</h2><div class=sub id=whereInMap style="margin-bottom:8px">—</div><div id=map><span id=mapEmpty class=empty>no adventure yet — start one in your agent</span><div id=nodeTooltip></div></div></div>
  <aside style="display:flex;flex-direction:column;gap:16px">
