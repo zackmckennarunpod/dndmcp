@@ -36,7 +36,7 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
  main{display:grid;grid-template-columns:1fr 280px;gap:16px;padding:16px 18px}
  .panel{background:#141a24;border:1px solid #222c3a;border-radius:10px;padding:14px}
  .panel h2{font-size:11px;text-transform:uppercase;letter-spacing:1px;color:#7d8794;margin:0 0 10px}
- #map{width:100%;height:420px;overflow:auto;position:relative}
+ #map{width:100%;height:420px;overflow:hidden;position:relative}
  #nodeTooltip{position:absolute;pointer-events:none;background:#1c2532;border:1px solid #334155;
    border-radius:6px;padding:4px 9px;font-size:12px;color:#e6edf3;display:none;z-index:10;
    box-shadow:0 4px 12px rgba(0,0,0,.4)}
@@ -81,9 +81,17 @@ function esc(s){ return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&l
 // touch the DOM, instead of throwing away and rebuilding the whole SVG as a string each tick.
 const svg = d3.select('#map').append('svg').attr('width','100%').attr('height',H)
   .attr('viewBox',`0 0 ${W} ${H}`);
-const linkLayer = svg.append('g');
-const frontierLayer = svg.append('g');
-const nodeLayer = svg.append('g');
+// Fixed viewBox + a growing world means nodes eventually drift past the edge with no way to
+// see them (browser scroll does nothing for SVG content — it just clips). Real pan/zoom via
+// d3-zoom instead: scroll wheel to zoom, drag to pan, applied to one wrapper group so the
+// force simulation's own coordinates never need to change.
+const zoomLayer = svg.append('g');
+const linkLayer = zoomLayer.append('g');
+const frontierLayer = zoomLayer.append('g');
+const nodeLayer = zoomLayer.append('g');
+svg.call(d3.zoom().scaleExtent([0.25, 4]).on('zoom', (event) => {
+  zoomLayer.attr('transform', event.transform);
+}));
 
 const simulation = d3.forceSimulation()
   .force('charge', d3.forceManyBody().strength(-220))
