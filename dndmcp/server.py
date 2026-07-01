@@ -258,7 +258,7 @@ async def start_adventure(theme: str = "gothic horror", character_name: str = "W
                               f"seeking what others feared to find.")
         camp = world.create_campaign(target_id, theme=theme, premise=premise, start_room=start_id)
         gen = await worldgen.generate_room_content(start_id, theme, salt=camp.salt)
-        await _maybe_spawn_entity_persona(gen, start_id, theme, [])  # no neighbors yet
+        await _maybe_spawn_entity_persona(gen, start_id, theme, [], campaign_id=target_id)  # no neighbors yet
         world.upsert_room(room_id=start_id, campaign_id=target_id, name=gen["name"],
                           description=gen["description"], exits=gen["exits"],
                           contents=gen["contents"], features=gen.get("features"),
@@ -302,12 +302,13 @@ _NPC_DENSITY_LIMIT = 2
 
 
 async def _maybe_spawn_entity_persona(new_room: dict, dest_id: str, theme: str,
-                                      nearby_room_ids: list[str]) -> None:
+                                      nearby_room_ids: list[str], *, campaign_id: str) -> None:
     """If this room's procedural gen placed a monster, decide (deterministically, from what's
     already alive nearby) whether it's worth a full LLM persona, generate one, and store it
     as a first-class `entity` row. Mutates new_room['contents'] in place so the monster's
     display name matches its generated identity before the room is even saved — call this
-    BEFORE world.upsert_room."""
+    BEFORE world.upsert_room. `campaign_id` is required (not resolved from a player_id, since
+    this runs during background room-gen with no requesting player in scope)."""
     mon = next((c for c in new_room["contents"] if c.get("type") == "monster"), None)
     if not mon:
         return
@@ -317,12 +318,13 @@ async def _maybe_spawn_entity_persona(new_room: dict, dest_id: str, theme: str,
     persona = await worldgen.generate_npc_persona(
         mon, theme, new_room["name"], new_room.get("kind", ""), new_room["description"])
     mon["name"] = persona["name"]
-    world.upsert_entity(entity_id=mon["id"], kind=kind, name=persona["name"],
-                        location_id=dest_id, disposition=persona["disposition"],
-                        persona=persona["persona"], goal=persona["goal"])
+    world.upsert_entity(entity_id=mon["id"], campaign_id=campaign_id, kind=kind,
+                        name=persona["name"], location_id=dest_id,
+                        disposition=persona["disposition"], persona=persona["persona"],
+                        goal=persona["goal"])
     world.log("entity.spawned",
              f"{persona['name']} the {kind} appeared in {new_room['name']} ({persona['via']}).",
-             subject_type="entity", subject_id=mon["id"])
+             campaign_id=campaign_id, subject_type="entity", subject_id=mon["id"])
 
 
 async def _generate_and_link(dest_id: str, theme: str, campaign_id: str, salt: str, *,
@@ -335,7 +337,8 @@ async def _generate_and_link(dest_id: str, theme: str, campaign_id: str, salt: s
     new_room = await worldgen.generate_room_content(
         dest_id, theme, entry_from=entry_from, nearby=nearby, salt=salt)
     new_room["exits"][game.opposite_of(entry_from)] = back_to_id
-    await _maybe_spawn_entity_persona(new_room, dest_id, theme, [rid for _, _, rid in nearby_full])
+    await _maybe_spawn_entity_persona(new_room, dest_id, theme, [rid for _, _, rid in nearby_full],
+                                      campaign_id=campaign_id)
     world.upsert_room(room_id=dest_id, campaign_id=campaign_id, name=new_room["name"],
                       description=new_room["description"], exits=new_room["exits"],
                       contents=new_room["contents"], features=new_room.get("features"),
@@ -546,7 +549,7 @@ async def talk_to(player_id: str, message: str, npc_name: str | None = None) -> 
     else:
         npc = npcs[0]
 
-    camp = _require_campaign()
+    camp = _require_campaign(ch.campaign_id)
     ent = world.entity(npc["id"])
     if not ent:
         # No persona yet — the spawn-time density gate skipped it, or this NPC predates the
@@ -554,11 +557,13 @@ async def talk_to(player_id: str, message: str, npc_name: str | None = None) -> 
         kind = npc["name"]  # SRD species name before we overwrite it below
         gen = await worldgen.generate_npc_persona(npc, camp.theme, room.name, room.kind, room.description)
         npc["name"] = gen["name"]
-        ent = world.upsert_entity(entity_id=npc["id"], kind=kind, name=gen["name"],
-                                  location_id=room.id, disposition=gen["disposition"],
-                                  persona=gen["persona"], goal=gen["goal"])
-        world.upsert_room(room_id=room.id, name=room.name, description=room.description,
-                          exits=room.exits, contents=room.contents, features=room.features)
+        ent = world.upsert_entity(entity_id=npc["id"], campaign_id=ch.campaign_id, kind=kind,
+                                  name=gen["name"], location_id=room.id,
+                                  disposition=gen["disposition"], persona=gen["persona"],
+                                  goal=gen["goal"])
+        world.upsert_room(room_id=room.id, campaign_id=ch.campaign_id, name=room.name,
+                          description=room.description, exits=room.exits,
+                          contents=room.contents, features=room.features)
 
     npc_for_llm = {**npc, "persona": ent.persona, "goal": ent.goal,
                   "disposition": ent.disposition, "conversation": ent.memory}
