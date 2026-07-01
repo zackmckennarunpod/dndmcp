@@ -135,6 +135,31 @@ def _theme(theme: str) -> dict:
     return _THEMES["default"]
 
 
+# Generic trophy nouns any defeated creature could plausibly yield — deliberately NOT a
+# theme/species table (see worldgen.py's docstring on why monster IDENTITY is never
+# hardcoded): the monster's actual name (SRD or Flash-invented) is spliced in at call time,
+# so "a claw" reads just as naturally off a wolf as off a steampunk automaton.
+_TROPHY_PARTS = ["fang", "claw", "tooth", "eye", "hide", "shard of bone", "broken talon"]
+
+
+def loot_drop(theme: str, monster_name: str, rng: random.Random | None = None) -> str:
+    """A flavorful loot NAME for a monster that just died in attack(). Three sources of
+    variety so repeat kills don't feel identical: the world's own theme loot pool (the exact
+    table generate_room() already draws from for room-seeded loot — reused, not duplicated),
+    a handful of gold, or a trophy built from the monster's own name (works for any monster
+    without a hardcoded species table). Caller splices the result straight into a "dropping
+    ..." sentence, so each branch already reads naturally on its own (an article or bare
+    count, never a dangling fragment)."""
+    choice = rng.choice if rng is not None else random.choice
+    randint = rng.randint if rng is not None else random.randint
+    roll_kind = choice(("theme", "gold", "trophy"))
+    if roll_kind == "theme":
+        return choice(_theme(theme)["loot"])
+    if roll_kind == "gold":
+        return f"{randint(2, 20)} gold pieces"
+    return f"the {monster_name}'s {choice(_TROPHY_PARTS)}"
+
+
 def roll(expr: str) -> dict:
     """Roll dice like '1d20+3', '2d6', 'd20'. Returns rolls + total."""
     m = re.fullmatch(r"\s*(\d*)d(\d+)\s*([+-]\s*\d+)?\s*", (expr or "").lower())
