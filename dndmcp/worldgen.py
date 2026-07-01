@@ -248,9 +248,12 @@ async def generate_item_content(description: str, theme: str, room_context: str 
     """Adjudicate + flesh out a player-described pickup that isn't pre-seeded loot. Tries Flash
     (structured JSON, decides portability); falls back to procedural (always portable — without
     a model to judge plausibility, permissive keeps the game playable with Flash off).
-    Returns {"name", "description", "portable", "reason"}."""
+    Returns {"name", "description", "portable", "reason", "via"} — every Flash call is a
+    domain event; `via` is what lets the caller's world.log(...) text carry the same
+    (flash)/(procedural) marker room.generated/entity.spawned/npc.talked already do, so
+    nothing that hits the model is invisible in the log stream or the GUI's call counter."""
     base = {"id": uuid.uuid4().hex[:8], "name": description.strip().capitalize(),
-           "description": "", "portable": True, "reason": None}
+           "description": "", "portable": True, "reason": None, "via": "procedural"}
     messages = _item_messages(description, theme, room_context)
     gen = await flash_llm.generate(messages, max_tokens=120, temperature=0.8)
     if gen:
@@ -264,6 +267,7 @@ async def generate_item_content(description: str, theme: str, room_context: str 
                 base["portable"] = bool(data["portable"])
             if data.get("reason"):
                 base["reason"] = data["reason"]
+            base["via"] = "flash"
         except Exception:
             logger.exception("generate_item_content: malformed Flash JSON, keeping procedural: %r", gen)
     return base

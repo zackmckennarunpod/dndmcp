@@ -22,21 +22,9 @@ from .linear_world import TicketWorld
 from .models import Campaign, Room
 from .state import MAIN_CAMPAIGN_ID, World
 
-# This server hosts more than one world on the same graph engine — D&D is one instance of it,
-# the task graph is another. Shown to the connecting agent FIRST, before either world's own
-# persona, so "which world?" is the first question asked, not assumed.
-WELCOME = """This MCP server hosts multiple independent worlds on the same underlying engine
-(a graph of nodes + edges, with Flash-generated content). Ask the user which one they want,
-then act accordingly:
-
-- **D&D adventure** — a solo/shared tabletop RPG. Call start_adventure to begin; once started,
-  BECOME the Dungeon Master (see the full persona below) for the rest of the session.
-- **Task graph** — a Linear-style ticket graph. Call list_tickets (or seed_demo_tickets if it's
-  empty) to see it, look_at_ticket to inspect one + its related tickets, complete_ticket to
-  mark one done and generate a follow-up linked into the graph.
-- Call list_worlds() any time for a concrete, current list.
-
-Don't assume D&D by default — ask first."""
+WELCOME = """This MCP server hosts a solo/shared tabletop RPG (a graph of nodes + edges, with
+Flash-generated content). Call start_adventure to begin; once started, BECOME the Dungeon
+Master (see the full persona below) for the rest of the session."""
 
 # Shipped WITH the server so connecting DNDMCP makes the agent assume the DM role, once the
 # user has actually chosen the D&D world (see WELCOME above).
@@ -175,18 +163,14 @@ def _gui_link() -> str:
 
 @mcp.tool()
 def list_worlds() -> str:
-    """List the worlds this server hosts. Call this first when connecting, before assuming
-    which one the user wants."""
+    """Status of the shared D&D world. Call this first when connecting."""
     camp = world.campaign()  # the main dnd world specifically
     dnd_status = f"in progress ({camp.theme})" if camp else "not started yet"
-    n_tickets = len(tickets.all_tickets())
     return (
         "**dnd** — solo/shared tabletop RPG. start_adventure joins the main shared world by "
         'default (everyone\'s ghosts pass through here). Pass campaign_id="new" to start your '
         "own world instead (you get back a shareable id), or campaign_id=<id> to join a "
-        f"specific world someone shared with you. Main world status: {dnd_status}.\n"
-        "**tickets** — a task graph (Linear-style). list_tickets / seed_demo_tickets to begin. "
-        f"Status: {n_tickets} ticket(s) loaded."
+        f"specific world someone shared with you. Main world status: {dnd_status}."
     )
 
 
@@ -575,8 +559,8 @@ async def pick_up_item(player_id: str, item_name: str | None = None) -> str:
         desc = flavor.get("description", "")
         world.add_item(player_id, {"id": match.get("id") or uuid.uuid4().hex[:8],
                                    "name": match["name"], "description": desc})
-        world.log("item.picked_up", f"{ch.name} picked up {match['name']}.", player_id=player_id,
-                  subject_type="room", subject_id=room.id)
+        world.log("item.picked_up", f"{ch.name} picked up {match['name']} ({flavor['via']}).",
+                  player_id=player_id, subject_type="room", subject_id=room.id)
         detail = f" {desc}" if desc else ""
         return f"✦ You take {match['name']}.{detail} Added to your inventory."
 
@@ -592,8 +576,8 @@ async def pick_up_item(player_id: str, item_name: str | None = None) -> str:
         return f"You can't take that{reason}."
     world.add_item(player_id, {"id": item.get("id") or uuid.uuid4().hex[:8],
                                "name": item["name"], "description": item["description"]})
-    world.log("item.picked_up", f"{ch.name} picked up {item['name']}.", player_id=player_id,
-              subject_type="room", subject_id=room.id)
+    world.log("item.picked_up", f"{ch.name} picked up {item['name']} ({item['via']}).",
+              player_id=player_id, subject_type="room", subject_id=room.id)
     detail = f" {item['description']}" if item["description"] else ""
     return f"✦ You take {item['name']}.{detail} Added to your inventory."
 
@@ -725,8 +709,10 @@ def get_state(player_id: str) -> dict:
 # Same shape as the D&D tools (look / traverse-by-relation / one action that mutates + links),
 # fully independent state (TicketWorld, its own SQLite file). No player_id/character concept
 # here — any agent can inspect or act on any ticket, there's no per-agent position to track.
-
-@mcp.tool()
+#
+# HIDDEN from MCP on purpose (not deleted) — D&D is the whole product now. The functions below
+# are intentionally left undecorated (no @mcp.tool()) rather than removed, so re-exposing this
+# is a one-line change per function if it's ever wanted again.
 def seed_demo_tickets() -> str:
     """Seed the ticket graph with a real example task set (tonight's actual DNDMCP work) for
     demoing traversal + completion-triggered generation. Safe to call multiple times —
@@ -756,7 +742,6 @@ def seed_demo_tickets() -> str:
     return f"Seeded {len(tickets.all_tickets())} tickets."
 
 
-@mcp.tool()
 def list_tickets() -> str:
     """List all tickets in the task graph with their status."""
     ts = tickets.all_tickets()
@@ -765,7 +750,6 @@ def list_tickets() -> str:
     return "\n".join(f"[{t.status:^11}] {t.id}  {t.title}  (priority: {t.priority})" for t in ts)
 
 
-@mcp.tool()
 def look_at_ticket(ticket_id: str) -> str:
     """Describe one ticket: title, description, status, and its related tickets (the graph
     edges) — traverse by calling this again with a neighbor's id."""
@@ -781,7 +765,6 @@ def look_at_ticket(ticket_id: str) -> str:
     return "\n".join(lines)
 
 
-@mcp.tool()
 async def complete_ticket(ticket_id: str) -> str:
     """Mark a ticket done, then generate one plausible follow-up ticket informed by its graph
     neighbors, and link it in — the task-graph equivalent of move() generating the next room."""

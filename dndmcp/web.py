@@ -444,7 +444,8 @@ def state(request: Request) -> JSONResponse:
         # (deterministic density gate — see server.py::_maybe_spawn_entity_persona).
         flash_calls = c.execute(
             "SELECT COUNT(*) FROM log WHERE campaign_id=?"
-            " AND kind IN ('room.generated','entity.spawned','npc.talked') AND text LIKE '%(flash)%'",
+            " AND kind IN ('room.generated','entity.spawned','npc.talked','item.picked_up')"
+            " AND text LIKE '%(flash)%'",
             (campaign_id,),
         ).fetchone()[0]
         return JSONResponse({"rooms": rooms, "players": players, "character": char,
