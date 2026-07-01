@@ -115,10 +115,31 @@ const zoomLayer = svg.append('g');
 const linkLayer = zoomLayer.append('g');
 const frontierLayer = zoomLayer.append('g');
 const nodeLayer = zoomLayer.append('g');
+// Auto-fit tracks whether the USER has manually panned/zoomed yet (event.sourceEvent is only
+// set for real mouse/wheel gestures, never for our own programmatic .transform() calls) — once
+// they have, stop auto-fitting so it doesn't fight their exploration. Until then, the view
+// re-fits itself to whatever's actually in the graph, so a growing world never silently drifts
+// half off-screen with no indication anything's missing.
+let userInteracted = false;
 const zoomBehavior = d3.zoom().scaleExtent([0.25, 4]).on('zoom', (event) => {
   zoomLayer.attr('transform', event.transform);
+  if(event.sourceEvent) userInteracted = true;
 });
 svg.call(zoomBehavior);
+
+function fitToView(nodes){
+  if(!nodes.length) return;
+  const pad = 40;
+  const xs = nodes.map(n=>n.x), ys = nodes.map(n=>n.y);
+  const minX = Math.min(...xs)-pad, maxX = Math.max(...xs)+pad;
+  const minY = Math.min(...ys)-pad, maxY = Math.max(...ys)+pad;
+  const w = Math.max(maxX-minX, 1), h = Math.max(maxY-minY, 1);
+  const k = Math.min(4, Math.max(0.25, Math.min(W/w, H/h)));
+  const t = d3.zoomIdentity
+    .translate(W/2 - (minX+maxX)/2*k, H/2 - (minY+maxY)/2*k)
+    .scale(k);
+  svg.transition().duration(400).call(zoomBehavior.transform, t);
+}
 
 // Click a node -> center the view on it (keeping current zoom level) and show its details
 // in the "Selected room" panel. Discovered rooms show real content; undiscovered ones stay
@@ -265,7 +286,12 @@ function renderGraph(rooms, players, you){
  // that only happens inside ticked(). Force one manual paint every render so positions are
  // always reflected, independent of whether the simulation's timer happens to be running.
  ticked();
- if(structureChanged) simulation.alpha(0.3).restart();
+ if(structureChanged){
+   simulation.alpha(0.3).restart();
+   // Let the reheated simulation spread out a bit before fitting to it, else we'd fit to
+   // the cramped pre-restart positions and immediately look wrong again as nodes spread.
+   if(!userInteracted) setTimeout(() => { if(!userInteracted) fitToView(nodes); }, 400);
+ }
 }
 
 async function tick(){
