@@ -21,7 +21,24 @@ from .linear_world import TicketWorld
 from .models import Campaign, Room
 from .state import World
 
-# Shipped WITH the server so connecting DNDMCP makes the agent assume the DM role.
+# This server hosts more than one world on the same graph engine — D&D is one instance of it,
+# the task graph is another. Shown to the connecting agent FIRST, before either world's own
+# persona, so "which world?" is the first question asked, not assumed.
+WELCOME = """This MCP server hosts multiple independent worlds on the same underlying engine
+(a graph of nodes + edges, with Flash-generated content). Ask the user which one they want,
+then act accordingly:
+
+- **D&D adventure** — a solo/shared tabletop RPG. Call start_adventure to begin; once started,
+  BECOME the Dungeon Master (see the full persona below) for the rest of the session.
+- **Task graph** — a Linear-style ticket graph. Call list_tickets (or seed_demo_tickets if it's
+  empty) to see it, look_at_ticket to inspect one + its related tickets, complete_ticket to
+  mark one done and generate a follow-up linked into the graph.
+- Call list_worlds() any time for a concrete, current list.
+
+Don't assume D&D by default — ask first."""
+
+# Shipped WITH the server so connecting DNDMCP makes the agent assume the DM role, once the
+# user has actually chosen the D&D world (see WELCOME above).
 DM_PERSONA = """You are the Dungeon Master for a solo tabletop RPG running on DNDMCP. The
 terminal IS the game. When this server is connected, BECOME a vivid, fair Dungeon Master.
 
@@ -45,7 +62,7 @@ How to run the game:
 - Keep it terminal-friendly: short paragraphs, show the ASCII map/art from tools, give clear choices.
 - Be a fair DM: let dice and rules decide; build tension; reward clever play."""
 
-mcp = FastMCP("dndmcp", instructions=DM_PERSONA)
+mcp = FastMCP("dndmcp", instructions=WELCOME + "\n\n---\n\n" + DM_PERSONA)
 world = World()
 
 # A second, fully independent world proving the engine generalizes beyond D&D — own file,
@@ -101,6 +118,21 @@ def _gui_link() -> str:
     return f"http://localhost:{os.environ.get('GUI_PORT', '8001')}"
 
 
+@mcp.tool()
+def list_worlds() -> str:
+    """List the worlds this server hosts. Call this first when connecting, before assuming
+    which one the user wants."""
+    camp = world.campaign()
+    dnd_status = f"in progress ({camp.theme})" if camp else "not started yet"
+    n_tickets = len(tickets.all_tickets())
+    return (
+        "**dnd** — solo/shared tabletop RPG. start_adventure to begin. "
+        f"Status: {dnd_status}.\n"
+        "**tickets** — a task graph (Linear-style). list_tickets / seed_demo_tickets to begin. "
+        f"Status: {n_tickets} ticket(s) loaded."
+    )
+
+
 @mcp.prompt()
 def be_the_dm() -> str:
     """Invoke to make your agent assume the Dungeon Master role and start a session."""
@@ -124,7 +156,8 @@ def _adjacent_rooms(room: Room) -> list[dict]:
     return out
 
 
-def _render_scene(room: Room, *, ambient: bool = True, with_art: bool = True) -> str:
+def _render_scene(room: Room, *, player_id: str | None = None, ambient: bool = True,
+                  with_art: bool = True) -> str:
     """Text/ASCII render of a room — the universal (terminal) output."""
     lines = [f"## {room.name.title()}", "", room.description]
     for f in room.features:
@@ -136,6 +169,15 @@ def _render_scene(room: Room, *, ambient: bool = True, with_art: bool = True) ->
             lines.append(f"\n⚔  A {c['name']} is here (AC {c.get('ac','?')}, HP {c['hp']}{cr}).{traits} It looks hostile.")
         elif c["type"] == "loot":
             lines.append(f"\n✦  You notice {c['name']}.")
+    # Stigmergy: what other players did here before you arrived — FACTS for the DM to weave
+    # into narration (same pattern as everything else this function hands the agent), not
+    # pre-written prose. Excludes the viewer's own past actions in this room — this is about
+    # noticing OTHER players' traces, not being told what you already know you did.
+    traces = world.recent_log(3, subject_type="room", subject_id=room.id, exclude_player_id=player_id)
+    if traces:
+        lines.append("\nTraces of those who came before:")
+        for t in traces:
+            lines.append(f"  - {t.text}")
     if ambient:
         camp = world.campaign()
         lines.append(f"\n_{game.ambient_event(camp.theme if camp else 'default')}_")
@@ -185,7 +227,7 @@ async def start_adventure(theme: str = "gothic horror", character_name: str = "W
     return (f"# {camp.premise}\n\nYou are **{char.name}**, a level 1 {char.klass} "
             f"(HP {char.hp}, AC {char.ac}).\n\n**player_id: `{player_id}`** — pass this to every "
             f"other tool call.\n\n🗺 Watch your adventure live: {_gui_link()}/?player={player_id}\n\n"
-            + _render_scene(room))
+            + _render_scene(room, player_id=player_id))
 
 
 @mcp.tool()
@@ -194,7 +236,7 @@ def look(player_id: str) -> str:
     ch = world.character(player_id)
     if not ch:
         return "Unknown player_id. Call start_adventure first."
-    return _render_scene(_require_room(ch.location_id))
+    return _render_scene(_require_room(ch.location_id), player_id=player_id)
 
 
 async def _generate_and_link(dest_id: str, theme: str, *, entry_from: str, back_to_id: str) -> None:
@@ -246,7 +288,7 @@ async def move(player_id: str, direction: str) -> str:
     dest = _require_room(dest_id)
     world.log("player.moved", f"{ch.name} moved {direction} into {dest.name}", player_id=player_id)
     asyncio.create_task(_prefetch_frontier(dest, camp.theme))  # fire-and-forget
-    return _render_scene(dest)
+    return _render_scene(dest, player_id=player_id)
 
 
 @mcp.tool()
@@ -310,7 +352,7 @@ def attack(player_id: str, weapon_bonus: int = 3, damage_dice: str = "1d8") -> s
             out.append(f"⚔ The {monster['name']}'s {atk_name} misses you (rolled {matk['attack_roll']} vs AC {ch.ac}).")
     world.upsert_room(room_id=room.id, name=room.name, description=room.description,
                       exits=room.exits, contents=room.contents, features=room.features)
-    world.log("combat.resolved", out[0], player_id=player_id)
+    world.log("combat.resolved", out[0], player_id=player_id, subject_type="room", subject_id=room.id)
     return "\n".join(out)
 
 
@@ -344,8 +386,10 @@ async def pick_up_item(player_id: str, item_name: str | None = None) -> str:
         flavor = await worldgen.generate_item_content(match["name"], camp.theme,
                                                        room_context=room.description)
         desc = flavor.get("description", "")
-        world.add_item(player_id, {"name": match["name"], "description": desc})
-        world.log("item.picked_up", f"{ch.name} picked up {match['name']}.", player_id=player_id)
+        world.add_item(player_id, {"id": match.get("id") or uuid.uuid4().hex[:8],
+                                   "name": match["name"], "description": desc})
+        world.log("item.picked_up", f"{ch.name} picked up {match['name']}.", player_id=player_id,
+                  subject_type="room", subject_id=room.id)
         detail = f" {desc}" if desc else ""
         return f"✦ You take {match['name']}.{detail} Added to your inventory."
 
@@ -359,8 +403,10 @@ async def pick_up_item(player_id: str, item_name: str | None = None) -> str:
     if not item["portable"]:
         reason = f" ({item['reason']})" if item.get("reason") else ""
         return f"You can't take that{reason}."
-    world.add_item(player_id, {"name": item["name"], "description": item["description"]})
-    world.log("item.picked_up", f"{ch.name} picked up {item['name']}.", player_id=player_id)
+    world.add_item(player_id, {"id": item.get("id") or uuid.uuid4().hex[:8],
+                               "name": item["name"], "description": item["description"]})
+    world.log("item.picked_up", f"{ch.name} picked up {item['name']}.", player_id=player_id,
+              subject_type="room", subject_id=room.id)
     detail = f" {item['description']}" if item["description"] else ""
     return f"✦ You take {item['name']}.{detail} Added to your inventory."
 
@@ -501,10 +547,19 @@ def main() -> None:
     """
     import os
 
+    from mcp.server.transport_security import TransportSecuritySettings
+
     transport = os.environ.get("DNDMCP_TRANSPORT", "stdio").lower()
     if transport in ("http", "streamable-http", "sse"):
         mcp.settings.host = "0.0.0.0"
         mcp.settings.port = int(os.environ.get("PORT", "8000"))
+        # FastMCP's default DNS-rebinding protection only allow-lists localhost Host
+        # headers (mcp/server/fastmcp/server.py, set at construction time since the
+        # default host is 127.0.0.1) — every request through the pod's public proxy
+        # domain gets a 421 Misdirected Request. This server is MEANT to be reached at
+        # its public URL (that's the whole pod-hosted multiplayer premise), so disable it.
+        mcp.settings.transport_security = TransportSecuritySettings(
+            enable_dns_rebinding_protection=False)
         mcp.run(transport="sse" if transport == "sse" else "streamable-http")
     else:
         mcp.run()  # stdio
