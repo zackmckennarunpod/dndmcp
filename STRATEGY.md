@@ -16,9 +16,9 @@
 ## The one insight everything hangs on
 Flash's moat is **not running models**. It's that **an agent can mint brand-new GPU compute on demand, mid-task, in ~60s, as a function call** — where every other platform needs a Docker build + registry push (minutes). So the highest-leverage thing to build is not "an app that calls SDXL." It's **the agent-native layer that turns Flash into an agent's hands-on GPU.**
 
-This is also exactly what the Flash team has told us (in Slack) is missing:
-- Adam's usability study: *agents are poor at Flash* (hardware/region selection, no live stock).
-- Justin: *"good instructions for Flash for an agent setting up inferences?"* — adding Flash to the MCP PRs.
+This is also exactly the gap the Flash team itself has identified:
+- Usability findings: *agents are poor at Flash* (hardware/region selection, no live stock).
+- Real ask surfaced internally: *"good instructions for Flash for an agent setting up inferences?"*
 - The documented gap: no `DataCenter.available_gpus()` → agents reverse-engineer GraphQL, hit 403.
 - DX papercuts: orphan endpoints, no URL output, cold starts.
 

@@ -29,7 +29,11 @@ logger = logging.getLogger(__name__)
 MODEL = os.environ.get("DND_LLM_MODEL", "Qwen/Qwen2.5-1.5B-Instruct")
 ENABLED = os.environ.get("DND_FLASH_LLM", "0") == "1"
 IMAGE = "runpod/worker-v1-vllm:v2.22.4"
-ENDPOINT_NAME = "dnd-llm-vllm"
+# Which serverless endpoint serves generate(). MODEL must match what that endpoint actually
+# has loaded (its own MODEL_NAME env) — this module never re-configures an existing endpoint,
+# it only resolves by name and calls. Overriding both lets world-gen share the browser-DM's
+# 7B endpoint (dnd-dm-vllm) instead of running a second warm worker for the 1.5B.
+ENDPOINT_NAME = os.environ.get("DND_LLM_ENDPOINT", "dnd-llm-vllm")
 
 logger.info("flash_llm: ENABLED=%s model=%s", ENABLED, MODEL)
 

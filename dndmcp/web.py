@@ -12,6 +12,7 @@ import asyncio
 import datetime
 import html
 import json
+import logging
 import os
 import re
 import subprocess
@@ -20,12 +21,53 @@ import time
 from pathlib import Path
 
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from sse_starlette.sse import EventSourceResponse
 
-from . import worldgen
+from . import chat_sessions, dm_loop, server, worldgen
 
 app = FastAPI(title="DNDMCP map")
+logger = logging.getLogger(__name__)
+
+# Kill switch for the whole browser-DM chat pane (e0b.3) — default ON. Flip to "0" to pull it
+# without a redeploy of the surrounding map/GUI: POST /chat 503s and GET /chat/enabled tells
+# the page's own JS to hide the pane and fall back to BYO-agent-only, same idea as any other
+# feature flag, just an env var since this app has no flag service of its own.
+def _browser_dm_enabled() -> bool:
+    return os.environ.get("DND_BROWSER_DM", "1") != "0"
+
+
+MAX_CHAT_MESSAGE_LEN = 500  # see POST /chat — message-length cap.
+
+# Abuse-guard responses (e0b.4), written in the DM's own voice — the chat UI renders these as
+# a dim system line (not an error alert), see PAGE's addChatMessage('system', ...) branch.
+RATE_LIMIT_MESSAGE = ('The DM raises a hand. "Slow down a moment — even a Dungeon Master '
+                     'needs to breathe between turns." (try again in a few seconds)')
+SESSION_CAP_MESSAGE = ('The DM closes the book gently. "This character\'s tale has reached '
+                      'its telling for now — thank you for playing."')
+
+
+def _log_dm_event(ip: str | None, campaign_id: str | None, kind: str, text: str) -> None:
+    """Insert a domain-event log row the same raw-sqlite way /export_story does — world.log()
+    (state.py's World, one connection per THREAD) isn't reachable from here for the identical
+    reason /export_story already works around it: this module opens its own ad hoc connection
+    straight against campaign.db (see _db()) rather than sharing World's thread-local one.
+    Used for kind='dm.throttled' (see chat_sessions.check_ip_rate_limit /
+    session_cap_exceeded, which decide WHEN to call this — only the first rejection of a
+    throttle window, never every rejected request)."""
+    try:
+        c = _db()
+        try:
+            c.execute(
+                "INSERT INTO log (ts,kind,text,player_id,subject_type,subject_id,campaign_id,ip)"
+                " VALUES (?,?,?,?,?,?,?,?)",
+                (time.time(), kind, text, None, None, None, campaign_id, ip),
+            )
+            c.commit()
+        finally:
+            c.close()
+    except Exception:
+        logger.exception("failed to log %s event", kind)
 
 
 def _server_version() -> str:
@@ -47,7 +89,11 @@ SERVER_VERSION = _server_version()
 
 def _db() -> sqlite3.Connection:
     state_dir = os.environ.get("DNDMCP_STATE_DIR", os.path.expanduser("~/.dndmcp"))
-    c = sqlite3.connect(str(Path(state_dir) / "campaign.db"))
+    # timeout=5: the game process writes constantly; without a busy timeout a read that
+    # lands mid-write surfaces as "database is locked" and blanks the map for that poll.
+    # WAL (set persistently by state.World's connections) makes these reads non-blocking
+    # in the common case; the timeout covers the rest.
+    c = sqlite3.connect(str(Path(state_dir) / "campaign.db"), timeout=5)
     c.row_factory = sqlite3.Row
     return c
 
@@ -189,6 +235,43 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
    border-radius:5px;padding:4px 10px;font:600 11px 'IBM Plex Mono',monospace;cursor:pointer}
  .copyCodeBtn:hover{background:var(--visited)}
  .copyCodeBtn.copied{background:var(--ghost);color:var(--bg)}
+ /* Middle panel's own tab group (Live world stream / Play here) — deliberately NOT the same
+    .tabbar/.tabBtn/.tabBody classes as the bottom Browse/How-this-works group: that group's
+    showTab() queries ALL .tabBtn/.tabBody elements on the page and forcibly toggles 'active'
+    off anything whose data-tab doesn't match, which would silently kill this panel's own tab
+    state every time someone clicks Browse or How-it-works. Same visual language, independent
+    wiring (see showMidTab() below). */
+ .midTabbar{display:flex;gap:2px;border-bottom:1px solid var(--border);margin-bottom:10px}
+ .midTabBtn{background:none;border:none;color:var(--muted);font-size:11px;text-transform:uppercase;
+   letter-spacing:1.5px;padding:0 10px 8px;cursor:pointer;border-bottom:2px solid transparent;
+   font-family:'IBM Plex Mono',monospace;transition:color .15s,border-color .15s}
+ .midTabBtn:hover{color:var(--text)}
+ .midTabBtn.active{color:var(--ghost-bright);border-bottom-color:var(--ghost)}
+ .midTabBody{display:none}
+ .midTabBody.active{display:block}
+ /* #midTab-chat needs display:flex (column, so the input row pins to the bottom and the
+    message list is the only part that scrolls) instead of plain display:block — an ID
+    selector always outranks the two-class .midTabBody.active rule above regardless of
+    stylesheet order, so this wins without needing !important. */
+ #midTab-chat.active{display:flex;flex-direction:column}
+ #chatLog{flex:1;overflow-y:auto;margin-bottom:8px;display:flex;flex-direction:column;gap:1px}
+ .chatMsg{padding:4px 2px;font-size:12.5px;line-height:1.55;word-wrap:break-word}
+ .chatMsg.player{text-align:right;color:var(--ghost-bright)}
+ .chatMsg.dm{text-align:left;color:var(--text)}
+ .chatMsg.error{text-align:left;color:var(--warm)}
+ /* Throttle/cap responses (e0b.4) are expected, routine traffic-shaping, not a failure —
+    dim + italic like a breadcrumb, deliberately NOT the same alarmed .error color above. */
+ .chatMsg.system{text-align:left;color:var(--dim);font-style:italic}
+ .chatBreadcrumb{color:var(--muted);font-size:11px;padding:2px 2px;opacity:.85;font-style:italic}
+ #chatForm{display:flex;gap:6px;flex-shrink:0}
+ #chatInput{flex:1;background:var(--bg);border:1px solid var(--border);border-radius:6px;
+   padding:8px 10px;color:var(--text);font:12.5px 'IBM Plex Mono',monospace}
+ #chatInput:disabled{opacity:.6}
+ #chatInput:focus{outline:none;border-color:var(--ghost)}
+ #chatSendBtn{background:var(--link);color:var(--ghost-bright);border:1px solid var(--border);
+   border-radius:6px;padding:8px 16px;font:600 12px 'IBM Plex Mono',monospace;cursor:pointer;flex-shrink:0}
+ #chatSendBtn:hover{background:var(--visited)}
+ #chatSendBtn:disabled{opacity:.6;cursor:default}
 </style></head><body>
 <div id=staleBanner>⟳ This tab is running an older version of the page — <a href="#" onclick="location.reload();return false">refresh to update</a></div>
 <div id=itemTooltip></div>
@@ -200,7 +283,7 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
      is a real dropdown with the full "what do I actually do" explanation, not a copy-paste
      strip, and it lives right under the header instead of buried below the map. -->
 <details class=panel id=connectDetails style="margin:16px 18px 0 18px">
- <summary>🎲 How to connect &amp; play</summary>
+ <summary>🔌 Prefer your own agent? Connect Claude Code / Claude Desktop &amp; play through it</summary>
  <div class=body style="margin-top:10px">
   <p><b>1. Connect your agent</b> — pick whichever you use:</p>
   <p class=sub style="margin:10px 0 4px"><b>Claude Code — macOS / Linux / WSL:</b></p>
@@ -231,10 +314,34 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
 </details>
 <main style="margin-top:16px">
  <div class=panel><h2>World map (shared, live)</h2><div class=sub id=whereInMap style="margin-bottom:2px">—</div><div class=sub style="margin-bottom:8px;opacity:.7">scroll + ⌘/Ctrl to zoom · drag to pan</div><div id=map><span id=mapEmpty class=empty>no adventure yet — start one in your agent</span><div id=nodeTooltip></div></div></div>
- <div class=panel><h2><span id=streamDot></span><span id=streamTitle>Live world stream</span></h2>
+ <div class=panel>
+  <div class=midTabbar>
+   <button class=midTabBtn data-miditab=stream>Live world stream</button>
+   <!-- Hidden until GET /chat/enabled confirms the kill switch (DND_BROWSER_DM) is on — see
+        the script below. Absent that check, a visitor could click into a pane whose backend
+        is off and only find out on their first send. -->
+   <button class=midTabBtn id=chatTabBtn data-miditab=chat style="display:none">🎲 Play here</button>
+  </div>
+  <div id=midTab-stream class="midTabBody active">
+   <h2><span id=streamDot></span><span id=streamTitle>Live world stream</span></h2>
    <div class=sub style="margin-bottom:8px"><span id=streamSub>every player, every session</span>
    <button id=streamFilterBtn style="margin-left:6px">⚡ Flash calls only</button></div>
-   <div id=stream><div class=empty>waiting for the world to move...</div></div></div>
+   <div id=stream><div class=empty>waiting for the world to move...</div></div>
+  </div>
+  <div id=midTab-chat class=midTabBody>
+   <div class=sub style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px">
+    <span>returning? you resume your last character automatically</span>
+    <a href="#" id=chatResetBtn title="Start over with a brand-new character — your current one stays in the world"
+      style="color:var(--muted);text-decoration:underline dotted;white-space:nowrap;margin-left:8px">↺ new character</a>
+   </div>
+   <div id=chatLog><div class=empty>say "start an adventure" to begin</div></div>
+   <form id=chatForm>
+    <input id=chatInput type=text autocomplete=off maxlength=500
+      placeholder='say &quot;start an adventure&quot; to begin'>
+    <button id=chatSendBtn type=submit>Send</button>
+   </form>
+  </div>
+ </div>
  <aside style="display:flex;flex-direction:column;gap:16px">
   <details open class=panel>
    <summary>Character</summary>
@@ -347,13 +454,35 @@ function showTab(name){
   document.querySelectorAll('.tabBody').forEach(el => el.classList.toggle('active', el.id === 'tab-' + name));
 }
 document.querySelectorAll('.tabBtn').forEach(b => b.addEventListener('click', () => showTab(b.dataset.tab)));
-// Only the bare, cold "main" link (no ?player=, the world everyone lands on by default)
-// should open with the connect dropdown already expanded. A link into a SPECIFIC shared
-// world means someone was already invited there — the generic "anyone can join" pitch is
-// noise, and an already-playing character doesn't need it either.
-if (campaignId === 'main' && !playerId) {
-  document.getElementById('connectDetails').open = true;
+
+// Middle panel's OWN tab group (Live world stream / Play here) — deliberately separate
+// function/classes from showTab() above (see the .midTabBtn CSS comment for why reusing
+// .tabBtn/.tabBody would silently break this one every time the bottom tab group is clicked).
+function showMidTab(name){
+  document.querySelectorAll('.midTabBtn').forEach(b => b.classList.toggle('active', b.dataset.miditab === name));
+  document.querySelectorAll('.midTabBody').forEach(el => el.classList.toggle('active', el.id === 'midTab-' + name));
 }
+document.querySelectorAll('.midTabBtn').forEach(b => b.addEventListener('click', () => showMidTab(b.dataset.miditab)));
+
+// Kill switch check (DND_BROWSER_DM): only reveal the "Play here" tab once the server
+// confirms browser play is actually on. Fails closed (pane stays hidden) on any fetch error.
+// When it IS on, a cold visitor (no ?player=) lands with the chat tab already selected and
+// focused — browser play is the zero-friction front door now, so the first thing a new
+// visitor sees must be "type here to play", not a wall of install commands. The connect
+// panel below stays collapsed for the same reason (it USED to auto-expand for cold main
+// visits, which pushed the entire game below the fold — observed live, confusing) — the
+// BYO-agent path stays one labeled click away, just no longer the landing experience.
+fetch('/chat/enabled').then(r => r.json()).then(d => {
+  // ?player= means this tab is the companion map for someone ALREADY playing through their
+  // own MCP agent — offering the browser chat there would just mint a confusing second
+  // character alongside the one their agent drives. Hide the tab entirely for them; the
+  // bare URL (no ?player=) is always one click away if they genuinely want browser play.
+  if (!d.enabled || playerId) return;
+  document.getElementById('chatTabBtn').style.display = '';
+  showMidTab('chat');
+  const input = document.getElementById('chatInput');
+  if (input) input.focus();
+}).catch(() => {});
 
 // Browse other worlds: campaign ids are opaque hex strings — nobody finds a world they don't
 // already have a link to without this. Fetched once (worlds don't churn fast enough to need
@@ -739,7 +868,7 @@ async function tick(){
     document.getElementById('staleBanner').style.display = 'block';
   }
   const worldTag = campaignId !== 'main' ? `[world: ${campaignId}] ` : '';
-  const whereText = worldTag + (s.current_room ? ('You are in: '+(s.current_room.name||'')) : (playerId ? 'unknown player' : 'Spectating — connect your agent to the MCP server to start your own session'));
+  const whereText = worldTag + (s.current_room ? ('You are in: '+(s.current_room.name||'')) : (playerId ? 'unknown player' : 'Spectating — hit 🎲 Play here to join from your browser, or connect your own agent below'));
   document.getElementById('where').textContent = whereText;
   document.getElementById('whereInMap').textContent = whereText;
   renderGraph(s.rooms||[], s.players||[], s.you||null);
@@ -875,6 +1004,129 @@ document.getElementById('char').addEventListener('mouseout', (e) => {
 });
 
 connectStream();
+
+// Play here (e0b.3): a full turn of the browser-DM loop over POST /chat, streamed back as
+// NDJSON (EventSource can't POST, so this is a plain fetch() + ReadableStream read instead of
+// SSE — see /chat's own docstring). session_id/player_id live entirely server-side behind the
+// HttpOnly dm_session cookie the browser sends automatically on same-origin fetches; this JS
+// never sees either one.
+const chatLog = document.getElementById('chatLog');
+const chatForm = document.getElementById('chatForm');
+const chatInput = document.getElementById('chatInput');
+const chatSendBtn = document.getElementById('chatSendBtn');
+let chatTurnInFlight = false;
+
+function chatScrollToBottom(){ chatLog.scrollTop = chatLog.scrollHeight; }
+function clearChatEmptyState(){
+  const empty = chatLog.querySelector('.empty');
+  if (empty) empty.remove();
+}
+// textContent, not innerHTML -- both the player's own typed text AND the DM's model-generated
+// narration are untrusted strings; this is the same "escape before it touches the DOM"
+// discipline as esc() elsewhere on this page, just via the DOM API instead of a string helper.
+function addChatMessage(role, text){
+  clearChatEmptyState();
+  const div = document.createElement('div');
+  div.className = 'chatMsg ' + role;
+  div.textContent = (role === 'player' ? 'You: ' : '') + text;
+  chatLog.appendChild(div);
+  chatScrollToBottom();
+}
+function addChatBreadcrumb(name, summary){
+  clearChatEmptyState();
+  const div = document.createElement('div');
+  div.className = 'chatBreadcrumb';
+  div.textContent = `⚙ ${name}${summary ? ' — 🎲 ' + summary : ''}`;
+  chatLog.appendChild(div);
+  chatScrollToBottom();
+}
+
+// "New character": sever this browser's identity server-side (POST /chat/reset rotates the
+// HttpOnly cookie + deletes the durable mapping) and reset the pane. The old character stays
+// in the world as a ghost — the confirm() says so explicitly, since "reset" could otherwise
+// read as "delete my character."
+document.getElementById('chatResetBtn').addEventListener('click', async (e) => {
+  e.preventDefault();
+  if (chatTurnInFlight) { addChatMessage('system', 'wait for the current turn to finish first.'); return; }
+  if (!confirm('Start over with a brand-new character? Your current character stays in the world as a ghost.')) return;
+  try{
+    const r = await fetch('/chat/reset', {method: 'POST', credentials: 'same-origin'});
+    if(!r.ok){ const err = await r.json().catch(() => ({})); addChatMessage('error', err.error || `error ${r.status}`); return; }
+    chatLog.innerHTML = '';
+    addChatMessage('system', 'fresh start — say "start an adventure" to begin anew.');
+    chatInput.focus();
+  }catch(err){
+    addChatMessage('error', 'connection trouble — try again?');
+  }
+});
+
+chatForm.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  if (chatTurnInFlight) return;
+  const text = chatInput.value.trim();
+  if (!text) return;
+  addChatMessage('player', text);
+  chatInput.value = '';
+  chatTurnInFlight = true;
+  chatInput.disabled = true;
+  chatSendBtn.disabled = true;
+  try{
+    const r = await fetch('/chat', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      credentials: 'same-origin',  // send/receive the dm_session cookie -- same-origin default
+                                    // for same-origin fetches in most browsers, but explicit
+                                    // here since this call MUST carry it to reuse the session.
+      body: JSON.stringify({message: text}),
+    });
+    if(!r.ok){
+      const err = await r.json().catch(() => ({}));
+      // 429 (per-IP rate limit or per-session lifetime cap, e0b.4) is routine traffic-shaping,
+      // not a failure -- render it as a dim system line, same as a tool breadcrumb, not the
+      // alarmed error-red used for actual failures (409 in-flight, 413 too long, 503 disabled).
+      if(r.status === 429) addChatMessage('system', err.error || 'please slow down a moment.');
+      else addChatMessage('error', err.error || `error ${r.status}`);
+      return;
+    }
+    // NDJSON: one JSON object per newline-terminated line. Buffer partial lines across
+    // chunks -- a chunk boundary is a byte-stream artifact, not guaranteed to land on a line
+    // break. NOTE: PAGE is a plain (non-raw) Python triple-quoted string, so a literal
+    // backslash-n here would be eaten by PYTHON before this ever became JS source -- every
+    // newline below is written as \\n for exactly that reason (see also the SAME gotcha
+    // already worked around in escRegex()'s \\\\ a few hundred lines up).
+    const reader = r.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    while(true){
+      const {done, value} = await reader.read();
+      if(done) break;
+      buf += decoder.decode(value, {stream: true});
+      let nl;
+      while((nl = buf.indexOf('\\n')) >= 0){
+        const line = buf.slice(0, nl).trim();
+        buf = buf.slice(nl + 1);
+        if(!line) continue;
+        let ev;
+        try{ ev = JSON.parse(line); } catch(parseErr){ continue; }
+        if(ev.type === 'tool') addChatBreadcrumb(ev.name, ev.summary);
+        else if(ev.type === 'text') addChatMessage('dm', ev.text);
+        // {"type":"done"} carries no content -- it's only the client's cue the turn is over,
+        // which the surrounding try/finally already handles by re-enabling input below.
+      }
+    }
+  }catch(err){
+    addChatMessage('error', 'connection trouble — try again?');
+  }finally{
+    chatTurnInFlight = false;
+    chatInput.disabled = false;
+    chatSendBtn.disabled = false;
+    chatInput.focus();
+  }
+  // A turn can mint a brand-new character (start_adventure) or move an existing one -- either
+  // way, the very next /state poll (tick() already runs every 1.5s) now resolves "you" from
+  // the SAME dm_session cookie this fetch just used, so the map/character panel light up with
+  // no extra round trip needed here.
+});
 </script></body></html>"""
 
 
@@ -949,12 +1201,194 @@ def art_image(ref: str) -> Response:
     return Response(content=path.read_bytes(), media_type="image/png")
 
 
+@app.get("/chat/enabled")
+def chat_enabled() -> JSONResponse:
+    """Polled once by the page's own JS before it shows the "Play here" tab at all — the kill
+    switch (DND_BROWSER_DM=0) needs a way to hide the pane client-side too, not just 503 the
+    endpoint once someone's already typing into it."""
+    return JSONResponse({"enabled": _browser_dm_enabled()})
+
+
+@app.post("/chat")
+async def chat(request: Request):
+    """One player turn of the browser-DM loop, streamed back as NDJSON (one JSON object per
+    line — EventSource can't POST, so this is a plain streamed fetch() response instead of
+    SSE, see the module's other SSE use at /stream/events for contrast). Each line is exactly
+    the event shape dm_loop.handle_message yields ({"type":"tool",...} / {"type":"text",...}),
+    plus a final {"type":"done"} the client uses to know the turn is over and re-enable input.
+
+    Session handshake: session_id comes from the dm_session HttpOnly cookie; minted here (and
+    set on the response) the first time a browser has none. player_id itself never appears
+    anywhere in this response or gets accepted as a request field — see chat_sessions.py's
+    module docstring for the full boundary.
+
+    Guards, in order: message length cap (413); kill switch (503, checked first, above);
+    per-IP sliding-window rate limit (429, chat_sessions.check_ip_rate_limit — e0b.4); the
+    per-session lifetime message cap (429, chat_sessions.session_cap_exceeded, backed by
+    state.py's web_session.message_count so it survives a redeploy — e0b.4); one turn in
+    flight per session (409, via chat_sessions.lock_for — checked-then-acquired with no
+    `await` in between, safe under asyncio's single-threaded scheduling); and the process-wide
+    chat_sessions.turn_semaphore protecting the single warm LLM worker from a burst of
+    simultaneous browser turns.
+    """
+    if not _browser_dm_enabled():
+        return JSONResponse({"error": "browser play is currently disabled"}, status_code=503)
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = None
+    message = (body.get("message") if isinstance(body, dict) else None) or ""
+    message = message.strip() if isinstance(message, str) else ""
+    if len(message) > MAX_CHAT_MESSAGE_LEN:
+        return JSONResponse(
+            {"error": f"message too long (max {MAX_CHAT_MESSAGE_LEN} chars)"}, status_code=413)
+    if not message:
+        return JSONResponse({"error": "message is required"}, status_code=400)
+
+    session_id = request.cookies.get(chat_sessions.COOKIE_NAME)
+    minted_cookie = session_id is None
+    if minted_cookie:
+        session_id = chat_sessions.new_session_id()
+    # get_or_create is where a returning browser's OWN character gets resumed (durable
+    # web_session mapping, e0b.4) if the in-memory store lost it to a redeploy — see
+    # chat_sessions.py's module docstring and _resume_from_durable_store.
+    session = chat_sessions.get_or_create(session_id)
+
+    ip = _client_ip(request)
+    allowed, first_throttle = chat_sessions.check_ip_rate_limit(ip)
+    if not allowed:
+        if first_throttle:
+            _log_dm_event(ip, session.campaign_id, "dm.throttled",
+                          f"per-IP rate limit ({chat_sessions.MAX_MESSAGES_PER_IP_PER_MINUTE}/min) hit.")
+        return JSONResponse({"error": RATE_LIMIT_MESSAGE}, status_code=429)
+
+    # Lifetime cap check: peek the durable count WITHOUT incrementing it yet (a rejected
+    # request never counts as a used turn) — see World.touch_web_session for the actual
+    # increment, which only happens once the turn is allowed to run, below.
+    existing = server.world.get_web_session(session_id)
+    message_count = existing.message_count if existing else 0
+    exceeded, first_cap_hit = chat_sessions.session_cap_exceeded(session_id, message_count)
+    if exceeded:
+        if first_cap_hit:
+            _log_dm_event(ip, session.campaign_id, "dm.throttled",
+                          f"per-session lifetime cap ({chat_sessions.MAX_SESSION_MESSAGES}) hit.")
+        return JSONResponse({"error": SESSION_CAP_MESSAGE}, status_code=429)
+
+    lock = chat_sessions.lock_for(session_id)
+    if lock.locked():
+        return JSONResponse(
+            {"error": "a turn is already in progress for this session"}, status_code=409)
+    # Acquire NOW (not inside the generator below) — no `await` happens between the .locked()
+    # check above and this line, so under asyncio's cooperative single-threaded scheduling
+    # nothing else can run in between and race the check. Released in the generator's finally.
+    await lock.acquire()
+
+    async def turn_stream():
+        # Observability: capture the COMPLETE turn — every streamed event verbatim, any
+        # exception, wall-clock — into state.record_dm_turn. A player reporting "I typed X
+        # and nothing happened" is undiagnosable from the world log alone (a turn where the
+        # model called no tools writes no world events at all); this table is the flight
+        # recorder that answers what the model actually did.
+        turn_started = time.time()
+        turn_events: list[dict] = []
+        turn_error: str | None = None
+        try:
+            async with chat_sessions.turn_semaphore:
+                async for event in dm_loop.handle_message(session, message):
+                    turn_events.append(event)
+                    yield json.dumps(event) + "\n"
+        except Exception as exc:
+            turn_error = repr(exc)
+            logger.exception("POST /chat: dm_loop.handle_message failed")
+            yield json.dumps({
+                "type": "text",
+                "text": "The DM pauses, momentarily lost in thought... (something went wrong — try again?)",
+            }) + "\n"
+        finally:
+            try:
+                server.world.record_dm_turn(
+                    session_id=session_id, player_id=session.player_id,
+                    campaign_id=session.campaign_id, user_message=message,
+                    events=turn_events, error=turn_error,
+                    duration_ms=int((time.time() - turn_started) * 1000))
+            except Exception:
+                logger.exception("POST /chat: failed to record dm_turn")
+            # Durable bookkeeping for THIS turn: bump the lifetime-cap counter (regardless of
+            # success/failure above — a failed turn still consumed a slot), and persist the
+            # session_id -> player_id mapping once start_adventure has minted one (or refresh
+            # it if it already existed) — see state.py's web_session table / e0b.4.
+            try:
+                server.world.touch_web_session(session_id)
+                if session.player_id:
+                    server.world.save_web_session(
+                        session_id, player_id=session.player_id, campaign_id=session.campaign_id)
+            except Exception:
+                logger.exception("POST /chat: failed to persist web_session bookkeeping")
+            yield json.dumps({"type": "done"}) + "\n"
+            lock.release()
+
+    resp = StreamingResponse(
+        turn_stream(), media_type="application/x-ndjson",
+        # Defeat any intermediary/proxy response buffering — same class of concern
+        # /stream/events already has to deal with for its SSE stream, just spelled out
+        # explicitly here since this is a plain streamed response, not EventSourceResponse.
+        headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"})
+    if minted_cookie:
+        # 30 days — durable identity (e0b.4, state.py's web_session table) now lets a
+        # returning browser resume its OWN character across a redeploy, so the cookie itself
+        # is worth keeping around far longer than the in-memory session store ever survived.
+        resp.set_cookie(chat_sessions.COOKIE_NAME, session_id, httponly=True, samesite="lax",
+                        max_age=60 * 60 * 24 * 30)
+    return resp
+
+
+@app.post("/chat/reset")
+async def chat_reset(request: Request):
+    """The "new character" flow: sever this browser's identity (in-memory session + durable
+    web_session row) and rotate the cookie, so the next /chat message starts the normal
+    opening flow fresh. The old character is NOT deleted — it stays in the world as an
+    abandoned ghost, consistent with every other way a character gets left behind.
+
+    Note the rotation intentionally resets the per-session lifetime message cap — a new
+    character is legitimately a new session. The per-IP sliding window still applies
+    unchanged, so this isn't a rate-limit bypass, only a budget-per-character reset."""
+    if not _browser_dm_enabled():
+        return JSONResponse({"error": "browser play is currently disabled"}, status_code=503)
+    session_id = request.cookies.get(chat_sessions.COOKIE_NAME)
+    if session_id:
+        if chat_sessions.lock_for(session_id).locked():
+            return JSONResponse(
+                {"error": "a turn is still in progress — wait for it to finish first"},
+                status_code=409)
+        chat_sessions.drop(session_id)
+        try:
+            server.world.delete_web_session(session_id)
+        except Exception:
+            logger.exception("POST /chat/reset: failed to delete web_session row")
+    resp = JSONResponse({"ok": True})
+    resp.set_cookie(chat_sessions.COOKIE_NAME, chat_sessions.new_session_id(), httponly=True,
+                    samesite="lax", max_age=60 * 60 * 24 * 30)
+    return resp
+
+
 _EMPTY_STATE = {"rooms": [], "players": [], "character": None, "you": None, "current_room": None, "log": [], "quests": [], "flash_calls": 0, "campaign": None, "server_version": SERVER_VERSION}
 
 
 @app.get("/state")
 def state(request: Request) -> JSONResponse:
     player_id = request.query_params.get("player")
+    # Browser-chat path (e0b.3): no ?player= in the URL at all for that flow — the credential
+    # lives only in the dm_session cookie -> chat_sessions store, never in a URL a viewer could
+    # see over someone's shoulder or find in browser history. Falls back to the cookie ONLY
+    # when ?player= is absent, so an explicit ?player= (the BYO-agent share-link flow) keeps
+    # working exactly as before and is never silently overridden by a stale cookie.
+    if not player_id:
+        session_id = request.cookies.get(chat_sessions.COOKIE_NAME)
+        if session_id:
+            session = chat_sessions.get(session_id)
+            if session and session.player_id:
+                player_id = session.player_id
     # Multi-world: each world's map is independent now — "main" is the well-known default
     # (what every pre-multi-world link/bookmark still means), anything else is a specific
     # world someone created/shared (see server.py start_adventure's campaign_id).
@@ -1032,6 +1466,13 @@ def state(request: Request) -> JSONResponse:
                 char = dict(row)
                 char["inventory"] = json.loads(char["inventory"] or "[]")
                 cur = c.execute("SELECT * FROM rooms WHERE id=?", (char["location_id"],)).fetchone()
+                # Never echo the full bearer credential back into a JSON body — the browser-
+                # chat path resolves player_id from an HttpOnly cookie specifically so it never
+                # touches client-readable state; leaving it in this dict would defeat that the
+                # instant this response reaches the page's JS. Nothing in the page's own JS
+                # reads ch.player_id (name/level/klass/hp/inventory only), so this is a pure
+                # subtraction, not a behavior change for the existing ?player= share-link flow.
+                char.pop("player_id", None)
         log = [dict(r) for r in c.execute(
             "SELECT text FROM log WHERE campaign_id=? ORDER BY seq DESC LIMIT 8", (campaign_id,)
         ).fetchall()][::-1]
