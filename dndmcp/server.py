@@ -721,7 +721,16 @@ def attack(player_id: str, weapon_bonus: int = 3, damage_dice: str = "1d8") -> s
         died = monster["hp"] <= 0
         if died:
             room.contents = [c for c in room.contents if c is not monster]
-            out.append(f"💀 The {monster['name']} falls!")
+            # Loot on kill: rolled from the same per-theme pool room-gen already uses, plus
+            # gold/trophy variety (see game.loot_drop) — otherwise the monster just vanishes,
+            # the flattest moment in an on-camera fight. Dropped straight into room.contents
+            # in the exact shape pick_up_item/drop_item already expect (type/id/name), so no
+            # further plumbing is needed to make it pick-up-able.
+            camp = _require_campaign(ch.campaign_id)
+            loot_name = game.loot_drop(camp.theme, monster["name"])
+            loot_item = {"type": "loot", "id": uuid.uuid4().hex[:8], "name": loot_name}
+            room.contents.append(loot_item)
+            out.append(f"💀 The {monster['name']} falls, dropping {loot_name}!")
         else:
             out.append(f"The {monster['name']} has {monster['hp']} HP left.")
     # monster strikes back with its REAL attack (bonus + damage dice from the SRD) — the
@@ -752,6 +761,8 @@ def attack(player_id: str, weapon_bonus: int = 3, damage_dice: str = "1d8") -> s
         world.kill_entity(monster["id"])
         world.log("entity.died", f"{ch.name} slew {monster['name']}.", player_id=player_id,
                  subject_type="entity", subject_id=monster["id"])
+        world.log("item.spawned", f"{loot_name} dropped by {monster['name']} in {room.name}.",
+                 player_id=player_id, subject_type="room", subject_id=room.id)
     return "\n".join(out)
 
 
