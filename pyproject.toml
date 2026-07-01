@@ -6,6 +6,10 @@ requires-python = ">=3.10,<3.14"
 dependencies = [
     "runpod-flash>=1.7.0",
     "mcp>=1.2.0",          # FastMCP stdio server (the agent interface)
+    "fastapi>=0.138.0",    # dndmcp web GUI (dndmcp/web.py)
+    "uvicorn>=0.49.0",     # dndmcp web GUI server
+    "pydantic>=2.13.0",    # dndmcp typed world models (dndmcp/models.py)
+    "Pillow>=12.0.0",      # dndmcp art: decode Flash-generated images for ANSI terminal rendering
 ]
 
 [project.optional-dependencies]
