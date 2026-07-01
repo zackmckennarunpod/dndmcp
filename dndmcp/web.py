@@ -13,6 +13,7 @@ import json
 import os
 import subprocess
 import sqlite3
+import time
 from pathlib import Path
 
 from fastapi import FastAPI, Request
@@ -744,7 +745,7 @@ def state(request: Request) -> JSONResponse:
         # (deterministic density gate — see server.py::_maybe_spawn_entity_persona).
         flash_calls = c.execute(
             "SELECT COUNT(*) FROM log WHERE campaign_id=?"
-            " AND kind IN ('room.generated','entity.spawned','npc.talked','item.picked_up')"
+            " AND kind IN ('room.generated','entity.spawned','npc.talked','item.picked_up','story.exported')"
             " AND text LIKE '%(flash)%'",
             (campaign_id,),
         ).fetchone()[0]
@@ -796,6 +797,21 @@ async def export_story(request: Request):
         via = "procedural"
         markdown = (f"# {char['name']}'s Story\n\n*A {char['klass']} in a {theme} world.*\n\n"
                    f"{premise}\n\n## Timeline\n\n{timeline_text}\n")
+
+    # Same "every Flash call is a domain event" pattern as room.generated/npc.talked/etc —
+    # otherwise the (real) GPU work of writing this story is invisible to the Flash-call
+    # counter and the live/history stream (see /state, /stream/events flash_only).
+    c = _db()
+    try:
+        c.execute(
+            "INSERT INTO log (ts,kind,text,player_id,subject_type,subject_id,campaign_id)"
+            " VALUES (?,?,?,?,?,?,?)",
+            (time.time(), "story.exported", f"{char['name']} exported their story ({via}).",
+             player_id, "character", player_id, campaign_id),
+        )
+        c.commit()
+    finally:
+        c.close()
 
     safe_name = "".join(ch for ch in char["name"] if ch.isalnum() or ch in " -_").strip() or "story"
     return Response(content=markdown, media_type="text/markdown; charset=utf-8",
