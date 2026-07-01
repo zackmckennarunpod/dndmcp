@@ -13,9 +13,11 @@ referenced elsewhere, they gate unrelated/unused code paths).
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import random
+import time
 import uuid
 
 from . import compendium, flash_llm, game, setting
@@ -116,7 +118,8 @@ async def generate_room_content(room_id: str, theme: str, *, entry_from: str | N
                                 nearby: list[tuple[str, str]] | None = None,
                                 recent_events: list[str] | None = None,
                                 salt: str = "", premise: str = "",
-                                existing_names: list[str] | None = None) -> dict:
+                                existing_names: list[str] | None = None,
+                                deadline_s: float | None = None) -> dict:
     """Generate a room's content for the graph. Tries Flash (structured JSON); falls back
     to procedural. Returns game.generate_room's shape + `features` + a `via` marker.
 
@@ -131,7 +134,13 @@ async def generate_room_content(room_id: str, theme: str, *, entry_from: str | N
     the premise is what actually explains what it means. `existing_names`: every room name
     already used in this world (state.py's room_ids_in) — without this two independent
     generation calls can both land on the same name (observed live: two different rooms both
-    named "Rune Chamber")."""
+    named "Rune Chamber"). `deadline_s`: total wall-clock budget across ALL retry attempts —
+    None (default) keeps the existing patient behavior (up to `room_attempts` full 150s-
+    timeout calls; used by the background prefetch path, which never blocks a player). Pass
+    a real budget (e.g. ~20-30s) from a REACTIVE caller (a player is synchronously waiting,
+    e.g. move()) so a hung/cold Flash endpoint can't stall them for up to 4x150s (~10min) —
+    realistically caps it at 1-2 attempts, then falls back to procedural, same as running out
+    of attempts."""
     rng = game._seeded(room_id, salt)  # deterministic per (room_id, salt)
     base = game.generate_room(room_id, theme, entry_from=entry_from, salt=salt)  # procedural skeleton
 
@@ -156,8 +165,30 @@ async def generate_room_content(room_id: str, theme: str, *, entry_from: str | N
     # roll, not a repeat of the same failure.
     data = None
     room_attempts = 4
+    start = time.monotonic()
     for attempt in range(room_attempts):
-        gen = await flash_llm.generate(messages, max_tokens=280, temperature=0.95)
+        if deadline_s is not None:
+            remaining = deadline_s - (time.monotonic() - start)
+            if remaining <= 0:
+                logger.warning("generate_room_content: deadline (%.1fs) exhausted before "
+                               "attempt %d/%d, falling back to procedural",
+                               deadline_s, attempt + 1, room_attempts)
+                break
+            try:
+                gen = await asyncio.wait_for(
+                    flash_llm.generate(messages, max_tokens=280, temperature=0.95),
+                    timeout=remaining)
+            except asyncio.TimeoutError:
+                # The underlying urllib call keeps running in its executor thread (it isn't
+                # actually cancellable), but that's fine — this coroutine returns to the
+                # reactive caller now instead of blocking on it. That's the whole point of a
+                # deadline: never let a hung endpoint hold a player hostage.
+                logger.warning("generate_room_content: attempt %d/%d timed out after %.1fs "
+                               "(deadline %.1fs total), falling back to procedural",
+                               attempt + 1, room_attempts, remaining, deadline_s)
+                break
+        else:
+            gen = await flash_llm.generate(messages, max_tokens=280, temperature=0.95)
         if not gen:
             continue  # Flash off, or a transport-level error already logged inside generate()
         try:
@@ -407,7 +438,8 @@ def _npc_persona_messages(mon: dict, theme: str, room_name: str, room_kind: str,
 async def generate_npc_persona(mon: dict, theme: str, room_name: str, room_kind: str,
                                atmosphere: str, nearby: list[tuple[str, str]] | None = None,
                                recent_events: list[str] | None = None,
-                               existing_names: list[str] | None = None) -> dict:
+                               existing_names: list[str] | None = None,
+                               deadline_s: float | None = None) -> dict:
     """LLM-generate an individual identity (name/persona/goal/disposition/attack_flavor) for
     one spawned SRD creature — the compendium gives mechanics (hp/ac/traits/attack_name), this
     gives who they ARE and how their attack should actually read in a world where "Scimitar"
@@ -415,10 +447,24 @@ async def generate_npc_persona(mon: dict, theme: str, room_name: str, room_kind:
     Tries Flash; falls back to a bare generic identity (species as name, neutral, no flavor
     override) if disabled/error — the entity row still gets created, just without flavor.
     `existing_names`: every name already used by an NPC in this world (state.py's
-    entity_names_in) — keeps identities unique instead of colliding across creatures/worlds."""
+    entity_names_in) — keeps identities unique instead of colliding across creatures/worlds.
+    `deadline_s`: same budget contract as generate_room_content's — None (default) is the
+    existing patient single-call behavior; a real budget bounds how long this can block a
+    reactive caller before falling back to the generic procedural identity below."""
     messages = _npc_persona_messages(mon, theme, room_name, room_kind, atmosphere,
                                      nearby, recent_events, existing_names)
-    gen = await flash_llm.generate(messages, max_tokens=220, temperature=0.9)
+    gen = None
+    try:
+        if deadline_s is not None:
+            if deadline_s <= 0:
+                raise asyncio.TimeoutError
+            gen = await asyncio.wait_for(
+                flash_llm.generate(messages, max_tokens=220, temperature=0.9), timeout=deadline_s)
+        else:
+            gen = await flash_llm.generate(messages, max_tokens=220, temperature=0.9)
+    except asyncio.TimeoutError:
+        logger.warning("generate_npc_persona: deadline (%.1fs) exhausted, falling back to "
+                       "procedural identity", deadline_s)
     if gen:
         try:
             data = json.loads(gen[gen.find("{"): gen.rfind("}") + 1])
