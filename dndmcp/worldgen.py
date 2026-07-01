@@ -52,10 +52,12 @@ _ROOM_JSON = ('{"name": short evocative room name — grounded in THIS world\'s 
               '"has_monster": true or false — most dungeons have SOME dangerous inhabitants '
               'scattered through them; err toward true unless this specific room is clearly '
               'safe (a study, a shrine, an empty cell), '
-              '"monster_type": if has_monster, the creature that lives here — invent something '
-              'that genuinely belongs to THIS world\'s theme/premise (a wholly new name/species '
-              'is great, not required to be a classic D&D monster), or null if has_monster is '
-              'false. This is flavor only; the game finds real stats separately, '
+              '"monster_type": if has_monster, a SHORT (2-4 word) species/creature name that '
+              'genuinely belongs to THIS world\'s theme/premise — a wholly new species is '
+              'great (not required to be a classic D&D monster), but it must read like a '
+              'species/kind, e.g. "tide wraith", "rust-locked sentinel" — NOT a proper name, '
+              'NOT a title, NOT a descriptive phrase with a dash or colon in it. Or null if '
+              'has_monster is false. This is flavor only; the game finds real stats separately, '
               '"notable_items": array of 1-2 SMALL, PORTABLE objects a player could actually '
               'pick up and carry — a scroll, a trinket, a tool, a coin pouch, a key, a '
               'weapon — distinct from features (which are fixed/scenery, never portable). '
@@ -255,6 +257,15 @@ async def generate_room_content(room_id: str, theme: str, *, entry_from: str | N
             want_monster = bool(data.get("has_monster", want_monster))
             if want_monster:
                 monster_type = _normalize_label(data.get("monster_type"))
+                # a small model doesn't reliably stay a short species name despite the schema
+                # (observed live: "Ancient Constructs - Silent Servants" — a whole descriptive
+                # title, not a creature kind). That breaks the "<name> the <kind> appeared"
+                # log sentence and reads badly as a display name — reject anything dash/colon-
+                # separated or longer than a species name plausibly needs; random_encounter
+                # below still places a real, on-CR monster, just without a forced flavor name.
+                if any(sep in monster_type for sep in (" - ", ":", ";")) \
+                        or len(monster_type.split()) > 4:
+                    monster_type = ""
             via = "flash"
         except Exception:
             logger.exception("generate_room_content: valid JSON but error applying it, "

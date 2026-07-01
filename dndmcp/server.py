@@ -415,6 +415,14 @@ def sense_surroundings(player_id: str) -> str:
 _NPC_DENSITY_LIMIT = 2
 
 
+def _spawn_phrase(name: str, kind: str) -> str:
+    """"<name> the <kind> appeared" reads fine when a persona was actually invented (a real
+    name over a real species), but when persona generation falls back to procedural, `name`
+    IS `kind` (mon["name"] unchanged) — producing a literal "Ancient Tideguard the Ancient
+    Tideguard appeared" (observed live). Collapse to just the name in that case."""
+    return name if name.strip().lower() == kind.strip().lower() else f"{name} the {kind}"
+
+
 async def _maybe_spawn_entity_persona(new_room: dict, dest_id: str, theme: str,
                                       nearby_room_ids: list[str], *, campaign_id: str,
                                       nearby: list[tuple[str, str]] | None = None,
@@ -445,7 +453,7 @@ async def _maybe_spawn_entity_persona(new_room: dict, dest_id: str, theme: str,
                         disposition=persona["disposition"], persona=persona["persona"],
                         goal=persona["goal"], attack_flavor=persona.get("attack_flavor", ""))
     world.log("entity.spawned",
-             f"{persona['name']} the {kind} appeared in {new_room['name']} ({persona['via']}).",
+             f"{_spawn_phrase(persona['name'], kind)} appeared in {new_room['name']} ({persona['via']}).",
              campaign_id=campaign_id, subject_type="entity", subject_id=mon["id"])
 
 
@@ -987,7 +995,7 @@ if os.environ.get("DNDMCP_DEV_TOOLS") == "1":
                           description=room.description, exits=room.exits, contents=room.contents,
                           features=room.features, kind=room.kind)
         world.log("entity.spawned",
-                 f"{persona['name']} the {kind} appeared in {room.name} (dev-spawned).",
+                 f"{_spawn_phrase(persona['name'], kind)} appeared in {room.name} (dev-spawned).",
                  campaign_id=campaign_id, subject_type="entity", subject_id=mon["id"])
         return (f"✓ Spawned {persona['name']} the {kind} in {room_id} ({room.name}). "
                 f"Disposition: {persona['disposition']}.")
