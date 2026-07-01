@@ -9,6 +9,7 @@ position, character, and the log.
 from __future__ import annotations
 
 import asyncio
+import collections
 import datetime
 import html
 import json
@@ -19,12 +20,13 @@ import subprocess
 import sqlite3
 import time
 from pathlib import Path
+from urllib.parse import quote
 
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from sse_starlette.sse import EventSourceResponse
 
-from . import chat_sessions, dm_loop, server, worldgen
+from . import chat_sessions, dm_loop, pairing, server, worldgen
 
 app = FastAPI(title="DNDMCP map")
 logger = logging.getLogger(__name__)
@@ -276,47 +278,95 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
    border-radius:6px;padding:8px 16px;font:600 12px 'IBM Plex Mono',monospace;cursor:pointer;flex-shrink:0}
  #chatSendBtn:hover{background:var(--visited)}
  #chatSendBtn:disabled{opacity:.6;cursor:default}
- /* The world-selection choice card (e0b.10) — shown ABOVE the input in place of the bare
-    "say start an adventure" hint, for exactly as long as this browser has no character in
-    THIS page's world yet (see updateChoiceCard()). Reuses .world-card's own visual language
-    (same class as the Browse-worlds cards below) rather than inventing a new one, per the
-    task's own "no new fonts/colors" constraint — just denser, since it has to fit above the
-    input without pushing it below the fold. */
- #chatChoiceCard{cursor:default;flex-shrink:0}
- #chatChoiceCard .cc-opt{margin-bottom:9px}
- #chatChoiceCard .cc-opt:last-child{margin-bottom:0}
- #chatChoiceCard .cc-title{color:var(--ghost-bright);font-weight:600;font-size:12.5px}
- #chatChoiceCard .cc-sub{color:var(--muted);font-size:11.5px;margin:1px 0 6px}
  .choiceBtn{background:var(--link);color:var(--ghost-bright);border:1px solid var(--border);
    border-radius:6px;padding:5px 12px;font:600 11.5px 'IBM Plex Mono',monospace;cursor:pointer}
  .choiceBtn:hover{background:var(--visited)}
- #choiceJoinInput{flex:1;background:var(--bg);border:1px solid var(--border);border-radius:6px;
+ .choiceBtn:disabled{opacity:.6;cursor:default}
+ .choiceInput{flex:1;background:var(--bg);border:1px solid var(--border);border-radius:6px;
    padding:5px 8px;color:var(--text);font:11.5px 'IBM Plex Mono',monospace}
- #chatChoiceCard a{color:var(--ghost-bright);text-decoration:underline;text-decoration-color:var(--ghost)}
+ /* Onboarding wizard (e0b.12) — a modal stepper over the map, REPLACING the old inline
+    choice card above the chat input AND the always-open connect <details> panel (its
+    install-command content now lives in step 2B below). Compact by design: the whole flow
+    must fit a 1440x900 viewport with no scrolling, so padding/type stay tight throughout. */
+ #playBtn{background:var(--warm);color:#1a1206;border:none;border-radius:6px;padding:6px 14px;
+   font:700 12.5px 'IBM Plex Mono',monospace;cursor:pointer;transition:transform .1s}
+ #playBtn:hover{transform:scale(1.05)}
+ .wizardOverlay{position:fixed;inset:0;background:rgba(6,4,14,.72);z-index:100;
+   display:none;align-items:center;justify-content:center;padding:24px;box-sizing:border-box}
+ /* click-outside-to-dismiss (see the overlay's own click listener) relies on the click target
+    being THIS element and not the modal card floating inside it, hence modal has its own
+    background/position rather than being transparent over the overlay. */
+ #wizardModal{position:relative;width:100%;max-width:600px;max-height:84vh;overflow-y:auto;
+   padding:20px 26px 22px}
+ #wizardModal h2{font:600 15px 'IBM Plex Mono',monospace;color:var(--ghost-bright);margin:0 0 12px}
+ #wizardCloseBtn{position:absolute;top:10px;right:12px;background:none;border:none;
+   color:var(--muted);font-size:17px;line-height:1;cursor:pointer;padding:4px}
+ #wizardCloseBtn:hover{color:var(--text)}
+ .wizStep{display:none}
+ .wizBackBtn{background:none;border:none;color:var(--muted);font:600 11px 'IBM Plex Mono',monospace;
+   letter-spacing:.03em;cursor:pointer;padding:0;margin-bottom:12px}
+ .wizBackBtn:hover{color:var(--text)}
+ .wizBigBtn{display:block;width:100%;box-sizing:border-box;text-align:left;background:var(--bg);
+   border:1px solid var(--border-soft);border-radius:8px;padding:11px 14px;margin-bottom:9px;
+   color:var(--ghost-bright);font:600 13px 'IBM Plex Mono',monospace;cursor:pointer}
+ .wizBigBtn:hover{border-color:var(--ghost)}
+ .wizBigBtn .wizSub{display:block;color:var(--muted);font-weight:400;font-size:11px;margin-top:3px}
+ .wizFriendRow{background:var(--bg);border:1px solid var(--border-soft);border-radius:8px;
+   padding:11px 14px;color:var(--ghost-bright);font:600 13px 'IBM Plex Mono',monospace}
+ .wizFriendRow .wizJoinInputRow{display:flex;gap:6px;margin-top:8px}
+ .wizPairCode{font:700 22px 'IBM Plex Mono',monospace;color:var(--warm-bright);letter-spacing:1.5px;
+   background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:8px 12px;
+   display:inline-block;margin:6px 0 4px}
+ #wizJoinFeed{max-height:64px;overflow-y:auto;font-size:11.5px;color:var(--muted);margin-top:4px}
+ #wizJoinFeed div{padding:2px 0}
 </style></head><body>
 <div id=staleBanner>⟳ This tab is running an older version of the page — <a href="#" onclick="location.reload();return false">refresh to update</a></div>
 <div id=itemTooltip></div>
 <header><h1>⚔ DNDMCP</h1><span class=sub id=where>—</span>
+ <button id=playBtn type=button title="Start here — the wizard walks you through every way to play">▶ Play</button>
  <span id=flashcount>⚡ 0 Flash calls</span>
  <span id=metricsLink title="Click to see system-wide metrics for this world">📊 Metrics</span>
  <button id=shareBtn title="Copies instructions to paste into your agent (Claude Code/Desktop) running dndmcp">🔗 Share</button></header>
-<!-- A bare command means nothing if you don't already know what an MCP server is — so this
-     is a real dropdown with the full "what do I actually do" explanation, not a copy-paste
-     strip, and it lives right under the header instead of buried below the map. -->
-<details class=panel id=connectDetails style="margin:16px 18px 0 18px">
- <summary>🔌 Prefer your own agent? Connect Claude Code / Claude Desktop &amp; play through it</summary>
- <div class=body style="margin-top:10px">
-  <p><b>1. Connect your agent</b> — pick whichever you use:</p>
-  <p class=sub style="margin:10px 0 4px"><b>Claude Code — any OS:</b> one command, done:</p>
-  <div class=codebox><code id=codeCCWin>claude mcp add --transport http dndmcp -s user "https://ldghdgi0xxn6jj-8000.proxy.runpod.net/mcp"</code><button class=copyCodeBtn data-target=codeCCWin>Copy</button></div>
-  <p class=sub style="margin:14px 0 4px"><b>or the shell one-liner</b> (macOS/Linux/WSL — runs exactly the
-  command above, plus a friendly confirmation):</p>
-  <div class=codebox><code id=codeCC>curl -fsSL https://ldghdgi0xxn6jj-8002.proxy.runpod.net/install.sh | bash</code><button class=copyCodeBtn data-target=codeCC>Copy</button></div>
-  <p class=sub style="margin:14px 0 4px"><b>Claude Desktop — any OS:</b> paste this into
-  <code>claude_desktop_config.json</code>, then restart the app.<br>
-  macOS: <code>~/Library/Application Support/Claude/claude_desktop_config.json</code><br>
-  Windows: <code>%APPDATA%\\Claude\\claude_desktop_config.json</code></p>
-  <div class=codebox><pre id=codeCD>{
+<!-- Onboarding wizard (e0b.12) — a modal stepper that owns ALL onboarding now: replaces the
+     old always-open connect <details> panel (content absorbed into step 2B below) AND the
+     inline choice card that used to sit above the chat input (see midTab-chat, which no
+     longer renders one). Hidden by default; opened by #playBtn or auto-opened once for a
+     cold visitor with no character yet (see the wizard JS below for the exact probe). The
+     map/stream stay visible and live behind it the whole time -- this is a modal OVER the
+     page, not a separate view. -->
+<div id=wizardOverlay class=wizardOverlay>
+ <div id=wizardModal class=panel role=dialog aria-modal=true aria-label="Onboarding wizard">
+  <button id=wizardCloseBtn type=button title="Close (Esc)">✕</button>
+  <div id=wizStep1 class=wizStep>
+   <h2>How do you want to play?</h2>
+   <button id=wizBrowseBtn class=wizBigBtn type=button style="display:none">💬 Right here in the browser
+    <span class=wizSub>no setup — play instantly in this tab</span></button>
+   <button id=wizAgentBtn class=wizBigBtn type=button>🖥 Through your own agent
+    <span class=wizSub>Claude Code / Claude Desktop — full MCP tool access</span></button>
+  </div>
+  <div id=wizStep2a class=wizStep>
+   <button class=wizBackBtn type=button data-wizback>← back</button>
+   <h2>Which world?</h2>
+   <button id=wizSharedBtn class=wizBigBtn type=button>⚔ This shared world</button>
+   <button id=wizCreateBtn class=wizBigBtn type=button>🌱 Create my own world
+    <span class=wizSub>yours to shape — share the link with friends</span></button>
+   <div id=wizFriendRow class=wizFriendRow>🔗 A friend's world
+    <div class=wizJoinInputRow>
+     <input id=wizFriendInput class=choiceInput placeholder="paste a world id">
+     <button id=wizFriendGoBtn class=choiceBtn type=button>Go</button>
+    </div>
+   </div>
+  </div>
+  <div id=wizStep2b class=wizStep>
+   <button class=wizBackBtn type=button data-wizback>← back</button>
+   <h2>Connect your agent</h2>
+   <div class=body>
+    <p class=sub style="margin:0 0 4px"><b>Claude Code — any OS:</b> one command, done:</p>
+    <div class=codebox><code id=codeCCWin>claude mcp add --transport http dndmcp -s user "https://ldghdgi0xxn6jj-8000.proxy.runpod.net/mcp"</code><button class=copyCodeBtn data-target=codeCCWin>Copy</button></div>
+    <p class=sub style="margin:10px 0 4px">or the shell one-liner (macOS/Linux/WSL):</p>
+    <div class=codebox><code id=codeCC>curl -fsSL https://ldghdgi0xxn6jj-8002.proxy.runpod.net/install.sh | bash</code><button class=copyCodeBtn data-target=codeCC>Copy</button></div>
+    <p class=sub style="margin:10px 0 4px"><b>Claude Desktop:</b> paste into <code>claude_desktop_config.json</code>, restart the app.</p>
+    <div class=codebox><pre id=codeCD>{
   "mcpServers": {
     "dndmcp": {
       "type": "http",
@@ -324,19 +374,25 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
     }
   }
 }</pre><button class=copyCodeBtn data-target=codeCD>Copy</button></div>
-  <p><b>2. Reconnect</b> — Claude Code: run <code>/mcp</code>; Claude Desktop: restart it — so it picks up the new server.</p>
-  <p><b>3. Say "start an adventure."</b> That's it. Your agent becomes the Dungeon Master — talk
-  naturally ("go through the door," "attack it," "look around"), you never need game-engine
-  syntax. You're joining THIS shared world, live, with everyone else currently playing. Want
-  your own instead? Just say so — your agent can call start_adventure with campaign_id="new"
-  to spin up a private world of your own and hand you back a link to share.</p>
-  <p><b>4. Watch yourself play.</b> Your agent will hand you back a URL to <i>your own</i> live
-  session (this same map, with your character highlighted and your log/inventory in the
-  sidebar) — open it in a browser to watch your position update in real time as you play.</p>
+    <p style="margin:10px 0">Reconnect (Claude Code: <code>/mcp</code>; Desktop: restart), then say
+     <b>"start an adventure."</b> That's it — your agent becomes the Dungeon Master.</p>
+    <div id=wizPairSection>
+     <button id=wizMintBtn class=choiceBtn type=button>Get my pairing code</button>
+     <div id=wizPairCodeBox style="display:none">
+      <div id=wizPairCode class=wizPairCode>—</div>
+      <div class=sub>tell your agent: "start an adventure, pairing code <code id=wizPairCodeInline>—</code>"</div>
+      <div id=wizPairStatus class=sub style="margin-top:4px">watching for your agent to connect...</div>
+      <a id=wizPairMapLink class=choiceBtn style="display:none;text-decoration:none;margin-top:6px" href="#">🗺 See my character on the map</a>
+     </div>
+    </div>
+    <div class=sub style="margin-top:12px">📡 or watch for new adventurers:</div>
+    <div id=wizJoinFeed><div class=empty>watching for new adventurers...</div></div>
+   </div>
+  </div>
  </div>
-</details>
+</div>
 <main style="margin-top:16px">
- <div class=panel><h2>World map (shared, live)</h2><div class=sub id=whereInMap style="margin-bottom:2px">—</div><div class=sub style="margin-bottom:4px;opacity:.85">
+ <div class=panel><h2 id=mapTitle>World map (shared, live)</h2><div class=sub id=mapExplainer style="display:none;margin-bottom:2px">one persistent world everyone shares — other players' ghosts have already passed through it</div><div class=sub id=whereInMap style="margin-bottom:2px">—</div><div class=sub style="margin-bottom:4px;opacity:.85">
   <span style="color:var(--ghost)">●</span> your room &nbsp;
   <span style="color:var(--visited)">●</span> places you've been &nbsp;
   <span style="color:var(--dim)">●</span>&thinsp;??? not yet discovered &nbsp;
@@ -370,10 +426,6 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
     <a href="#" id=chatResetBtn title="Start over with a brand-new character — your current one stays in the world"
       style="color:var(--muted);text-decoration:underline dotted;white-space:nowrap;margin-left:8px">↺ new character</a>
    </div>
-   <!-- World-selection choice card (e0b.10) — hidden until updateChoiceCard() confirms this
-        browser has no character yet in THIS page's world. Content is filled in per-page
-        (main vs a specific /?campaign=X world) — see renderChoiceCardHtml(). -->
-   <div id=chatChoiceCard class=world-card style="display:none"></div>
    <div id=chatLog><div class=empty>say "start an adventure" to begin</div></div>
    <form id=chatForm>
     <input id=chatInput type=text autocomplete=off maxlength=500
@@ -472,100 +524,119 @@ const params = new URLSearchParams(location.search);
 const playerId = params.get('player');
 const campaignId = params.get('campaign') || 'main';
 
-// World-selection choice card + per-world chat state (e0b.10). Declared here (top of script,
-// ahead of tick()'s own first synchronous call a bit further down) rather than down near the
-// rest of the chat-pane wiring — those `const`s aren't initialized yet the FIRST time tick()
-// runs (tick() is invoked once immediately, before the script has finished executing top to
-// bottom), so anything tick() touches on a cold call has to already exist by here. Functions
-// below that reference chat DOM elements do their own document.getElementById lookups for the
-// same reason, rather than closing over consts declared later.
-let chatStarted = false;      // true once the player has taken ANY action this page-load —
-                               // clicking a choice-card button, or typing into the input
-                               // directly. Once true, the choice card never reappears this
-                               // pageview (the "no chat history client-side" half of the probe).
-let cardDismissed = false;    // set the instant a choice-card button is clicked.
-let cardRenderedFor = null;   // last render key the card's innerHTML was built for — avoids
-                               // rebuilding (and wiping whatever's mid-typed into
-                               // #choiceJoinInput) on every 1.5s poll once already showing.
-let newWorldPending = false;  // "Create my world" was clicked — sent as new_world:true on
-                               // exactly the NEXT /chat POST only, then cleared regardless of
-                               // the response (see chatForm's submit handler).
-
-function renderChoiceCardHtml(camp){
-  if (campaignId === 'main') {
-    return '<div class=cc-opt><div class=cc-title>⚔ Play in the shared world</div>'
-      + '<div class=cc-sub>one persistent world — everyone\\'s ghosts and traces</div>'
-      + '<button class=choiceBtn id=choicePlayBtn type=button>Play here</button></div>'
-      + '<div class=cc-opt><div class=cc-title>🌱 Forge your own world</div>'
-      + '<div class=cc-sub>yours to shape — share the link with friends</div>'
-      + '<button class=choiceBtn id=choiceCreateBtn type=button>Create my world</button></div>'
-      + '<div class=cc-opt style="margin-bottom:0"><div class=cc-title>🔗 Join a friend\\'s world</div>'
-      + '<div style="display:flex;gap:6px;margin-top:4px">'
-      + '<input id=choiceJoinInput placeholder="paste a world id">'
-      + '<button class=choiceBtn id=choiceJoinBtn type=button>Go</button></div></div>';
-  }
-  const theme = esc((camp && camp.theme) || 'an unnamed world');
-  return `<div class=cc-opt><div class=cc-title>You're visiting ${theme} <span class=sub>(${esc(campaignId)})</span></div>`
-    + '<button class=choiceBtn id=choicePlayBtn type=button style="margin-top:4px">Play in this world</button></div>'
-    + '<div class=cc-opt style="margin-bottom:0"><a href="/">← back to the main world</a></div>';
+// Map title copy (e0b.12): main gets the "this is the real shared world" explainer; any other
+// world keeps the plain title -- its own [world: <id>] tag already shows up in #whereInMap
+// every tick() (see the worldTag logic below), so it doesn't need a second static label here.
+if (campaignId === 'main') {
+  document.getElementById('mapTitle').textContent = 'World map — the main shared world';
+  document.getElementById('mapExplainer').style.display = '';
 }
 
-function dismissChoiceCard(){
+// Per-world chat state (e0b.10, trimmed for e0b.12 -- the world-selection DECISION itself now
+// lives entirely in the onboarding wizard below, not an inline card above the chat input).
+// Declared here (top of script, ahead of tick()'s own first synchronous call a bit further
+// down) rather than down near the rest of the chat-pane wiring — those `const`s aren't
+// initialized yet the FIRST time tick() runs (tick() is invoked once immediately, before the
+// script has finished executing top to bottom), so anything tick() touches on a cold call has
+// to already exist by here.
+let chatStarted = false;      // true once the player has taken ANY action this page-load --
+                               // a wizard choice that lands in chat, or typing into the input
+                               // directly. Gates the wizard's own one-time auto-open (see
+                               // maybeAutoOpenWizard below) the same way it used to gate the
+                               // old inline choice card.
+let newWorldPending = false;  // "Create my own world" was clicked in the wizard -- sent as
+                               // new_world:true on exactly the NEXT /chat POST only, then
+                               // cleared regardless of the response (see chatForm's submit
+                               // handler).
+let lastCampaignTheme = null; // updated every tick() from /state's campaign.theme -- lets the
+                               // wizard's step 2A label a non-main world by name instead of
+                               // just its opaque id.
+
+// --- Onboarding wizard (e0b.12) --------------------------------------------------------------
+// A modal stepper over the map: replaces the old inline choice card (immediately above) AND
+// the always-open connect <details> panel (its install-command content now lives in step 2B's
+// static HTML). Opened by the header's #playBtn, or once automatically for a cold visitor (see
+// maybeAutoOpenWizard). ESC / click-outside / the ✕ button all dismiss it back to spectating,
+// same "the game stays visible behind it" idea the task describes.
+let wizardOpen = false;
+const WIZ_STEPS = ['wizStep1', 'wizStep2a', 'wizStep2b'];
+const WIZARD_DISMISSED_KEY = 'dndmcp_wizard_dismissed';
+
+function showWizStep(id){
+  WIZ_STEPS.forEach(s => { document.getElementById(s).style.display = (s === id) ? 'block' : 'none'; });
+}
+function openWizard(step){
+  document.getElementById('wizardOverlay').style.display = 'flex';
+  wizardOpen = true;
+  showWizStep(step || 'wizStep1');
+}
+function closeWizard(){
+  document.getElementById('wizardOverlay').style.display = 'none';
+  wizardOpen = false;
+  // ANY dismissal path (✕ / Esc / click-outside / a real in-wizard choice) counts as "seen
+  // it" -- a cold visitor who explicitly closed it once should never be nagged again on this
+  // browser, per the task's own "no dismissal remembered... remember in localStorage" note.
+  try{ localStorage.setItem(WIZARD_DISMISSED_KEY, '1'); }catch(e){}
+}
+document.getElementById('playBtn').addEventListener('click', () => openWizard('wizStep1'));
+document.getElementById('wizardCloseBtn').addEventListener('click', () => closeWizard());
+document.getElementById('wizardOverlay').addEventListener('click', (e) => {
+  if (e.target.id === 'wizardOverlay') closeWizard();  // click on the backdrop, not the modal card
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && wizardOpen) closeWizard();
+});
+document.querySelectorAll('.wizBackBtn').forEach(b => b.addEventListener('click', () => showWizStep('wizStep1')));
+
+document.getElementById('wizAgentBtn').addEventListener('click', () => showWizStep('wizStep2b'));
+document.getElementById('wizBrowseBtn').addEventListener('click', () => {
+  const label = campaignId === 'main' ? '⚔ This shared world'
+    : `⚔ This world: ${esc(lastCampaignTheme || campaignId)}`;
+  document.getElementById('wizSharedBtn').textContent = label;
+  showWizStep('wizStep2a');
+});
+document.getElementById('wizSharedBtn').addEventListener('click', () => {
+  closeWizard();
   chatStarted = true;
-  cardDismissed = true;
-  document.getElementById('chatChoiceCard').style.display = 'none';
-}
-
-// Called from tick() every poll (see below) with the freshly-fetched /state payload — the
-// probe is exactly the task's own wording: no character in THIS world yet, and no chat
-// history client-side (chatStarted) that would make the card reappearing mid-conversation
-// feel like a bug instead of a fresh-visit affordance.
-function updateChoiceCard(s){
-  const card = document.getElementById('chatChoiceCard');
-  const showCard = !s.you && !chatStarted && !cardDismissed;
-  if (!showCard) {
-    card.style.display = 'none';
-    cardRenderedFor = null;
-    return;
-  }
-  const renderKey = campaignId === 'main' ? 'main' : (campaignId + '|' + ((s.campaign && s.campaign.theme) || ''));
-  if (cardRenderedFor !== renderKey) {
-    card.innerHTML = renderChoiceCardHtml(s.campaign);
-    cardRenderedFor = renderKey;
-    const chatLogEl = document.getElementById('chatLog');
-    const chatEmpty = chatLogEl && chatLogEl.querySelector('.empty');
-    if (chatEmpty) chatEmpty.remove();
-  }
-  card.style.display = 'block';
-}
-
-document.getElementById('chatChoiceCard').addEventListener('click', (e) => {
-  if (e.target.id === 'choicePlayBtn') {
-    dismissChoiceCard();
-    const input = document.getElementById('chatInput');
-    if (input) input.focus();
-  } else if (e.target.id === 'choiceCreateBtn') {
-    dismissChoiceCard();
-    newWorldPending = true;
-    // addChatMessage is a hoisted function declaration (defined further down, alongside the
-    // rest of the chat-pane wiring) — safe to call here even though this listener can fire
-    // before that point in the script textually runs, since function declarations (unlike
-    // const/let) are fully hoisted with their body intact.
-    addChatMessage('system', "let's build your world — describe a theme, or say \\"surprise me\\"");
-    const input = document.getElementById('chatInput');
-    if (input) input.focus();
-  } else if (e.target.id === 'choiceJoinBtn') {
-    const joinInput = document.getElementById('choiceJoinInput');
-    const id = (joinInput && joinInput.value || '').trim();
-    if (id) location.href = '/?campaign=' + encodeURIComponent(id);
-  }
+  showMidTab('chat');
+  const input = document.getElementById('chatInput');
+  if (input) input.focus();
 });
-document.getElementById('chatChoiceCard').addEventListener('keydown', (e) => {
-  if (e.key === 'Enter' && e.target.id === 'choiceJoinInput') {
-    const goBtn = document.getElementById('choiceJoinBtn');
-    if (goBtn) goBtn.click();
-  }
+document.getElementById('wizCreateBtn').addEventListener('click', () => {
+  closeWizard();
+  chatStarted = true;
+  newWorldPending = true;
+  showMidTab('chat');
+  // addChatMessage is a hoisted function declaration (defined further down, alongside the
+  // rest of the chat-pane wiring) — safe to call here even though this listener can fire
+  // before that point in the script textually runs, since function declarations (unlike
+  // const/let) are fully hoisted with their body intact.
+  addChatMessage('system', "let's build your world — describe a theme, or say \\"surprise me\\"");
+  const input = document.getElementById('chatInput');
+  if (input) input.focus();
 });
+function goToFriendWorld(){
+  const id = (document.getElementById('wizFriendInput').value || '').trim();
+  if (id) location.href = '/?campaign=' + encodeURIComponent(id);
+}
+document.getElementById('wizFriendGoBtn').addEventListener('click', goToFriendWorld);
+document.getElementById('wizFriendInput').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') goToFriendWorld();
+});
+
+// Auto-open once per browser (not per pageview -- see WIZARD_DISMISSED_KEY) for a cold
+// visitor: no character yet in THIS world, and this browser has never dismissed the wizard
+// before. Checked exactly once, from the very first /state poll (see tick() below) -- a
+// character created LATER in the same pageview must not retroactively pop the wizard back
+// open, so this never re-evaluates after that first check.
+let wizardAutoOpenChecked = false;
+function maybeAutoOpenWizard(s){
+  if (wizardAutoOpenChecked) return;
+  wizardAutoOpenChecked = true;
+  if (chatStarted) return;
+  try{ if (localStorage.getItem(WIZARD_DISMISSED_KEY)) return; }catch(e){}
+  if (!s.you) openWizard('wizStep1');
+}
 
 // W/H used to be hardcoded to 700x420, so on any screen wider than that the map's viewBox
 // only ever used a small fixed chunk of the actual #map box — the rest sat empty, and
@@ -600,30 +671,24 @@ function showMidTab(name){
 }
 document.querySelectorAll('.midTabBtn').forEach(b => b.addEventListener('click', () => showMidTab(b.dataset.miditab)));
 
-// Kill switch check (DND_BROWSER_DM): only reveal the "Play here" tab once the server
-// confirms browser play is actually on. Fails closed (pane stays hidden) on any fetch error.
-// When it IS on, a cold visitor (no ?player=) lands with the chat tab already selected and
-// focused — browser play is the zero-friction front door now, so the first thing a new
-// visitor sees must be "type here to play", not a wall of install commands. The connect
-// panel below stays collapsed for the same reason (it USED to auto-expand for cold main
-// visits, which pushed the entire game below the fold — observed live, confusing) — the
-// BYO-agent path stays one labeled click away, just no longer the landing experience.
+// Kill switch check (DND_BROWSER_DM): only reveal the "Play here" tab (and the wizard's
+// browser-play option) once the server confirms browser play is actually on. Fails closed
+// (both stay hidden) on any fetch error. The wizard now owns the landing experience (e0b.12):
+// no more auto-selecting the chat tab here for a cold visit — that would fight the wizard's
+// own auto-open (see maybeAutoOpenWizard), which is what decides "type here to play" vs
+// spectating vs BYO-agent now.
 fetch('/chat/enabled').then(r => r.json()).then(d => {
   if (!d.enabled) return;
   // The tab is ALWAYS available once browser play is on — a visitor may want to play here
-  // regardless of how they arrived. But only a cold visit (no ?player=) auto-SELECTS it:
-  // ?player= means this tab is the companion map for someone already playing through their
-  // own MCP agent, so it lands on the live stream instead, and the chat carries a note that
-  // playing here is a separate browser character, not a handle on their agent's session.
+  // regardless of how they arrived. ?player= means this tab is the companion map for someone
+  // already playing through their own MCP agent, so the chat carries a note that playing
+  // here is a separate browser character, not a handle on their agent's session.
   document.getElementById('chatTabBtn').style.display = '';
+  document.getElementById('wizBrowseBtn').style.display = '';
   if (playerId) {
     addChatMessage('system', "heads up: you're watching an agent-driven session — playing " +
       'here starts a separate browser character, not control of that one.');
-    return;
   }
-  showMidTab('chat');
-  const input = document.getElementById('chatInput');
-  if (input) input.focus();
 }).catch(() => {});
 
 // Browse other worlds: campaign ids are opaque hex strings — nobody finds a world they don't
@@ -1010,21 +1075,20 @@ async function tick(){
     document.getElementById('staleBanner').style.display = 'block';
   }
   const worldTag = campaignId !== 'main' ? `[world: ${campaignId}] ` : '';
-  const whereText = worldTag + (s.current_room ? ('You are in: '+(s.current_room.name||'')) : (playerId ? 'unknown player' : 'Spectating — hit 🎲 Play here to join from your browser, or connect your own agent below'));
+  const whereText = worldTag + (s.current_room ? ('You are in: '+(s.current_room.name||'')) : (playerId ? 'unknown player' : 'Spectating — hit ▶ Play to join, or connect your own agent'));
   document.getElementById('where').textContent = whereText;
   document.getElementById('whereInMap').textContent = whereText;
   renderGraph(s.rooms||[], s.players||[], s.you||null);
   rebuildHighlightIndex(s);
   const camp = s.campaign;
+  lastCampaignTheme = camp && camp.theme;
   document.getElementById('worldInfo').innerHTML = camp
     ? `<b>${esc(camp.theme||'')}</b>${camp.name?` — <span>${esc(camp.name)}</span>`:''}<br>${esc(camp.premise||'')}`
     : '<span class=empty>no world seeded yet</span>';
-  // Choice card (e0b.10): show/refresh/hide based on this poll's "you" -- see
-  // updateChoiceCard's own comment for the exact probe. Persistent "which world" label right
-  // above it, always kept current regardless of whether the card itself is showing (fixes a
-  // live prod confusion: a player on a friend's world's page had no on-screen confirmation of
-  // which world the chat pane was actually scoped to).
-  updateChoiceCard(s);
+  // Onboarding wizard (e0b.12): auto-open once for a cold visitor, checked from this first
+  // real /state payload (needs s.you to know whether this browser already has a character
+  // here) -- see maybeAutoOpenWizard's own docstring for the exact one-shot probe.
+  maybeAutoOpenWizard(s);
   const worldLabelTheme = (camp && camp.theme) || (campaignId === 'main' ? 'the shared world' : 'this world');
   document.getElementById('chatWorldLabel').textContent = campaignId === 'main'
     ? `Playing in: ${worldLabelTheme} (main)`
@@ -1104,6 +1168,13 @@ function connectStream(){
       div.classList.add('new');
       setTimeout(() => div.classList.remove('new'), 900);
     }
+    // Wizard step 2B's soft join-feed fallback (e0b.12): piggyback this SAME connection
+    // rather than opening a second EventSource -- every adventure.started event (any world
+    // session's start_adventure — see server.py) is already flowing through here regardless
+    // of whether the wizard happens to be open right now. Backfill (this stream's default
+    // "recent ~20" mode) means a visitor who opens the wizard right after someone joined
+    // still sees it, not just joins from this exact moment forward.
+    if (ev.kind === 'adventure.started') addJoinFeedEvent(ev);
   });
   es.onerror = () => { streamDot.style.background = '#ef4444'; };
   es.onopen = () => {
@@ -1160,6 +1231,90 @@ document.getElementById('char').addEventListener('mouseout', (e) => {
 });
 
 connectStream();
+
+// Wizard step 2B soft fallback: last few adventure.started events, fed by connectStream()'s
+// own 'world-event' listener above (see its comment for why this doesn't open a second
+// EventSource). Shown regardless of whether the wizard is currently open -- cheap to keep
+// current, and it's what makes "watching for new adventurers..." already have something in
+// it the moment someone opens the panel, not just from that instant forward.
+function addJoinFeedEvent(ev){
+  const el = document.getElementById('wizJoinFeed');
+  if (!el) return;
+  const empty = el.querySelector('.empty');
+  if (empty) empty.remove();
+  const div = document.createElement('div');
+  div.textContent = `⚡ ${ev.text}`;
+  el.prepend(div);
+  while (el.children.length > 5) el.lastChild.remove();
+}
+
+// Wizard step 2B verification panel (e0b.12): mint a pairing code (POST /pair/mint), show it
+// large, then poll GET /pair/status every 3s until claimed or the ~10min TTL lapses (matches
+// pairing.py's own TTL — polling past it is pointless, the code is already gone server-side).
+// See pairing.py's module docstring for the full mechanism this is the front end of.
+let pairPollTimer = null;
+let pairPollDeadline = 0;
+
+function stopPairPoll(){
+  if (pairPollTimer) { clearInterval(pairPollTimer); pairPollTimer = null; }
+}
+
+function pairExpired(){
+  stopPairPoll();
+  document.getElementById('wizPairStatus').textContent = 'that code expired — get a new one to try again.';
+  const btn = document.getElementById('wizMintBtn');
+  btn.textContent = 'Get a new pairing code';
+  btn.disabled = false;
+  btn.style.display = '';
+}
+
+function startPairPoll(code){
+  stopPairPoll();
+  pairPollDeadline = Date.now() + 10 * 60 * 1000;
+  pairPollTimer = setInterval(async () => {
+    if (Date.now() > pairPollDeadline) { pairExpired(); return; }
+    try{
+      const r = await fetch('/pair/status?code=' + encodeURIComponent(code));
+      if (r.status === 404) { pairExpired(); return; }
+      if (!r.ok) return;  // transient error — just try again on the next tick
+      const d = await r.json();
+      if (d.claimed) {
+        stopPairPoll();
+        document.getElementById('wizPairStatus').innerHTML =
+          `✓ That's you — <b>${esc(d.name || 'your character')}</b>!`;
+        const linkBtn = document.getElementById('wizPairMapLink');
+        linkBtn.href = d.map_link;
+        linkBtn.style.display = '';
+      }
+    }catch(e){ /* network hiccup — next 3s tick tries again */ }
+  }, 3000);
+}
+
+document.getElementById('wizMintBtn').addEventListener('click', async () => {
+  const btn = document.getElementById('wizMintBtn');
+  btn.disabled = true;
+  try{
+    const r = await fetch('/pair/mint', {method: 'POST'});
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      document.getElementById('wizPairStatus').textContent =
+        err.error || 'could not mint a code — try again in a moment.';
+      btn.disabled = false;
+      return;
+    }
+    const d = await r.json();
+    document.getElementById('wizPairCode').textContent = d.code;
+    document.getElementById('wizPairCodeInline').textContent = d.code;
+    document.getElementById('wizPairCodeBox').style.display = '';
+    document.getElementById('wizPairStatus').textContent = 'watching for your agent to connect...';
+    document.getElementById('wizPairMapLink').style.display = 'none';
+    btn.style.display = 'none';
+    startPairPoll(d.code);
+  }catch(e){
+    document.getElementById('wizPairStatus').textContent = 'connection trouble — try again?';
+    btn.disabled = false;
+  }
+});
 
 // Play here (e0b.3): a full turn of the browser-DM loop over POST /chat, streamed back as
 // NDJSON (EventSource can't POST, so this is a plain fetch() + ReadableStream read instead of
@@ -1393,6 +1548,67 @@ def chat_enabled() -> JSONResponse:
     switch (DND_BROWSER_DM=0) needs a way to hide the pane client-side too, not just 503 the
     endpoint once someone's already typing into it."""
     return JSONResponse({"enabled": _browser_dm_enabled()})
+
+
+# --- Onboarding wizard: pairing endpoints (e0b.12) -------------------------------------------
+# See pairing.py's module docstring for the full mechanism (mint/claim/status already shipped
+# there + server.py's claim_pairing MCP tool). This is just the two thin web endpoints the
+# wizard's step 2B talks to.
+
+# Cheap per-IP mint guard: the code space is only 64*64=4096 combos (pairing.py's word lists) —
+# unlike /chat, minting has no LLM/GPU cost of its own to naturally throttle it, so a scripted
+# hammer on this one endpoint alone could drain/collide the space. Same sliding-window shape as
+# chat_sessions.check_ip_rate_limit, kept local here since minting shares nothing else with a
+# chat turn (no session, no world, no lock).
+_MINT_LIMIT_PER_IP_PER_MINUTE = 5
+_MINT_WINDOW_SECONDS = 60.0
+_mint_hits: dict[str, collections.deque] = {}
+
+
+def _check_mint_rate_limit(ip: str | None) -> bool:
+    if ip is None:
+        return True  # no IP to key on — never block blind
+    now = time.monotonic()
+    hits = _mint_hits.setdefault(ip, collections.deque())
+    while hits and now - hits[0] > _MINT_WINDOW_SECONDS:
+        hits.popleft()
+    if len(hits) >= _MINT_LIMIT_PER_IP_PER_MINUTE:
+        return False
+    hits.append(now)
+    return True
+
+
+@app.post("/pair/mint")
+def pair_mint(request: Request) -> JSONResponse:
+    """Wizard step 2B, "Get my pairing code": mint a fresh onboarding code
+    (pairing.mint() — two-word, ~10min TTL, single-use). Rate-guarded per IP only; see
+    _check_mint_rate_limit above for why that's enough here."""
+    ip = _client_ip(request)
+    if not _check_mint_rate_limit(ip):
+        return JSONResponse(
+            {"error": "too many codes requested — wait a moment and try again"}, status_code=429)
+    return JSONResponse({"code": pairing.mint()})
+
+
+@app.get("/pair/status")
+def pair_status(request: Request) -> JSONResponse:
+    """Wizard poll target (every 3s while step 2B's code box is showing). 404 when the code is
+    unknown or its ~10min TTL expired — the wizard treats that as "give up, offer a fresh
+    code." Otherwise {"claimed": bool, "name": str|None, "map_link": str|None}.
+
+    map_link is built HERE, server-side, ONLY once claimed: "/?player=<id>&campaign=<id>" —
+    this endpoint is the ONE sanctioned channel a browser is allowed to learn its own full
+    player link through (see pairing.py's module docstring for why: the code that unlocks it
+    was minted by this same browser and is single-use, so nothing else can ride along). The
+    raw player_id is deliberately never surfaced as its own field — only baked into the link."""
+    code = request.query_params.get("code") or ""
+    result = pairing.status(code)
+    if result is None:
+        return JSONResponse({"error": "unknown or expired code"}, status_code=404)
+    map_link = None
+    if result["claimed"]:
+        map_link = f"/?player={quote(result['player_id'])}&campaign={quote(result['campaign_id'])}"
+    return JSONResponse({"claimed": result["claimed"], "name": result["name"], "map_link": map_link})
 
 
 @app.post("/chat")
