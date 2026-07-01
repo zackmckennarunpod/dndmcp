@@ -83,17 +83,17 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
  h1{font:600 16px 'Cinzel',serif;letter-spacing:1.5px;margin:0;color:var(--ghost-bright);
    text-shadow:0 0 12px rgba(79,216,196,.35)}
  .sub{color:var(--muted);font-size:12px}
- /* 3 columns: map (flexible) | live stream (own space, not buried below the fold) | the
-    existing character/room/recent sidebar. stretch (the grid default here) makes all three
-    match the row's height, which .colPanel below then passes down to their actual content. */
- main{display:grid;grid-template-columns:1fr 340px 280px;gap:16px;padding:16px 18px;align-items:stretch}
+ /* 3 columns: map (flexible width) | live stream (own space, not buried below the fold) | the
+    existing character/room/recent sidebar. */
+ main{display:grid;grid-template-columns:1fr 340px 280px;gap:16px;padding:16px 18px}
  .panel{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:14px}
  .panel h2{font-size:11px;text-transform:uppercase;letter-spacing:1.5px;color:var(--muted);margin:0 0 10px}
- /* The map and stream panels (not the aside's stacked cards, which size to their own content)
-    stretch to fill whatever height the grid row ends up being, so #map/#stream can flex:1
-    into that instead of being stuck at a number that ignores how much room is actually there. */
- .colPanel{display:flex;flex-direction:column;height:100%}
- #map{width:100%;flex:1;min-height:480px;overflow:hidden;position:relative;
+ /* Fixed (not %/flex-stretched) heights on purpose: a height that depends on the grid row,
+    which depends on the SVG's own intrinsic ratio (see #map), is a circular layout — the
+    browser "resolves" it by growing #map without bound every time the ResizeObserver below
+    reacts to its own previous resize. Width is still fully responsive (that was the actual
+    "map doesn't fit the box" bug); only height is pinned to a plain number now. */
+ #map{width:100%;height:560px;overflow:hidden;position:relative;
    background:radial-gradient(ellipse at 50% 40%,#1a1330 0%,var(--panel) 70%)}
  #nodeTooltip{position:absolute;pointer-events:none;background:#1c1433;border:1px solid var(--link);
    border-radius:6px;padding:4px 9px;font-size:12px;color:var(--text);display:none;z-index:10;
@@ -137,8 +137,8 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
   text-transform:none;letter-spacing:0}
 #streamFilterBtn.active{background:var(--warm);color:#1a1206;border-color:var(--warm)}
  /* Was a fixed 120px when this lived as a thin strip below everything else — now it's a full
-    column next to the map (see .colPanel), so it should use all the height that gives it. */
- #stream{display:flex;flex-direction:column-reverse;gap:0;flex:1;min-height:0;overflow-y:auto}
+    column next to the map, sized to match (see #map's height). */
+ #stream{display:flex;flex-direction:column-reverse;gap:0;height:560px;overflow-y:auto}
  #stream div{color:var(--muted);padding:2px 0;border-bottom:1px solid var(--border-soft);font-size:12px}
  #stream div.new{animation:flash .8s ease-out}
  #stream .who{color:var(--warm)}
@@ -219,8 +219,8 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
  </div>
 </details>
 <main style="margin-top:16px">
- <div class="panel colPanel"><h2>World map (shared, live)</h2><div class=sub id=whereInMap style="margin-bottom:8px">—</div><div id=map><span id=mapEmpty class=empty>no adventure yet — start one in your agent</span><div id=nodeTooltip></div></div></div>
- <div class="panel colPanel"><h2><span id=streamDot></span><span id=streamTitle>Live world stream</span></h2>
+ <div class=panel><h2>World map (shared, live)</h2><div class=sub id=whereInMap style="margin-bottom:8px">—</div><div id=map><span id=mapEmpty class=empty>no adventure yet — start one in your agent</span><div id=nodeTooltip></div></div></div>
+ <div class=panel><h2><span id=streamDot></span><span id=streamTitle>Live world stream</span></h2>
    <div class=sub style="margin-bottom:8px"><span id=streamSub>every player, every session</span>
    <button id=streamFilterBtn style="margin-left:6px">⚡ Flash calls only</button></div>
    <div id=stream><div class=empty>waiting for the world to move...</div></div></div>
