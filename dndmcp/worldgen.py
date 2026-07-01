@@ -43,9 +43,15 @@ def _creatures_for(theme: str) -> list[str]:
 # narrating, in whatever voice fits the moment — not a canned ahead/left/right/center template.
 _ROOM_JSON = ('{"name": short evocative room name, "kind": one or two words (e.g. "cellar", '
               '"great hall", "attic" — informs how it connects to the world), '
-              '"atmosphere": one factual sentence of raw sensory detail (smell/sound/light) — '
-              'NOT a full scene description, just the one true thing worth knowing, '
-              '"feature": one specific examinable detail, "has_monster": true or false, '
+              '"atmosphere": 2-4 sentences of vivid, SPECIFIC sensory detail (sight, smell, '
+              'sound, light, texture) — substantial enough to actually paint the room, not a '
+              'single bare fact. Still facts for a Dungeon Master to narrate FROM, not finished '
+              'scene-prose — but ground every detail in THIS world\'s actual theme/premise, '
+              'never generic dungeon-crawl dressing (no "collapsed pillar" filler unless this '
+              'world genuinely is that kind of place), '
+              '"features": array of exactly 2 specific, examinable details, each tied to this '
+              'world\'s actual theme/premise (not interchangeable with any other setting), '
+              '"has_monster": true or false, '
               '"notable_item": short item description or null, '
               '"exits": {"<direction>": short physical description (4-8 words) of THAT '
               'exit\'s threshold as seen from THIS room — a door/archway/stairwell/gap, '
@@ -114,7 +120,12 @@ async def generate_room_content(room_id: str, theme: str, *, entry_from: str | N
             # running the session) narrates from this, same as it would from a human DM's notes.
             if data.get("atmosphere"):
                 base["description"] = data["atmosphere"]
-            if data.get("feature"):
+            feats_from_flash = data.get("features")
+            if isinstance(feats_from_flash, list):
+                for f in feats_from_flash:
+                    if isinstance(f, str) and f.strip():
+                        base.setdefault("features", []).append(f.strip())
+            elif data.get("feature"):  # back-compat: older prompt/response shape (singular)
                 base.setdefault("features", []).append(data["feature"])
             item = data.get("notable_item")
             if item:
@@ -152,12 +163,18 @@ async def generate_room_content(room_id: str, theme: str, *, entry_from: str | N
         except Exception:
             logger.exception("generate_room_content: malformed Flash JSON, keeping procedural: %r", gen)
 
-    # add 1-2 procedural features for texture (the liveness layer)
+    # The generic procedural pool (game.py._THEMES) only really knows "gothic horror" and a
+    # bland "default" bucket — for any custom/agent-authored theme (the common case once a
+    # world's premise is agent-written, e.g. "drowned-tide folk horror"), this pool is
+    # thematically mismatched filler, not texture. Top up ONLY if Flash didn't already give
+    # real on-theme content (failed entirely, or returned fewer than 2 features) — never pile
+    # generic dressing on top of good Flash output just because it's "the liveness layer."
     t = game._theme(theme)
     feats = base.setdefault("features", [])
-    for f in rng.sample(t["features"], k=min(2, len(t["features"]))):
-        if f not in feats:
-            feats.append(f)
+    if len(feats) < 2:
+        for f in rng.sample(t["features"], k=min(2 - len(feats), len(t["features"]))):
+            if f not in feats:
+                feats.append(f)
 
     # place a REAL SRD monster (rules-accurate) if wanted
     base["contents"] = [c for c in base["contents"] if c.get("type") != "monster"]
