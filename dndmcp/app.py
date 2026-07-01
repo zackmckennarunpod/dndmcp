@@ -9,6 +9,7 @@ Claude Desktop to the stdio server (`python -m dndmcp.server`) separately, shari
 
 from __future__ import annotations
 
+import logging
 import os
 import threading
 
@@ -16,6 +17,7 @@ from . import server, web
 
 
 def main() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     gui = threading.Thread(target=web.main, daemon=True)
     gui.start()
     os.environ.setdefault("DNDMCP_TRANSPORT", "http")

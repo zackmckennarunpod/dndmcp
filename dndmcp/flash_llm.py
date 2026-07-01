@@ -13,14 +13,19 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import subprocess
 import urllib.request
+
+logger = logging.getLogger(__name__)
 
 MODEL = os.environ.get("DND_LLM_MODEL", "Qwen/Qwen2.5-1.5B-Instruct")
 ENABLED = os.environ.get("DND_FLASH_LLM", "0") == "1"
 IMAGE = "runpod/worker-v1-vllm:v2.22.4"
 ENDPOINT_NAME = "dnd-llm-vllm"
+
+logger.info("flash_llm: ENABLED=%s model=%s", ENABLED, MODEL)
 
 _STATE = {"endpoint_id": None}
 _LOCK = asyncio.Lock()
@@ -67,9 +72,12 @@ async def ensure() -> str:
             name=ENDPOINT_NAME, image=IMAGE, gpu=GpuGroup.ADA_24, workers=(0, 3),
             idle_timeout=300, template=PodTemplate(containerDiskInGb=50),
             min_cuda_version=CudaVersion.V13_0,
-            env={"MODEL_NAME": MODEL, "MAX_MODEL_LEN": "8192", "GPU_MEMORY_UTILIZATION": "0.90",
+            env={"MODEL_NAME": MODEL, "MAX_MODEL_LEN": "32768", "GPU_MEMORY_UTILIZATION": "0.90",
                  # verified 2026-07-01 on a disposable test endpoint: only changes behavior for
                  # requests that include tools[]; plain chat (world-gen's calls) is unaffected.
+                 # 32768 (Qwen2.5-1.5B-Instruct's native context): 8192 was too small for
+                 # agentic clients like OpenCode, whose system prompt + tool schemas alone can
+                 # run ~10-15k tokens before the user's actual message.
                  "ENABLE_AUTO_TOOL_CHOICE": "true", "TOOL_CALL_PARSER": "hermes"},
         )
         try:
@@ -83,6 +91,7 @@ async def ensure() -> str:
                 r = await client._execute_graphql("query { myself { endpoints { id name } } }", {})  # noqa: SLF001
                 for e in r["myself"]["endpoints"]:
                     if e["name"] == ENDPOINT_NAME:
+                        logger.info("flash_llm.ensure: resolved endpoint %s -> %s", ENDPOINT_NAME, e["id"])
                         _STATE["endpoint_id"] = e["id"]
                         return e["id"]
                 await asyncio.sleep(2)
@@ -108,13 +117,17 @@ async def generate(messages: list[dict], *, max_tokens: int = 250,
                    temperature: float = 0.9) -> str | None:
     """Generate via Flash (real vLLM). Returns None (→ caller falls back) if disabled/error."""
     if not ENABLED:
+        logger.info("flash_llm.generate: DND_FLASH_LLM not set, falling back to procedural")
         return None
     try:
         endpoint_id = await ensure()
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(
+        result = await loop.run_in_executor(
             None, _chat_sync, endpoint_id, messages, max_tokens, temperature)
+        logger.info("flash_llm.generate: ok, %d chars from endpoint %s", len(result), endpoint_id)
+        return result
     except Exception:
+        logger.exception("flash_llm.generate: failed, falling back to procedural")
         return None
 
 

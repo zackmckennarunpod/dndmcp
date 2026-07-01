@@ -14,10 +14,13 @@ referenced elsewhere, they gate unrelated/unused code paths).
 from __future__ import annotations
 
 import json
+import logging
 import random
 import uuid
 
 from . import compendium, flash_llm, game, setting
+
+logger = logging.getLogger(__name__)
 
 # Theme → real SRD creatures that fit (so spawns are rules-accurate AND on-theme).
 _THEME_CREATURES = {
@@ -64,15 +67,17 @@ def _room_messages(theme: str, came_from: str | None, exits: list[str],
 
 
 async def generate_room_content(room_id: str, theme: str, *, entry_from: str | None = None,
-                                nearby: list[tuple[str, str]] | None = None) -> dict:
+                                nearby: list[tuple[str, str]] | None = None,
+                                salt: str = "") -> dict:
     """Generate a room's content for the graph. Tries Flash (structured JSON); falls back
     to procedural. Returns game.generate_room's shape + `features` + a `via` marker.
 
     `nearby`: (name, kind) pairs of already-generated rooms within a couple hops, so the LLM
     keeps tone/architecture consistent with the surrounding region instead of each room being
-    generated in isolation."""
-    rng = game._seeded(room_id)  # deterministic per room id
-    base = game.generate_room(room_id, theme, entry_from=entry_from)  # procedural skeleton (exits etc.)
+    generated in isolation. `salt`: the owning campaign's salt (state.py Campaign.salt) — see
+    game._seeded for why this must be passed through, not just room_id alone."""
+    rng = game._seeded(room_id, salt)  # deterministic per (room_id, salt)
+    base = game.generate_room(room_id, theme, entry_from=entry_from, salt=salt)  # procedural skeleton
 
     via = "procedural"
     want_monster = any(c.get("type") == "monster" for c in base["contents"])
@@ -105,7 +110,7 @@ async def generate_room_content(room_id: str, theme: str, *, entry_from: str | N
             want_monster = bool(data.get("has_monster", want_monster))
             via = "flash"
         except Exception:
-            pass  # malformed JSON → keep procedural content
+            logger.exception("generate_room_content: malformed Flash JSON, keeping procedural: %r", gen)
 
     # add 1-2 procedural features for texture (the liveness layer)
     t = game._theme(theme)
@@ -164,20 +169,81 @@ async def generate_item_content(description: str, theme: str, room_context: str 
             if data.get("reason"):
                 base["reason"] = data["reason"]
         except Exception:
-            pass  # malformed JSON → keep the permissive procedural default
+            logger.exception("generate_item_content: malformed Flash JSON, keeping procedural: %r", gen)
     return base
+
+
+_NPC_PERSONA_JSON = ('{"name": an individual proper name or title fitting this creature and '
+                     'setting (e.g. "Skarn the Ratcatcher", "Old Ember") — never just the '
+                     'species name, "persona": one or two TRUE sentences of personality/'
+                     'background — temperament, a personal detail, what they want right now, '
+                     '"goal": a short concrete want driving their behavior this scene, '
+                     '"disposition": one of "hostile", "neutral", "ally" — how they regard '
+                     'strangers on sight}')
+
+
+def _npc_persona_messages(mon: dict, theme: str, room_name: str, room_kind: str,
+                          atmosphere: str, nearby: list[tuple[str, str]] | None = None,
+                          recent_events: list[str] | None = None) -> list[dict]:
+    traits = ", ".join(mon.get("traits", [])) or "no notable traits"
+    system = (f"{setting.GEN_BRIEF}\n\n"
+              f"You invent the TRUE individual identity of one {theme} dungeon inhabitant for "
+              f"a Dungeon Master to roleplay from — facts, not a finished performance. "
+              f"You reply with STRICT JSON only — no text outside the JSON object.")
+    context = (f"A {mon['name']} (traits: {traits}) is found in {room_name} ({room_kind}): "
+              f"{atmosphere}")
+    if nearby:
+        listed = ", ".join(f"{name} ({kind})" if kind else name for name, kind in nearby)
+        context += f" Nearby, already-explored areas: {listed}."
+    if recent_events:
+        context += f" Recently: {'; '.join(recent_events)}."
+    user = f"{context}\nReturn JSON: {_NPC_PERSONA_JSON}"
+    return [{"role": "system", "content": system}, {"role": "user", "content": user}]
+
+
+async def generate_npc_persona(mon: dict, theme: str, room_name: str, room_kind: str,
+                               atmosphere: str, nearby: list[tuple[str, str]] | None = None,
+                               recent_events: list[str] | None = None) -> dict:
+    """LLM-generate an individual identity (name/persona/goal/disposition) for one spawned
+    SRD creature — the compendium gives mechanics (hp/ac/traits), this gives who they ARE.
+    Tries Flash; falls back to a bare generic identity (species as name, neutral) if
+    disabled/error — the entity row still gets created, just without flavor."""
+    messages = _npc_persona_messages(mon, theme, room_name, room_kind, atmosphere,
+                                     nearby, recent_events)
+    gen = await flash_llm.generate(messages, max_tokens=200, temperature=0.9)
+    if gen:
+        try:
+            data = json.loads(gen[gen.find("{"): gen.rfind("}") + 1])
+            if data.get("name"):
+                # the model doesn't reliably match the schema's exact casing (e.g. "Neutral")
+                # despite the JSON schema spelling out lowercase — normalize + validate against
+                # the enum so downstream code can safely do `disposition == "hostile"` etc.
+                disposition = str(data.get("disposition") or "neutral").strip().lower()
+                if disposition not in ("hostile", "neutral", "ally"):
+                    disposition = "neutral"
+                return {"name": data["name"], "persona": data.get("persona", ""),
+                       "goal": data.get("goal", ""), "disposition": disposition, "via": "flash"}
+        except Exception:
+            logger.exception("generate_npc_persona: malformed Flash JSON, using procedural default: %r", gen)
+    return {"name": mon["name"], "persona": "", "goal": "", "disposition": "neutral",
+           "via": "procedural"}
 
 
 def _npc_messages(npc: dict, theme: str, room_context: str, message: str) -> list[dict]:
     traits = ", ".join(npc.get("traits", [])) or "no notable traits"
+    persona_line = f" {npc['persona']}" if npc.get("persona") else ""
+    goal_line = f" Right now they want: {npc['goal']}." if npc.get("goal") else ""
+    disposition_line = (f" They are {npc['disposition']} toward strangers."
+                        if npc.get("disposition") else "")
     system = (f"{setting.GEN_BRIEF}\n\n"
               f"You are voicing {npc['name']} in a {theme} dungeon crawl in this setting. "
-              f"Traits: {traits}. Room: {room_context} "
+              f"Traits: {traits}.{persona_line}{goal_line}{disposition_line} Room: {room_context} "
               f"Stay fully in character. Reply with ONLY the character's spoken words — "
               f"no stage directions, no narration, no quotation marks. Keep it to 1-3 sentences.")
     messages = [{"role": "system", "content": system}]
-    # prior turns ARE the conversation's memory — stored on the npc dict itself (see
-    # talk_to/GENERATION_FEATURES.md), not a separate entity/event system.
+    # prior turns are the conversation's memory — talk_to() fetches these from the entity
+    # table (state.py Entity.memory) and passes them in via npc["conversation"] so this
+    # function itself stays a pure prompt-builder with no DB access of its own.
     for turn in npc.get("conversation", []):
         role = "assistant" if turn["role"] == "npc" else "user"
         messages.append({"role": role, "content": turn["content"]})
