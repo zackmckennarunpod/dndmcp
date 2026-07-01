@@ -472,13 +472,15 @@ document.querySelectorAll('.midTabBtn').forEach(b => b.addEventListener('click',
 // visits, which pushed the entire game below the fold — observed live, confusing) — the
 // BYO-agent path stays one labeled click away, just no longer the landing experience.
 fetch('/chat/enabled').then(r => r.json()).then(d => {
-  if (!d.enabled) return;
+  // ?player= means this tab is the companion map for someone ALREADY playing through their
+  // own MCP agent — offering the browser chat there would just mint a confusing second
+  // character alongside the one their agent drives. Hide the tab entirely for them; the
+  // bare URL (no ?player=) is always one click away if they genuinely want browser play.
+  if (!d.enabled || playerId) return;
   document.getElementById('chatTabBtn').style.display = '';
-  if (!playerId) {
-    showMidTab('chat');
-    const input = document.getElementById('chatInput');
-    if (input) input.focus();
-  }
+  showMidTab('chat');
+  const input = document.getElementById('chatInput');
+  if (input) input.focus();
 }).catch(() => {});
 
 // Browse other worlds: campaign ids are opaque hex strings — nobody finds a world they don't
@@ -1255,17 +1257,35 @@ async def chat(request: Request):
     await lock.acquire()
 
     async def turn_stream():
+        # Observability: capture the COMPLETE turn — every streamed event verbatim, any
+        # exception, wall-clock — into state.record_dm_turn. A player reporting "I typed X
+        # and nothing happened" is undiagnosable from the world log alone (a turn where the
+        # model called no tools writes no world events at all); this table is the flight
+        # recorder that answers what the model actually did.
+        turn_started = time.time()
+        turn_events: list[dict] = []
+        turn_error: str | None = None
         try:
             async with chat_sessions.turn_semaphore:
                 async for event in dm_loop.handle_message(session, message):
+                    turn_events.append(event)
                     yield json.dumps(event) + "\n"
-        except Exception:
+        except Exception as exc:
+            turn_error = repr(exc)
             logger.exception("POST /chat: dm_loop.handle_message failed")
             yield json.dumps({
                 "type": "text",
                 "text": "The DM pauses, momentarily lost in thought... (something went wrong — try again?)",
             }) + "\n"
         finally:
+            try:
+                server.world.record_dm_turn(
+                    session_id=session_id, player_id=session.player_id,
+                    campaign_id=session.campaign_id, user_message=message,
+                    events=turn_events, error=turn_error,
+                    duration_ms=int((time.time() - turn_started) * 1000))
+            except Exception:
+                logger.exception("POST /chat: failed to record dm_turn")
             # Durable bookkeeping for THIS turn: bump the lifetime-cap counter (regardless of
             # success/failure above — a failed turn still consumed a slot), and persist the
             # session_id -> player_id mapping once start_adventure has minted one (or refresh

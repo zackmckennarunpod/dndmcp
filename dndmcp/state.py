@@ -57,7 +57,7 @@ def _state_dir() -> Path:
 # be additive (CREATE TABLE IF NOT EXISTS / ALTER TABLE ADD COLUMN), never a blanket drop.
 # If a genuinely breaking change is ever needed, write an explicit versioned migration step
 # instead of wiping; do not restore the old "wipe on any mismatch" behavior.
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 MAIN_CAMPAIGN_ID = "main"
 
@@ -192,6 +192,16 @@ class World:
                 player_id TEXT, campaign_id TEXT,
                 created_at REAL, last_seen REAL, message_count INTEGER DEFAULT 0
             );
+            -- Browser-chat observability (see record_dm_turn): one row per /chat turn with
+            -- the full streamed event payload — the "what did the model actually do when
+            -- the player says nothing happened" table. events is the verbatim JSON list of
+            -- everything the turn streamed (tool events + final text).
+            CREATE TABLE IF NOT EXISTS dm_turn (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts REAL, session_id TEXT, player_id TEXT, campaign_id TEXT,
+                user_message TEXT, events TEXT, error TEXT, duration_ms INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS idx_dm_turn_session ON dm_turn(session_id, ts);
             """
         )
         # rooms/character/log/entity predate multi-world and had no campaign_id column —
@@ -738,6 +748,25 @@ class World:
             (*params, n),
         ).fetchall()
         return [LogEntry.model_validate(dict(r)) for r in reversed(rows)]
+
+    # --- dm_turn (browser-chat observability) ------------------------------------
+    def record_dm_turn(self, *, session_id: str, player_id: str | None, campaign_id: str,
+                       user_message: str, events: list[dict], error: str | None,
+                       duration_ms: int) -> None:
+        """Persist one complete browser-DM turn — the user's message, every event the turn
+        streamed (tool calls + final narration, verbatim), any exception, and how long it
+        took. This exists because a failed/empty turn otherwise leaves NO durable trace
+        (logger.exception goes to an ephemeral process log on the pod): when a player says
+        "I typed X and nothing happened," this table answers what the model actually did.
+        Deliberately its own table, not `log` rows — full turn payloads are debug data, not
+        world events; putting them on the live stream would spam every spectator."""
+        self._c.execute(
+            "INSERT INTO dm_turn (ts, session_id, player_id, campaign_id, user_message,"
+            " events, error, duration_ms) VALUES (?,?,?,?,?,?,?,?)",
+            (time.time(), session_id, player_id, campaign_id, user_message,
+             json.dumps(events), error, duration_ms),
+        )
+        self._c.commit()
 
     # --- web_session (durable browser identity, e0b.4) --------------------------
     def get_web_session(self, session_id: str) -> WebSession | None:
