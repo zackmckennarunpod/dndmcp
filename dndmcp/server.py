@@ -68,6 +68,11 @@ How to run the game:
     any check/attack  -> roll_dice / attack  (NEVER invent dice — always call the tool)
     look around       -> look      check self -> character_sheet     recap -> get_state
     leave/drop item   -> drop_item(player_id, item_name)
+    investigate a noise/something unseen nearby -> sense_surroundings(player_id) — NEVER
+      just invent what an ambient sound/sensation was from. This returns graded facts (full
+      detail for rooms already visited, a vague "something's there" for known-not-visited
+      ones, nothing for unexplored space) — narrate ONLY from what it actually returns, even
+      if that's "nothing." A quiet, uneventful search is a real, valid answer.
 - 0 HP is real death, not a scare: move/attack/talk_to/pick_up_item all refuse to proceed once
   a character has fallen and hand back a clear restart message instead. Narrate the death
   properly, then let the player choose: start_adventure again (same campaign_id, a fresh
@@ -342,6 +347,39 @@ def look(player_id: str) -> str:
     if not ch:
         return "Unknown player_id. Call start_adventure first."
     return _render_scene(_require_room(ch.location_id), player_id=player_id)
+
+
+@mcp.tool()
+def sense_surroundings(player_id: str) -> str:
+    """Call this when the player investigates a noise, searches for something unseen, or
+    otherwise wants to know what's nearby WITHOUT moving there (e.g. "I search for where
+    that sound came from"). Returns graded facts, never invented ones: full detail (who/
+    what) for rooms you've actually visited — no spoiler risk, you've already earned that —
+    a vague existence signal for rooms that exist but you haven't been to yet (something IS
+    there, not what), and nothing at all for space that hasn't been generated. Do not use
+    this to justify inventing detail beyond what it actually returns."""
+    ch = world.character(player_id)
+    if not ch:
+        return "Unknown player_id. Call start_adventure first."
+    revealed, vague = [], False
+    for name, kind, room_id in _nearby_region(ch.location_id, depth=2):
+        entities = world.alive_entities_in(room_id)
+        items = [c["name"] for c in world.room(room_id).contents if c.get("type") == "loot"]
+        if not entities and not items:
+            continue
+        if world.has_discovered(player_id, room_id):
+            bits = []
+            if entities:
+                bits.append(", ".join(f"{e.name} the {e.kind} ({e.disposition})" for e in entities))
+            if items:
+                bits.append(", ".join(items))
+            revealed.append(f"{name} ({kind}): {'; '.join(bits)}")
+        else:
+            vague = True  # something's there, beyond a way not yet taken — never say what
+    lines = list(revealed)
+    if vague:
+        lines.append("Something stirs beyond a way you haven't explored yet — you can't tell what from here.")
+    return "\n".join(lines) if lines else "You sense nothing unusual nearby — just the quiet of the place."
 
 
 # Max alive named NPCs within a depth-2 neighborhood before we stop generating more personas

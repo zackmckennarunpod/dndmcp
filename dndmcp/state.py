@@ -428,6 +428,21 @@ class World:
         d["memory"] = json.loads(d["memory"] or "[]")
         return Entity.model_validate(d)
 
+    def alive_entities_in(self, location_id: str) -> list[Entity]:
+        """Full identity rows for every living entity in ONE room — the per-room-granular
+        sibling of count_alive_entities_in (which only counts, for the density gate). Used
+        by sense_surroundings to report WHAT is nearby, not just whether something is."""
+        out = []
+        for r in self._c.execute(
+            "SELECT * FROM entity WHERE alive=1 AND location_id=?", (location_id,)
+        ).fetchall():
+            d = dict(r)
+            d.pop("campaign_id", None)
+            d["alive"] = bool(d["alive"])
+            d["memory"] = json.loads(d["memory"] or "[]")
+            out.append(Entity.model_validate(d))
+        return out
+
     def append_entity_memory(self, entity_id: str, role: str, content: str) -> None:
         """Append one turn ({"role": "player"|"npc", ...}) to an entity's stored conversation.
         Shared across whoever talks to this NPC next — the whole point of moving memory off
