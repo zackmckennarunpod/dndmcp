@@ -101,11 +101,12 @@ set_location_state, discover_lore, start/update_quest, log_event, generate(locat
 
 ## MVP (have / build now) vs LATER
 - 🟢 HAVE: campaign, character, location(+features+exits), event log. (state.py) Item
-  name+description as loose dicts on inventory (state.py `add_item`).
+  name+description as loose dicts on inventory (state.py `add_item`). `quest` minimal
+  (id/title/description/state/steps, `involves[]` via the generic `edges` table) —
+  start_quest/update_quest/active_quests, DM-authored (no Flash generation yet).
 - 🟡 BUILD NOW: item.effects[] + acquired_at + lazy-tick check (one prototype effect first —
   the cursed doll — before generalizing); `entity` as first-class (unique id + persona +
-  memory + real SRD stats) — needed for ask_npc + living NPCs; location.state (mutable);
-  quest minimal.
+  memory + real SRD stats) — needed for ask_npc + living NPCs; location.state (mutable).
 - 💭 LATER: item as a fully first-class node (own table, not just inventory dicts), lore
   node, faction, player/presence (multiplayer), full graph edges table.
 

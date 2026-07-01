@@ -39,8 +39,9 @@ know HOW to orchestrate the tools** (the "skills over tools" idea); **resources 
 
 **Quest / session**
 - 🟢 get_state — full inspectable campaign state (the world remembers)
+- 🟢 start_quest / update_quest / active_quests — trackable, shared-world quests
 - ⚪ journal / summarize_session — recap + memory
-- 💭 start_quest / update_quest / advance_factions
+- 💭 advance_factions
 
 **Multiplayer (vision)**
 - 💭 who_is_here / leave_message / check_world_events — async shared world

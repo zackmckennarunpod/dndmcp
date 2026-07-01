@@ -19,7 +19,7 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-from .models import Campaign, Character, Entity, LogEntry, Room
+from .models import Campaign, Character, Entity, LogEntry, Quest, Room
 
 # Set by the transport layer (server.py's ASGI middleware, web.py's request handlers) for the
 # duration of one inbound request, read by World.log() as its default for ip/session_id — a
@@ -56,7 +56,7 @@ def _state_dir() -> Path:
 # be additive (CREATE TABLE IF NOT EXISTS / ALTER TABLE ADD COLUMN), never a blanket drop.
 # If a genuinely breaking change is ever needed, write an explicit versioned migration step
 # instead of wiping; do not restore the old "wipe on any mismatch" behavior.
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 MAIN_CAMPAIGN_ID = "main"
 
@@ -141,6 +141,20 @@ class World:
                 id TEXT PRIMARY KEY, name TEXT DEFAULT '', theme TEXT, premise TEXT,
                 created_at REAL, start_room TEXT, turn INTEGER DEFAULT 0, salt TEXT DEFAULT ''
             );
+            -- Trackable objective: an NPC's job, a party goal, a plot thread (WORLD_SCHEMA.md's
+            -- "BUILD NOW: quest minimal"). Shared world state, same as rooms/entities — any
+            -- player in campaign_id can see and progress one another player started.
+            -- given_by/created_by are entity_id/player_id references, stored loosely like
+            -- Entity.location_id — no FK enforcement, a stale id just means narration has
+            -- nothing to look up. Broader relatedness (which OTHER entities/locations this
+            -- quest touches) lives on the generic `edges` table as quest--involves-->X, not
+            -- here — a quest can involve many nodes, doesn't fit a scalar column.
+            CREATE TABLE IF NOT EXISTS quest (
+                id TEXT PRIMARY KEY, campaign_id TEXT NOT NULL DEFAULT 'main',
+                title TEXT, description TEXT DEFAULT '', state TEXT DEFAULT 'active',
+                steps TEXT DEFAULT '[]', given_by TEXT, created_by TEXT, created_at REAL
+            );
+            CREATE INDEX IF NOT EXISTS idx_quest_campaign ON quest(campaign_id);
             """
         )
         # rooms/character/log/entity predate multi-world and had no campaign_id column —
@@ -279,11 +293,21 @@ class World:
         if player_ids:
             placeholders = ",".join("?" * len(player_ids))
             self._c.execute(f"DELETE FROM edges WHERE from_id IN ({placeholders})", player_ids)
+        # quest ids are bare uuid.uuid4().hex[:8] (like item/entity ids), NOT campaign-
+        # prefixed the way room ids are — neither the player_ids clause above nor the
+        # to_id LIKE clause below would ever catch a quest--involves-->X edge, so it needs
+        # its own explicit cleanup, both directions.
+        quest_ids = [r["id"] for r in self._c.execute(
+            "SELECT id FROM quest WHERE campaign_id=?", (campaign_id,)).fetchall()]
+        if quest_ids:
+            placeholders = ",".join("?" * len(quest_ids))
+            self._c.execute(f"DELETE FROM edges WHERE from_id IN ({placeholders})", quest_ids)
+            self._c.execute(f"DELETE FROM edges WHERE to_id IN ({placeholders})", quest_ids)
         # room ids are namespaced "<campaign_id>:..." (game.py's room-id scheme), so this
         # catches every "discovered" edge pointing into this world without a campaign_id
         # column on edges itself.
         self._c.execute("DELETE FROM edges WHERE to_id LIKE ?", (f"{campaign_id}:%",))
-        for table in ("rooms", "character", "log", "entity"):
+        for table in ("rooms", "character", "log", "entity", "quest"):
             self._c.execute(f"DELETE FROM {table} WHERE campaign_id=?", (campaign_id,))
         self._c.execute("DELETE FROM campaigns WHERE id=?", (campaign_id,))
         self._c.commit()
@@ -503,6 +527,80 @@ class World:
         ).fetchone()
         return row["n"] if row else 0
 
+    # --- quest (see models.Quest) ------------------------------------------------
+    def start_quest(self, quest_id: str, campaign_id: str = MAIN_CAMPAIGN_ID, *, title: str,
+                    description: str = "", steps: list[dict] | None = None,
+                    given_by: str | None = None, created_by: str | None = None) -> Quest:
+        q = Quest(id=quest_id, campaign_id=campaign_id, title=title, description=description,
+                  state="active", steps=steps or [], given_by=given_by, created_by=created_by,
+                  created_at=time.time())
+        self._c.execute(
+            "INSERT INTO quest (id,campaign_id,title,description,state,steps,given_by,created_by,created_at)"
+            " VALUES (?,?,?,?,?,?,?,?,?)",
+            (q.id, q.campaign_id, q.title, q.description, q.state, json.dumps(q.steps),
+             q.given_by, q.created_by, q.created_at),
+        )
+        self._c.commit()
+        return q
+
+    def quest(self, quest_id: str) -> Quest | None:
+        r = self._c.execute("SELECT * FROM quest WHERE id=?", (quest_id,)).fetchone()
+        if not r:
+            return None
+        d = dict(r)
+        d["steps"] = json.loads(d["steps"] or "[]")
+        return Quest.model_validate(d)
+
+    def active_quests(self, campaign_id: str = MAIN_CAMPAIGN_ID) -> list[Quest]:
+        rows = self._c.execute(
+            "SELECT * FROM quest WHERE campaign_id=? AND state='active' ORDER BY created_at",
+            (campaign_id,)).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["steps"] = json.loads(d["steps"] or "[]")
+            out.append(Quest.model_validate(d))
+        return out
+
+    def update_quest_state(self, quest_id: str, state: str) -> Quest | None:
+        self._c.execute("UPDATE quest SET state=? WHERE id=?", (state, quest_id))
+        self._c.commit()
+        return self.quest(quest_id)
+
+    def complete_quest_step(self, quest_id: str, step_index: int) -> Quest | None:
+        q = self.quest(quest_id)
+        if not q or not (0 <= step_index < len(q.steps)):
+            return None
+        steps = [dict(s) for s in q.steps]
+        steps[step_index] = {**steps[step_index], "done": True}
+        self._c.execute("UPDATE quest SET steps=? WHERE id=?", (json.dumps(steps), quest_id))
+        self._c.commit()
+        return self.quest(quest_id)
+
+    def add_quest_step(self, quest_id: str, text: str) -> Quest | None:
+        q = self.quest(quest_id)
+        if not q:
+            return None
+        steps = q.steps + [{"text": text, "done": False}]
+        self._c.execute("UPDATE quest SET steps=? WHERE id=?", (json.dumps(steps), quest_id))
+        self._c.commit()
+        return self.quest(quest_id)
+
+    def add_quest_involvement(self, quest_id: str, node_type: str, node_id: str) -> None:
+        """quest --involves--> entity/location (WORLD_SCHEMA.md). Not set_edges — that
+        replaces the FULL {edge_type: to_id} set for one (from_type,from_id,to_type),
+        assuming one to_id per edge_type (fine for room exits, one per direction); a quest
+        can involve MANY ids under the same edge_type 'involves'. Called both at quest
+        creation (given_by) and later via update_quest's involve_entity/involve_location —
+        the graph a quest references is often generated lazily, after the quest itself
+        already exists as text (see server.py's DM_PERSONA nudge)."""
+        self._c.execute(
+            "INSERT INTO edges (from_type,from_id,to_type,to_id,edge_type,metadata,created_at)"
+            " VALUES ('quest',?,?,?,'involves',NULL,?)",
+            (quest_id, node_type, node_id, time.time()),
+        )
+        self._c.commit()
+
     # --- log (domain events) ---------------------------------------------------
     def log(self, kind: str, text: str, *, player_id: str | None = None,
            campaign_id: str | None = None, subject_type: str | None = None,
@@ -582,6 +680,8 @@ class World:
         return {"campaign": camp.model_dump() if camp else None,
                 "character": ch.model_dump() if ch else None,
                 "current_room": room.model_dump() if room else None,
+                "quests": [q.model_dump() for q in
+                          self.active_quests(ch.campaign_id if ch else MAIN_CAMPAIGN_ID)],
                 "log": [entry.model_dump() for entry in
                         self.recent_log(8, player_id=player_id,
                                         campaign_id=ch.campaign_id if ch else None)]}

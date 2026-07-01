@@ -63,6 +63,12 @@ How to run the game:
   player should never need to know or say a compass word to play the game. Never invent
   what's beyond an undiscovered exit, but the doorway itself is fair game since it's right
   in front of you.
+- General version of the rule above: EVERY tool's ids, matching mechanics, and how-it-works
+  language (item_id, "exact match", "no ambiguity", "matched by name", quest_id, etc.) is
+  INTERNAL PLUMBING for you alone — read tool docstrings/results for what to DO, never quote
+  or paraphrase their mechanics back to the player. "Clean grabs, both by exact id" or "no
+  mismatches this time" breaks character exactly like naming a compass direction would.
+  Narrate the ACTION and what the character perceives, nothing about how you looked it up.
 - The player explores by telling you their intent. Translate intent into tool calls:
     move there        -> move(direction)
     any check/attack  -> roll_dice / attack  (NEVER invent dice — always call the tool)
@@ -90,6 +96,20 @@ How to run the game:
   visit the same room/item) instead of just narrated once and forgotten. If you invent
   actual content (what the diary SAYS, what the search TURNS UP), put that content in the
   log_event text — that's the only place it gets remembered.
+- When an NPC offers a job, the party sets a concrete goal, or a plot thread opens up (often
+  right in the middle of a talk_to conversation), call start_quest(player_id, title,
+  description, steps=[...], given_by=<the NPC's entity id, if one offered it>) to make it
+  real, trackable world state — not just narrated once and forgotten. As steps get
+  discovered, finished, or the whole thing wraps up (or falls apart), call
+  update_quest(player_id, quest_id, complete_step=..., add_step=..., state="done"|"failed")
+  yourself right after the narrative moment that changed it — don't wait to be asked. Use
+  active_quests(player_id) (or get_state) to recap what's still open. Quests are shared world
+  state, same as rooms and items — any player may see and progress one another player
+  started. A quest can reference something that doesn't exist in the graph yet ("rumors of a
+  shrine to the north") — whenever move/look later generates the room or NPC a quest was
+  vaguely about, call update_quest(quest_id, involve_location=...)/involve_entity=... right
+  then and say so in your narration; this is your judgment call, nothing detects the match
+  for you.
 - Narrate results dramatically but keep mechanics HONEST: use the exact numbers the tools return.
 - The world is PERSISTENT — the tools remember. Refer back to what happened; the world is real.
 - Room/character state is rigid on purpose (mechanics need one source of truth). For anything
@@ -547,6 +567,95 @@ def log_event(player_id: str, text: str, subject_type: str | None = None,
     st, sid = (subject_type, subject_id) if subject_type else ("room", ch.location_id)
     world.log("world.event", text, player_id=player_id, subject_type=st, subject_id=sid)
     return "Recorded."
+
+
+def _format_quest(q) -> str:
+    mark = {"active": "◻", "done": "✔", "failed": "✘"}
+    steps_txt = "\n".join(f"  {'☑' if s.get('done') else '☐'} {s.get('text', '')}"
+                          for s in q.steps) or "  (no steps yet)"
+    return (f"{mark.get(q.state, '◻')} **{q.title}** [quest_id: {q.id}] ({q.state})\n"
+            f"{q.description}\n{steps_txt}")
+
+
+@mcp.tool()
+def start_quest(player_id: str, title: str, description: str = "",
+                steps: list[str] | None = None, given_by: str | None = None) -> str:
+    """Begin tracking a quest — an NPC offers a job, the party sets a goal, a plot thread
+    opens. `steps` (optional) are known objectives as plain text; each becomes a not-yet-
+    done step — add more later with update_quest(add_step=...). `given_by` is the entity_id
+    of the NPC offering it (talk_to's result carries the NPC's id), if any. Quests are
+    shared world state, same as rooms/items — any player in this world can see and progress
+    one another player started."""
+    ch = world.character(player_id)
+    if not ch:
+        return "Unknown player_id. Call start_adventure first."
+    quest_id = uuid.uuid4().hex[:8]
+    q = world.start_quest(quest_id, ch.campaign_id, title=title, description=description,
+                          steps=[{"text": s, "done": False} for s in (steps or [])],
+                          given_by=given_by, created_by=player_id)
+    if given_by:
+        world.add_quest_involvement(quest_id, "entity", given_by)
+    world.log("quest.started", f"{ch.name} began a quest: {title}", player_id=player_id,
+             subject_type="quest", subject_id=quest_id)
+    return f"📜 Quest started: **{title}** [quest_id: {quest_id}]\n{description}"
+
+
+@mcp.tool()
+def update_quest(player_id: str, quest_id: str, complete_step: int | None = None,
+                 add_step: str | None = None, state: str | None = None,
+                 involve_entity: str | None = None, involve_location: str | None = None) -> str:
+    """Update a quest already in progress: mark a step done (complete_step, 0-indexed — see
+    active_quests for indices), add a newly-discovered objective (add_step), change overall
+    state (state="done"|"failed"), and/or link a room/NPC that a vaguely-worded quest turned
+    out to be about once it actually got generated (involve_location=room_id /
+    involve_entity=entity_id). Any player in this world may update a shared quest, same as
+    they can drop_item for another player to find."""
+    ch = world.character(player_id)
+    if not ch:
+        return "Unknown player_id. Call start_adventure first."
+    q = world.quest(quest_id)
+    if not q or q.campaign_id != ch.campaign_id:
+        return f"No quest {quest_id!r} in this world."
+    if complete_step is not None:
+        updated = world.complete_quest_step(quest_id, complete_step)
+        if updated is None:
+            return f"Quest {quest_id!r} has no step {complete_step}."
+        q = updated
+        world.log("quest.step_completed", f"{ch.name} completed a step of: {q.title}",
+                 player_id=player_id, subject_type="quest", subject_id=quest_id)
+    if add_step:
+        q = world.add_quest_step(quest_id, add_step)
+        world.log("quest.step_added", f"{ch.name} added a step to: {q.title}",
+                 player_id=player_id, subject_type="quest", subject_id=quest_id)
+    if involve_entity:
+        world.add_quest_involvement(quest_id, "entity", involve_entity)
+        world.log("quest.linked", f"{q.title} is now tied to {involve_entity}",
+                 player_id=player_id, subject_type="quest", subject_id=quest_id)
+    if involve_location:
+        world.add_quest_involvement(quest_id, "room", involve_location)
+        world.log("quest.linked", f"{q.title} is now tied to {involve_location}",
+                 player_id=player_id, subject_type="quest", subject_id=quest_id)
+    if state:
+        if state not in ("active", "done", "failed"):
+            return f"state must be 'active', 'done', or 'failed', got {state!r}."
+        q = world.update_quest_state(quest_id, state)
+        world.log(f"quest.{state}",
+                 f"{ch.name} marked quest {'complete' if state == 'done' else state}: {q.title}",
+                 player_id=player_id, subject_type="quest", subject_id=quest_id)
+    return _format_quest(q)
+
+
+@mcp.tool()
+def active_quests(player_id: str) -> str:
+    """List active quests in your world, narration-ready. get_state also returns quest data
+    as raw dicts (for programmatic use); this is the human-readable version to recap aloud."""
+    ch = world.character(player_id)
+    if not ch:
+        return "Unknown player_id. Call start_adventure first."
+    quests = world.active_quests(ch.campaign_id)
+    if not quests:
+        return "No active quests."
+    return "\n\n".join(_format_quest(q) for q in quests)
 
 
 @mcp.tool()

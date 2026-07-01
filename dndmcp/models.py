@@ -9,6 +9,8 @@ tightening it isn't worth the risk this late.
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict
 
 
@@ -79,6 +81,27 @@ class Entity(BaseModel):
     persona: str = ""
     goal: str = ""
     memory: list[dict] = []  # [{"role": "player"|"npc", "content": ...}, ...]
+
+
+class Quest(BaseModel):
+    """A trackable objective — an NPC's job, a party goal, a plot thread. Shared world state
+    like rooms/entities: any player in the campaign can see and progress one another player
+    started. `given_by`/`created_by` are entity_id/player_id references, stored loosely (no
+    FK enforcement, same as Entity.location_id) — a stale id just means narration has nothing
+    to look up, not a crash. Broader relatedness (WORLD_SCHEMA.md's `involves[]`) lives on
+    the generic `edges` table as quest--involves-->entity/location edges, not duplicated
+    here — a quest can involve many nodes, which doesn't fit a single scalar field."""
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    campaign_id: str = "main"
+    title: str
+    description: str = ""
+    state: Literal["active", "done", "failed"] = "active"
+    steps: list[dict] = []  # [{"text": ..., "done": bool}, ...]
+    given_by: str | None = None
+    created_by: str | None = None
+    created_at: float = 0.0
 
 
 class LogEntry(BaseModel):
