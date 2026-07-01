@@ -170,7 +170,12 @@ const simulation = d3.forceSimulation()
   .force('link', d3.forceLink().id(d=>d.id).distance(90))
   .force('center', d3.forceCenter(W/2, H/2))
   .force('collide', d3.forceCollide(24))
-  .on('tick', ticked);
+  .on('tick', ticked)
+  // Fit once the simulation actually settles (alpha decays below its minimum), not on a
+  // guessed timeout — a fixed delay went stale because the reheated sim keeps drifting
+  // nodes for longer than any one guess, so a node fit-to-view at 400ms could still end up
+  // clipped once it kept moving afterward. 'end' fires exactly when motion actually stops.
+  .on('end', () => { if(!userInteracted) fitToView(simulation.nodes()); });
 
 let nodesById = {};
 let lastSignature = '';
@@ -293,9 +298,10 @@ function renderGraph(rooms, players, you){
  ticked();
  if(structureChanged){
    simulation.alpha(0.3).restart();
-   // Let the reheated simulation spread out a bit before fitting to it, else we'd fit to
-   // the cramped pre-restart positions and immediately look wrong again as nodes spread.
-   if(!userInteracted) setTimeout(() => { if(!userInteracted) fitToView(nodes); }, 400);
+   // Quick immediate fit for instant feedback (still-settling positions, so approximate) --
+   // the simulation's 'end' handler above does the accurate final fit once motion actually
+   // stops, correcting for however long THIS graph takes to settle.
+   if(!userInteracted) fitToView(nodes);
  }
 }
 
