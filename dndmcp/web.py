@@ -119,12 +119,43 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
  details.panel .body b{color:var(--ghost-bright)}
  details.panel .body a{color:var(--ghost-bright);text-decoration:underline;text-decoration-color:var(--ghost)}
  details.panel .body p{margin:0 0 10px}
+ details.panel .body code{background:var(--unvisited);padding:1px 5px;border-radius:4px;font-size:11.5px}
+ .codebox{display:flex;align-items:flex-start;gap:8px;background:#0d0819;border:1px solid var(--border);
+   border-radius:6px;padding:9px 11px;margin:4px 0}
+ .codebox code,.codebox pre{flex:1;background:none;padding:0;font:12px 'IBM Plex Mono',monospace;
+   color:var(--ghost-bright);white-space:pre-wrap;word-break:break-all;margin:0}
+ .copyCodeBtn{flex-shrink:0;background:var(--link);color:var(--text);border:1px solid var(--border);
+   border-radius:5px;padding:4px 10px;font:600 11px 'IBM Plex Mono',monospace;cursor:pointer}
+ .copyCodeBtn:hover{background:var(--visited)}
+ .copyCodeBtn.copied{background:var(--ghost);color:var(--bg)}
 </style></head><body>
 <div id=staleBanner>⟳ This tab is running an older version of the page — <a href="#" onclick="location.reload();return false">refresh to update</a></div>
 <header><h1>⚔ DNDMCP</h1><span class=sub id=where>—</span>
  <span id=flashcount>⚡ 0 Flash calls</span>
  <button id=shareBtn title="Copies instructions to paste into your agent (Claude Code/Desktop) running dndmcp">🔗 Share</button></header>
-<details class=panel style="margin:16px 18px 0">
+<details open class=panel style="margin:16px 18px 16px">
+ <summary>🎲 Connect &amp; play — anyone can join, no account needed</summary>
+ <div class=body>
+  <p><b>1. Connect your agent</b> — pick whichever you use:</p>
+  <div class=codebox><code id=codeCC>curl -fsSL https://raw.githubusercontent.com/zackmckennarunpod/dndmcp/main/scripts/install_claude_code.sh | bash</code><button class=copyCodeBtn data-target=codeCC>Copy</button></div>
+  <p class=sub style="margin:6px 0 14px">↑ <b>Claude Code</b> — one command, installs dndmcp pointed at this exact live shared world.</p>
+  <div class=codebox><pre id=codeCD>{
+  "mcpServers": {
+    "dndmcp": {
+      "type": "http",
+      "url": "https://ldghdgi0xxn6jj-8000.proxy.runpod.net/mcp"
+    }
+  }
+}</pre><button class=copyCodeBtn data-target=codeCD>Copy</button></div>
+  <p class=sub style="margin:6px 0 14px">↑ <b>Claude Desktop</b> — paste into <code>claude_desktop_config.json</code>
+  (macOS: <code>~/Library/Application Support/Claude/claude_desktop_config.json</code>), then restart the app.</p>
+  <p><b>2. Reconnect</b> — Claude Code: run <code>/mcp</code>; Claude Desktop: restart it — so it picks up the new server.</p>
+  <p><b>3. Say "start an adventure."</b> That's it. Your agent becomes the Dungeon Master — talk
+  naturally ("go through the door," "attack it," "look around"), you never need game-engine
+  syntax. You're joining THIS shared world, live, with everyone else currently playing.</p>
+ </div>
+</details>
+<details class=panel style="margin:0 18px 0">
  <summary>How this works — the Graph Context Engine underneath</summary>
  <div class=body>
   <p>Under the hood this isn't a D&amp;D-specific engine — it's a generic graph: every room,
@@ -176,6 +207,21 @@ const campaignId = params.get('campaign') || 'main';
 const W=700, H=420;
 
 // Share: copies join instructions, not just a URL — actually PLAYING requires the friend's
+// Connect & play panel: generic copy-to-clipboard for the install command / Desktop config,
+// same copied/reverts-after-a-beat pattern as the Share button.
+document.querySelectorAll('.copyCodeBtn').forEach(btn => {
+  btn.addEventListener('click', async () => {
+    const targetEl = document.getElementById(btn.dataset.target);
+    const text = targetEl.textContent;
+    try{ await navigator.clipboard.writeText(text); }
+    catch(e){ prompt('Copy this:', text); return; }
+    const original = btn.textContent;
+    btn.textContent = '✓ Copied';
+    btn.classList.add('copied');
+    setTimeout(() => { btn.textContent = original; btn.classList.remove('copied'); }, 1500);
+  });
+});
+
 // own agent to call start_adventure(campaign_id=...), this GUI is spectator-only. "main"
 // needs no id (the default world), so its share text skips campaign_id entirely. The text
 // itself tells them WHERE to paste it (their agent, not a browser) — a bare link/id here
