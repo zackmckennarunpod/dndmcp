@@ -54,22 +54,45 @@ def _ensure_host_env() -> None:
     _api_key()
 
 
+async def _resolve_by_name(client) -> str | None:
+    r = await client._execute_graphql("query { myself { endpoints { id name } } }", {})  # noqa: SLF001
+    for e in r["myself"]["endpoints"]:
+        if e["name"] == ENDPOINT_NAME:
+            return e["id"]
+    return None
+
+
 async def ensure() -> str:
     """Mint (or reuse) the vLLM endpoint and return its resolved endpoint id.
 
-    Constructing Endpoint(...) alone does NOT deploy it — Flash deploys lazily on the first
-    actual call. So we trigger deploy with one throwaway .run() (its result/error is ignored;
-    the QB job.input format hits an unrelated bug, but the call still triggers deployment),
-    THEN resolve the real id from the endpoints list. Locked so concurrent fan-out callers
-    don't race to construct multiple endpoints."""
+    The endpoint persists server-side across our own process restarts (which happen on
+    every redeploy — often). Re-running the construct-Endpoint()-then-throwaway-.run()
+    dance on EVERY process start was pointless work once the endpoint already exists: that
+    throwaway call always 400s (the QB job.input format hits an unrelated worker bug), and
+    each restart was piling up one more real FAILED job in Runpod's own stats, making the
+    endpoint's failure rate look far worse than actual gameplay traffic. Check by name FIRST
+    — only fall through to construct+trigger on a genuinely first-ever deploy. Locked so
+    concurrent fan-out callers don't race to construct multiple endpoints."""
     if _STATE["endpoint_id"]:
         return _STATE["endpoint_id"]
     async with _LOCK:
         if _STATE["endpoint_id"]:
             return _STATE["endpoint_id"]
         _ensure_host_env()
-        from runpod_flash import CudaVersion, Endpoint, GpuGroup, PodTemplate
         from runpod_flash.core.api import RunpodGraphQLClient
+
+        client = RunpodGraphQLClient()
+        try:
+            existing_id = await _resolve_by_name(client)
+        finally:
+            await client.close()
+        if existing_id:
+            logger.info("flash_llm.ensure: %s already deployed -> %s (skipped re-trigger)",
+                       ENDPOINT_NAME, existing_id)
+            _STATE["endpoint_id"] = existing_id
+            return existing_id
+
+        from runpod_flash import CudaVersion, Endpoint, GpuGroup, PodTemplate
 
         # worker-v1-vllm:v2.22.4's container declares cuda>=13.0 — without pinning this,
         # Flash can schedule the pod onto an older-driver host, which fails at container-init
@@ -89,17 +112,16 @@ async def ensure() -> str:
         try:
             await asyncio.wait_for(ep.run({"input": {}}), timeout=10)
         except Exception:
-            pass  # expected — just triggering deploy; the QB job.input path 400s harmlessly
+            pass  # expected — just triggering FIRST deploy; the QB job.input path 400s harmlessly
 
         client = RunpodGraphQLClient()
         try:
             for _ in range(10):
-                r = await client._execute_graphql("query { myself { endpoints { id name } } }", {})  # noqa: SLF001
-                for e in r["myself"]["endpoints"]:
-                    if e["name"] == ENDPOINT_NAME:
-                        logger.info("flash_llm.ensure: resolved endpoint %s -> %s", ENDPOINT_NAME, e["id"])
-                        _STATE["endpoint_id"] = e["id"]
-                        return e["id"]
+                resolved_id = await _resolve_by_name(client)
+                if resolved_id:
+                    logger.info("flash_llm.ensure: resolved endpoint %s -> %s", ENDPOINT_NAME, resolved_id)
+                    _STATE["endpoint_id"] = resolved_id
+                    return resolved_id
                 await asyncio.sleep(2)
             raise RuntimeError(f"{ENDPOINT_NAME!r} not found after deploy")
         finally:
