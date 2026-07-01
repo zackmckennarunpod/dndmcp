@@ -88,3 +88,29 @@ scripts/reset_world.sh --yes     # DESTRUCTIVE: wipes the shared world, fresh st
 ```
 All auto-resolve the pod's current SSH endpoint via the Runpod API (the direct-TCP port
 changes across restarts, so nothing is hardcoded).
+
+## Deploy your own instance (self-contained)
+
+You don't need access to the live pod above to run dndmcp — the image is public
+(`zackmckennarunpod/dndmcp` on Docker Hub) and requires no secrets baked in, just your own
+Runpod API key. This gets you a completely independent world, not a copy of anyone else's.
+
+**Prerequisites:** a Runpod account + API key (Runpod console → Settings → API Keys).
+
+```bash
+RUNPOD_API_KEY=... scripts/deploy_own_pod.sh [name] [datacenter]   # creates volume + pod
+scripts/install_claude_code.sh <pod-id>                            # connect Claude Code to it
+scripts/destroy_own_pod.sh <pod-id> --yes                          # tear it down when done
+```
+
+`deploy_own_pod.sh` creates a small network volume and a CPU pod (`cpu3c-2-4`, default
+datacenter `EU-RO-1`) running the published image, and prints the MCP/GUI URLs once it's up
+(give it ~30-60s to pull the image and boot). This costs real money while the pod is
+running — check current Runpod CPU pricing — so tear it down with `destroy_own_pod.sh` when
+you're done; it also deletes the network volume by default (`--keep-volume` to keep it).
+`destroy_own_pod.sh` refuses to ever target the live shared pod (`ldghdgi0xxn6jj`), by design.
+
+Want Flash-generated rooms/NPCs instead of the procedural fallback? Also set
+`DND_FLASH_LLM=1` and pass your key through as a pod env var — see `redeploy_pod.sh` for the
+exact pattern (`RUNPOD_API_KEY` has to travel with the pod itself, since Flash calls happen
+from inside the container).
