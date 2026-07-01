@@ -188,7 +188,11 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
     newest event lands at the TOP via prepend() below, so the feed reads top-down in the
     order things actually happened, with the newest visible without any scrolling. */
  #stream{display:flex;flex-direction:column;gap:0;height:560px;overflow-y:auto}
- #stream div{color:var(--muted);padding:2px 0;border-bottom:1px solid var(--border-soft);font-size:12px}
+ /* Roomier rows (was padding:2px, which crammed wrapped two-line events against their
+    neighbors' border lines) — 6px breathing room + a line-height that keeps a wrapped
+    entity-highlighted line readable. */
+ #stream div{color:var(--muted);padding:6px 0;border-bottom:1px solid var(--border-soft);
+   font-size:12px;line-height:1.5}
  #stream div.new{animation:flash .8s ease-out}
  #stream .who{color:var(--warm)}
  @keyframes flash{from{background:#4fd8c433}to{background:transparent}}
@@ -317,7 +321,7 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
   <span style="color:var(--ghost)">●</span> your room &nbsp;
   <span style="color:var(--visited)">●</span> places you've been &nbsp;
   <span style="color:var(--dim)">●</span>&thinsp;??? not yet discovered &nbsp;
-  <b style="color:var(--text)">2</b> = two players are in that room right now</div>
+  <b style="color:var(--text)">2</b> = players in that room now</div>
 <div class=sub style="margin-bottom:8px;opacity:.6">scroll + ⌘/Ctrl to zoom · drag to pan · click a room for details</div><div id=map><span id=mapEmpty class=empty>no adventure yet — start one in your agent</span><div id=nodeTooltip></div></div></div>
  <div class=panel>
   <div class=midTabbar>
@@ -328,9 +332,13 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
    <button class=midTabBtn id=chatTabBtn data-miditab=chat style="display:none">🎲 Play here</button>
   </div>
   <div id=midTab-stream class="midTabBody active">
-   <h2><span id=streamDot></span><span id=streamTitle>Live world stream</span></h2>
-   <div class=sub style="margin-bottom:8px"><span id=streamSub>every player, every session</span>
-   <button id=streamFilterBtn style="margin-left:6px">⚡ Flash calls only</button></div>
+   <!-- No repeated title here — the tab button directly above IS the title. One compact
+        status row: connection dot + scope + filter. streamTitle stays as a (visually
+        hidden-ish) span only because the Flash-only toggle rewrites it. -->
+   <div class=sub style="margin-bottom:8px;display:flex;align-items:center;gap:6px">
+    <span id=streamDot></span><span id=streamTitle style="display:none">Live world stream</span>
+    <span id=streamSub>every player, every session</span>
+    <button id=streamFilterBtn style="margin-left:auto">⚡ Flash calls only</button></div>
    <div id=stream><div class=empty>waiting for the world to move...</div></div>
   </div>
   <div id=midTab-chat class=midTabBody>
@@ -1490,7 +1498,11 @@ def state(request: Request) -> JSONResponse:
                 # subtraction, not a behavior change for the existing ?player= share-link flow.
                 char.pop("player_id", None)
         log = [dict(r) for r in c.execute(
-            "SELECT text FROM log WHERE campaign_id=? ORDER BY seq DESC LIMIT 8", (campaign_id,)
+            # art.generated excluded: high-volume pipeline bookkeeping (one per room, bursty
+            # during prefetch) that drowns actual story events out of an 8-row panel — it
+            # still counts in the Flash counter and still appears on the unfiltered stream.
+            "SELECT text FROM log WHERE campaign_id=? AND kind != 'art.generated'"
+            " ORDER BY seq DESC LIMIT 8", (campaign_id,)
         ).fetchall()][::-1]
         # room.generated is the highest-volume Flash use, but entity.spawned (NPC persona
         # generation) and npc.talked (NPC dialogue) also call Flash — count all three so the
