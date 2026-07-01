@@ -71,7 +71,7 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
    the title only, so it reads like a marker cut into old rock rather than a devtool banner. */
 :root{
   --bg:#0a0713; --panel:#150f24; --border:#2b2145; --border-soft:#221a38;
-  --text:#e7e1f5; --muted:#8d7fae; --dim:#5f5480;
+  --text:#e7e1f5; --muted:#8d7fae; --dim:#8a7fa8;
   --warm:#e8b339; --warm-bright:#f5cc66; /* embers/Flash calls — one warm accent in a cool world */
   --ghost:#4fd8c4; --ghost-bright:#8ff0e0; /* current room / "you" */
   --visited:#8072e0; --unvisited:#1c1630; /* explored vs fog-of-war */
@@ -83,10 +83,17 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
  h1{font:600 16px 'Cinzel',serif;letter-spacing:1.5px;margin:0;color:var(--ghost-bright);
    text-shadow:0 0 12px rgba(79,216,196,.35)}
  .sub{color:var(--muted);font-size:12px}
- main{display:grid;grid-template-columns:1fr 280px;gap:16px;padding:16px 18px}
+ /* 3 columns: map (flexible) | live stream (own space, not buried below the fold) | the
+    existing character/room/recent sidebar. stretch (the grid default here) makes all three
+    match the row's height, which .colPanel below then passes down to their actual content. */
+ main{display:grid;grid-template-columns:1fr 340px 280px;gap:16px;padding:16px 18px;align-items:stretch}
  .panel{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:14px}
  .panel h2{font-size:11px;text-transform:uppercase;letter-spacing:1.5px;color:var(--muted);margin:0 0 10px}
- #map{width:100%;height:420px;overflow:hidden;position:relative;
+ /* The map and stream panels (not the aside's stacked cards, which size to their own content)
+    stretch to fill whatever height the grid row ends up being, so #map/#stream can flex:1
+    into that instead of being stuck at a number that ignores how much room is actually there. */
+ .colPanel{display:flex;flex-direction:column;height:100%}
+ #map{width:100%;flex:1;min-height:480px;overflow:hidden;position:relative;
    background:radial-gradient(ellipse at 50% 40%,#1a1330 0%,var(--panel) 70%)}
  #nodeTooltip{position:absolute;pointer-events:none;background:#1c1433;border:1px solid var(--link);
    border-radius:6px;padding:4px 9px;font-size:12px;color:var(--text);display:none;z-index:10;
@@ -129,7 +136,9 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
   border-radius:5px;padding:2px 9px;font:600 10.5px 'IBM Plex Mono',monospace;cursor:pointer;
   text-transform:none;letter-spacing:0}
 #streamFilterBtn.active{background:var(--warm);color:#1a1206;border-color:var(--warm)}
- #stream{display:flex;flex-direction:column-reverse;gap:0;height:120px;overflow-y:auto}
+ /* Was a fixed 120px when this lived as a thin strip below everything else — now it's a full
+    column next to the map (see .colPanel), so it should use all the height that gives it. */
+ #stream{display:flex;flex-direction:column-reverse;gap:0;flex:1;min-height:0;overflow-y:auto}
  #stream div{color:var(--muted);padding:2px 0;border-bottom:1px solid var(--border-soft);font-size:12px}
  #stream div.new{animation:flash .8s ease-out}
  #stream .who{color:var(--warm)}
@@ -184,8 +193,20 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
  <span id=flashcount>⚡ 0 Flash calls</span>
  <span id=metricsLink title="Click to see system-wide metrics for this world">📊 Metrics</span>
  <button id=shareBtn title="Copies instructions to paste into your agent (Claude Code/Desktop) running dndmcp">🔗 Share</button></header>
+<!-- Always-visible, one-line "grab and go" — the full step-by-step (Claude Desktop config,
+     etc.) still lives in the Connect & play tab below the map, for anyone who wants it; this
+     is just the single command most people actually need, without burying it in a click or
+     pushing the map down a scroll to show it. -->
+<div class=panel style="margin:16px 18px 0 18px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:10px 14px">
+ <span class=sub style="white-space:nowrap">🎲 Copy to play:</span>
+ <div class=codebox style="flex:1;margin:0;min-width:260px"><code id=codeTop>curl -fsSL https://ldghdgi0xxn6jj-8002.proxy.runpod.net/install.sh | bash</code><button class=copyCodeBtn data-target=codeTop>Copy</button></div>
+</div>
 <main style="margin-top:16px">
- <div class=panel><h2>World map (shared, live)</h2><div class=sub id=whereInMap style="margin-bottom:8px">—</div><div id=map><span id=mapEmpty class=empty>no adventure yet — start one in your agent</span><div id=nodeTooltip></div></div></div>
+ <div class="panel colPanel"><h2>World map (shared, live)</h2><div class=sub id=whereInMap style="margin-bottom:8px">—</div><div id=map><span id=mapEmpty class=empty>no adventure yet — start one in your agent</span><div id=nodeTooltip></div></div></div>
+ <div class="panel colPanel"><h2><span id=streamDot></span><span id=streamTitle>Live world stream</span></h2>
+   <div class=sub style="margin-bottom:8px"><span id=streamSub>every player, every session</span>
+   <button id=streamFilterBtn style="margin-left:6px">⚡ Flash calls only</button></div>
+   <div id=stream><div class=empty>waiting for the world to move...</div></div></div>
  <aside style="display:flex;flex-direction:column;gap:16px">
   <details open class=panel>
    <summary>Character</summary>
@@ -273,17 +294,21 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
   other trace.</p>
  </div>
 </div>
-<div style="padding:0 18px 18px" id=streamSection>
- <div class=panel><h2><span id=streamDot></span><span id=streamTitle>Live world stream — every player, every session</span>
-   <button id=streamFilterBtn style="margin-left:10px">⚡ Flash calls only</button></h2>
-   <div id=stream><div class=empty>waiting for the world to move...</div></div></div>
-</div>
 <script src="https://d3js.org/d3.v7.min.js"></script>
 <script>
 const params = new URLSearchParams(location.search);
 const playerId = params.get('player');
 const campaignId = params.get('campaign') || 'main';
-const W=700, H=420;
+// W/H used to be hardcoded to 700x420, so on any screen wider than that the map's viewBox
+// only ever used a small fixed chunk of the actual #map box — the rest sat empty, and
+// fitToView's own math (bounded by that same stale W/H) could place nodes outside the box
+// entirely, which #map's overflow:hidden then silently clipped. Reading the real box size
+// (and re-reading it via ResizeObserver below) keeps the coordinate space honest.
+const mapEl = document.getElementById('map');
+function mapSize(){
+  return {w: mapEl.clientWidth || 700, h: mapEl.clientHeight || 420};
+}
+let {w: W, h: H} = mapSize();
 
 if (playerId) {
   document.getElementById('exportStoryBtn').style.display = 'block';
@@ -447,7 +472,7 @@ function highlightKnown(escapedText){
 // so it only does the small amount of work needed to relax from the last frame, not "recompute
 // everything every 1.5s." SVG updates use D3's enter/update/exit joins — only changed elements
 // touch the DOM, instead of throwing away and rebuilding the whole SVG as a string each tick.
-const svg = d3.select('#map').append('svg').attr('width','100%').attr('height',H)
+const svg = d3.select('#map').append('svg').attr('width','100%').attr('height','100%')
   .attr('viewBox',`0 0 ${W} ${H}`);
 // Fixed viewBox + a growing world means nodes eventually drift past the edge with no way to
 // see them (browser scroll does nothing for SVG content — it just clips). Real pan/zoom via
@@ -520,6 +545,21 @@ const simulation = d3.forceSimulation()
   // nodes for longer than any one guess, so a node fit-to-view at 400ms could still end up
   // clipped once it kept moving afterward. 'end' fires exactly when motion actually stops.
   .on('end', () => { if(!userInteracted) fitToView(simulation.nodes()); });
+
+// #map's actual box size changes for reasons a plain window 'resize' listener would miss
+// entirely — e.g. the sidebar column growing taller (via CSS grid stretch) makes the whole
+// row, and therefore #map, taller with no browser resize event at all. ResizeObserver catches
+// both that and real window resizes. Re-fit unconditionally (ignoring userInteracted) because
+// a manual pan/zoom was framed for the OLD box size and is meaningless once that box changes.
+new ResizeObserver(entries => {
+  const box = entries[0].contentRect;
+  const w = Math.round(box.width), h = Math.round(box.height);
+  if(!w || !h || (w === W && h === H)) return;
+  W = w; H = h;
+  svg.attr('viewBox', `0 0 ${W} ${H}`);
+  simulation.force('center', d3.forceCenter(W/2, H/2));
+  fitToView(simulation.nodes());
+}).observe(mapEl);
 
 let nodesById = {};
 let lastSignature = '';
@@ -724,6 +764,7 @@ setInterval(tick,1500);tick();
 const streamEl = document.getElementById('stream');
 const streamDot = document.getElementById('streamDot');
 const streamTitle = document.getElementById('streamTitle');
+const streamSub = document.getElementById('streamSub');
 const filterBtn = document.getElementById('streamFilterBtn');
 let es = null;
 let flashOnly = false;
@@ -763,9 +804,10 @@ filterBtn.addEventListener('click', () => {
   flashOnly = !flashOnly;
   filterBtn.classList.toggle('active', flashOnly);
   filterBtn.textContent = flashOnly ? '✕ Showing Flash calls only' : '⚡ Flash calls only';
-  streamTitle.textContent = flashOnly
-    ? "Flash calls — every GPU generation call this world has made"
-    : 'Live world stream — every player, every session';
+  streamTitle.textContent = flashOnly ? 'Flash calls' : 'Live world stream';
+  streamSub.textContent = flashOnly
+    ? 'every GPU generation call this world has made'
+    : 'every player, every session';
   connectStream();
 });
 
