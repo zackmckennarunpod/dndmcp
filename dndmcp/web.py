@@ -123,7 +123,7 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
 <div id=staleBanner>⟳ This tab is running an older version of the page — <a href="#" onclick="location.reload();return false">refresh to update</a></div>
 <header><h1>⚔ DNDMCP</h1><span class=sub id=where>—</span>
  <span id=flashcount>⚡ 0 Flash calls</span>
- <button id=shareBtn title="Copy this world's join link">🔗 Share</button></header>
+ <button id=shareBtn title="Copies instructions to paste into your agent (Claude Code/Desktop) running dndmcp">🔗 Share</button></header>
 <details class=panel style="margin:16px 18px 0">
  <summary>How this works — the Graph Context Engine underneath</summary>
  <div class=body>
@@ -177,21 +177,25 @@ const W=700, H=420;
 
 // Share: copies join instructions, not just a URL — actually PLAYING requires the friend's
 // own agent to call start_adventure(campaign_id=...), this GUI is spectator-only. "main"
-// needs no id (the default world), so its share text skips campaign_id entirely.
+// needs no id (the default world), so its share text skips campaign_id entirely. The text
+// itself tells them WHERE to paste it (their agent, not a browser) — a bare link/id here
+// reads ambiguous ("is this a website?"); explicit instructions don't.
 document.getElementById('shareBtn').addEventListener('click', async () => {
   const watchUrl = location.origin + location.pathname + '?campaign=' + encodeURIComponent(campaignId);
-  const text = campaignId === 'main'
-    ? `Join my DNDMCP world: just start_adventure (no id needed, it's the shared default). Watch it live: ${watchUrl}`
-    : `Join my DNDMCP world: start_adventure with campaign_id="${campaignId}". Watch it live: ${watchUrl}`;
+  const joinLine = campaignId === 'main'
+    ? `just start_adventure (no id needed, it's the shared default)`
+    : `start_adventure with campaign_id="${campaignId}"`;
+  const text = `Paste this into your agent (Claude Code/Desktop) while it's connected to `
+    + `the dndmcp MCP server, to join my world: ${joinLine}. Watch it live: ${watchUrl}`;
   try{
     await navigator.clipboard.writeText(text);
     const btn = document.getElementById('shareBtn');
     const original = btn.textContent;
-    btn.textContent = '✓ Copied';
+    btn.textContent = '✓ Copied — paste into your agent';
     btn.classList.add('copied');
-    setTimeout(() => { btn.textContent = original; btn.classList.remove('copied'); }, 1500);
+    setTimeout(() => { btn.textContent = original; btn.classList.remove('copied'); }, 2200);
   }catch(e){
-    prompt('Copy this:', text);
+    prompt('Copy this, then paste it into your agent (connected to dndmcp):', text);
   }
 });
 function esc(s){ return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
