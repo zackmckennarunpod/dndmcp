@@ -290,11 +290,34 @@ def state(request: Request) -> JSONResponse:
 
 @app.get("/stream/events")
 async def stream_events(request: Request):
-    """The world's live pulse: EVERY player's actions, unfiltered by who's watching, pushed to
-    every connected tab as they happen. This is the out-of-world view of the same stigmergic
-    mechanic that surfaces in-world as 'Traces of those who came before' (server.py's
-    _render_scene) — here you watch the whole shared world remember itself, live, across every
-    session at once. Must NOT filter by player_id — that would defeat the point."""
+    """The world's live pulse, pushed to every connected tab as events happen.
+
+    Default (no query params): EVERY player's actions, unfiltered — the out-of-world view of
+    the same stigmergic mechanic that surfaces in-world as 'Traces of those who came before'
+    (server.py's _render_scene). This is the demo centerpiece; don't filter it by default.
+
+    Optional filters (EVENT_STREAM_SPEC.md #4 — a separate capability layered on top, same
+    feed mechanism): ?player_id=  (one player's own events), ?subject_type=&subject_id=
+    (one room/npc's history), ?kind_prefix=  (e.g. "flash." for system/GPU events vs
+    everything else). Combine freely; each is AND'd in."""
+    player_id = request.query_params.get("player_id")
+    subject_type = request.query_params.get("subject_type")
+    subject_id = request.query_params.get("subject_id")
+    kind_prefix = request.query_params.get("kind_prefix")
+
+    where = []
+    params: list[object] = []
+    if player_id:
+        where.append("player_id = ?")
+        params.append(player_id)
+    if subject_type and subject_id:
+        where.append("subject_type = ? AND subject_id = ?")
+        params.extend([subject_type, subject_id])
+    if kind_prefix:
+        where.append("kind LIKE ?")
+        params.append(f"{kind_prefix}%")
+    extra_where = (" AND " + " AND ".join(where)) if where else ""
+
     async def gen():
         last_seq = 0
         try:
@@ -310,7 +333,8 @@ async def stream_events(request: Request):
                 c = _db()
                 rows = c.execute(
                     "SELECT seq, ts, kind, text, player_id, subject_type, subject_id"
-                    " FROM log WHERE seq > ? ORDER BY seq ASC", (last_seq,)
+                    f" FROM log WHERE seq > ?{extra_where} ORDER BY seq ASC",
+                    (last_seq, *params),
                 ).fetchall()
                 c.close()
             except Exception:
