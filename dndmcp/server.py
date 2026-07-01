@@ -63,10 +63,17 @@ How to run the game:
   human DM's — YOU write the actual scene in your own voice, richly, from those facts. Don't
   just relay the fields verbatim. Then ALWAYS end your turn with "What do you do?"
 - Exits come with a `descriptor` (the threshold itself — a door, archway, stairwell, gap —
-  part of THIS room, always safe to describe) plus, separately, whether it's `known`
-  (destination discovered) or not. Lead with the descriptor, not the compass word — "a warped
-  iron door to the north" beats "north → unexplored." Never invent what's beyond an
-  undiscovered exit, but the doorway itself is fair game since it's right in front of you.
+  part of THIS room, always safe to describe) and a `direction` (north/south/etc). The
+  `direction` is INTERNAL PLUMBING ONLY — never say it, print it, or hint at it to the
+  player. Describe exits ONLY by their descriptor: "a warped iron door" / "a gap in the
+  collapsed wall" / "a stairwell spiraling down," never "to the north" or "the north exit."
+  If a room has two exits, distinguish them by their descriptors (door vs. stairwell), not by
+  direction. You still silently track which descriptor maps to which direction (the tool
+  gives you both) so that when the player says "I go through the iron door" or "I take the
+  stairs down," you call move(direction) with the RIGHT direction behind the scenes — the
+  player should never need to know or say a compass word to play the game. Never invent
+  what's beyond an undiscovered exit, but the doorway itself is fair game since it's right
+  in front of you.
 - The player explores by telling you their intent. Translate intent into tool calls:
     move there        -> move(direction)
     any check/attack  -> roll_dice / attack  (NEVER invent dice — always call the tool)
@@ -219,15 +226,21 @@ def _render_scene(room: Room, *, player_id: str | None = None, ambient: bool = T
         lines.append(f"\n_{game.ambient_event(camp.theme if camp else 'default')}_")
     lines.append("")
     lines.append(game.ascii_map(room.model_dump()))
-    lines.append("\nExits:")
+    # Descriptor leads, not direction — direction is bracketed at the END and labeled
+    # explicitly as internal-only, so even a skim of this raw data reads "door/stairwell/gap"
+    # first. Reordering this (not just relying on the DM_PERSONA instruction) is deliberate:
+    # the old direction-first format got parroted into player-facing narration in practice.
+    lines.append("\nExits (describe by descriptor ONLY — never say the bracketed direction "
+                 "to the player, it's for your own move() calls):")
     for adj in _adjacent_rooms(room, player_id):
         threshold = adj["descriptor"] or "an unmarked passage"
         if adj["known"]:
             status = "visited" if adj["visited"] else "known, not yet visited"
-            lines.append(f"  {adj['direction']} → {threshold}, leading to {adj['name'].title()} ({status})")
+            lines.append(f"  {threshold}, leading to {adj['name'].title()} ({status}) "
+                         f"[direction: {adj['direction']}]")
         else:
-            lines.append(f"  {adj['direction']} → {threshold} — beyond it is unexplored, "
-                         f"do not invent what's there")
+            lines.append(f"  {threshold} — beyond it is unexplored, do not invent what's there "
+                         f"[direction: {adj['direction']}]")
     if with_art:
         a = art.generate(f"{room.name}: {room.description}", kind="scene")
         lines.append("\n" + a["ascii"])

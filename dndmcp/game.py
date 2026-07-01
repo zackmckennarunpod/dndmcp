@@ -190,12 +190,14 @@ def resolve_attack(attacker_bonus: int, target_ac: int, damage_dice: str) -> dic
 
 
 def ascii_map(room: dict | None) -> str:
-    """Tiny ASCII minimap around the given room (terminal render)."""
+    """Tiny ASCII minimap around the given room (terminal render). Purely spatial (a grid of
+    boxes) on purpose — no "exits: north, west" text line, since the DM should never be
+    surfacing compass words to the player (see server.py's _render_scene exits listing,
+    which carries direction only as bracketed internal plumbing)."""
     if not room:
         return "(no map yet)"
     cell = "[*]"  # current
     around = {d: ("[ ]" if d in room["exits"] else "   ") for d in DIRECTIONS}
     return (f"        {around['north']}\n"
             f"     {around['west']} {cell} {around['east']}\n"
-            f"        {around['south']}\n"
-            f"  exits: {', '.join(room['exits']) or 'none'}")
+            f"        {around['south']}")
