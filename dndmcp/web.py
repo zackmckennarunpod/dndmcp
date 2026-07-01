@@ -1083,7 +1083,11 @@ function connectStream(){
   if (es) es.close();
   streamEl.innerHTML = '<div class=empty>waiting for the world to move...</div>';
   let url = '/stream/events?campaign='+encodeURIComponent(campaignId);
+  // Default mode backfills the trailing ~20 events so a fresh tab opens onto the world's
+  // recent life instead of an empty box until someone acts; Flash-only keeps its full
+  // from-the-beginning backfill (that view IS the complete history).
   if (flashOnly) url += '&flash_only=1&backfill=1';
+  else url += '&backfill=recent';
   es = new EventSource(url);
   es.addEventListener('world-event', (e) => {
     const ev = JSON.parse(e.data);
@@ -1094,9 +1098,9 @@ function connectStream(){
     div.innerHTML = `${who}${highlightKnown(esc(ev.text))}`;
     streamEl.prepend(div);
     while (streamEl.children.length > 50) streamEl.lastChild.remove();
-    // backfilled rows arrive all at once on connect — only flash the ones that show up
-    // AFTER that initial catch-up, same "something just happened" cue as the default mode.
-    if (!flashOnly || streamCaughtUp) {
+    // backfilled rows arrive all at once on connect (both modes backfill now) — only flash
+    // the ones that show up AFTER that initial catch-up as "something just happened".
+    if (streamCaughtUp) {
       div.classList.add('new');
       setTimeout(() => div.classList.remove('new'), 900);
     }
@@ -2084,7 +2088,11 @@ async def stream_events(request: Request):
     subject_id = request.query_params.get("subject_id")
     kind_prefix = request.query_params.get("kind_prefix")
     flash_only = request.query_params.get("flash_only") == "1"
+    # backfill=1 -> everything since seq 0 (the Flash-history page); backfill=recent -> just
+    # the trailing ~20 matching events, so a fresh tab shows the world's recent life instead
+    # of an empty "waiting for the world to move..." until someone acts (user request).
     backfill = request.query_params.get("backfill") == "1"
+    backfill_recent = request.query_params.get("backfill") == "recent"
 
     where = ["campaign_id = ?"]
     params: list[object] = [campaign_id]
@@ -2106,7 +2114,16 @@ async def stream_events(request: Request):
         if not backfill:
             try:
                 c = _db()
-                last_seq = c.execute("SELECT COALESCE(MAX(seq), 0) FROM log").fetchone()[0]
+                if backfill_recent:
+                    # The seq BEFORE the campaign's 20th-newest matching event — the poll
+                    # loop below then naturally serves those 20 as its first batch. Scoped
+                    # to the same filters as the live stream so "recent" means recent HERE.
+                    row = c.execute(
+                        f"SELECT MIN(seq) FROM (SELECT seq FROM log WHERE 1=1{extra_where}"
+                        f" ORDER BY seq DESC LIMIT 20)", params).fetchone()
+                    last_seq = (row[0] - 1) if row and row[0] else 0
+                else:
+                    last_seq = c.execute("SELECT COALESCE(MAX(seq), 0) FROM log").fetchone()[0]
                 c.close()
             except Exception:
                 pass
