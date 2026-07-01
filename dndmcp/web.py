@@ -910,7 +910,10 @@ function centerOn(d){
   const t = d3.zoomIdentity.translate(W/2 - d.x*k, H/2 - d.y*k).scale(k);
   svg.transition().duration(500).call(zoomBehavior.transform, t);
 }
+let _roomInfoOpenId = null;  // guards the async regen callback below against a stale write
+                              // if the player clicks a DIFFERENT room before it resolves
 function showRoomInfo(d){
+  _roomInfoOpenId = d.id;
   const el = document.getElementById('roomInfo');
   if(!d.discovered){ el.innerHTML = '<span class=empty>??? — not discovered yet</span>'; return; }
   const img = d.image_ref
@@ -922,6 +925,20 @@ function showRoomInfo(d){
   const loot = (d.contents||[]).filter(c=>c.type==='loot')
     .map(c => `<div>✦ ${esc(c.name)}</div>`).join('');
   el.innerHTML = `${img}<b>${esc(d.name)}</b><br><span>${esc(d.description||'')}</span>${feats}${monsters}${loot}`;
+  // On-demand backstop: art otherwise only ever generates once, at room creation — if that
+  // one speculative attempt transiently fails (observed live: a brief GPU-allocation hiccup
+  // can silently drop a room's art forever), nothing else ever revisits it. Safe to fire on
+  // every open: /art/regen no-ops server-side if the room already has art.
+  if(!d.image_ref){
+    fetch('/art/regen', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({room_id: d.id, campaign: campaignId})})
+      .then(r => r.json()).then(res => {
+        if(res.image_ref && _roomInfoOpenId === d.id){
+          d.image_ref = res.image_ref;
+          showRoomInfo(d);
+        }
+      }).catch(()=>{});
+  }
 }
 
 const simulation = d3.forceSimulation()
@@ -1634,6 +1651,34 @@ def art_image(ref: str) -> Response:
     # was re-reading the file off the network volume and re-sending the full PNG).
     return Response(content=path.read_bytes(), media_type="image/png",
                     headers={"Cache-Control": "public, max-age=31536000, immutable"})
+
+
+@app.post("/art/regen")
+async def art_regen(request: Request) -> JSONResponse:
+    """On-demand backstop for a room's art: art otherwise only ever generates once, at room
+    creation (server.py's _generate_and_link/start_adventure), with no retry anywhere else if
+    that one speculative attempt transiently fails (observed live: a brief GPU-allocation
+    hiccup silently dropped a room's art forever, with nothing else ever revisiting it).
+    Called by the room panel's own JS whenever it opens a room with no image_ref yet. Safe to
+    call repeatedly/on every open: art.prefetch() no-ops (returns True immediately) if a
+    cached image already exists, so this can't double-generate or double-spend a room that
+    already succeeded."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = None
+    room_id = body.get("room_id") if isinstance(body, dict) else None
+    campaign_id = body.get("campaign") if isinstance(body, dict) else None
+    if not room_id or not campaign_id:
+        return JSONResponse({"error": "room_id and campaign are required"}, status_code=400)
+    room = server.world.room(room_id)
+    if not room:
+        return JSONResponse({"error": "unknown room"}, status_code=404)
+    if room.image_ref:
+        return JSONResponse({"image_ref": room.image_ref})
+    await server._prefetch_room_art(room_id, room.name, room.description, campaign_id)  # noqa: SLF001
+    updated = server.world.room(room_id)
+    return JSONResponse({"image_ref": updated.image_ref if updated else None})
 
 
 @app.get("/chat/enabled")

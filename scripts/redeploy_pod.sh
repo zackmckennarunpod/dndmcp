@@ -35,9 +35,15 @@ mkdir -p /data
 # DND_FLASH_ART=1: real per-room pixel art via Flash (flash_art.py/art.py) instead of the
 # ASCII placeholder. This is just the default — admin_flags.py can override it live with no
 # restart (scripts/pod_set_flag.sh flash_art 0/1), for backing it out fast if needed.
+# Log to /data (the persistent network volume), APPENDING (>>) not truncating (>) — this bit
+# us 3 times today: a redeploy between a room generating and someone asking "why didn't it
+# get art" wiped the only evidence of what actually happened, every time. /data has 400+TB
+# free; a few hundred KB/restart is nothing. /tmp/dndmcp.log is still written too (a symlink)
+# so pod_logs.sh/reset_world.sh's existing /tmp path keeps working without editing them.
 DNDMCP_STATE_DIR=/data DNDMCP_TRANSPORT=http PORT=8000 GUI_PORT=8002 DND_FLASH_LLM=1 DND_FLASH_ART=1 \
   DND_LLM_ENDPOINT=dnd-dm-vllm DND_LLM_MODEL='Qwen/Qwen2.5-7B-Instruct' RUNPOD_API_KEY='$RUNPOD_API_KEY' \
-  setsid nohup python3.11 -m dndmcp.app > /tmp/dndmcp.log 2>&1 < /dev/null &
+  setsid nohup python3.11 -m dndmcp.app >> /data/dndmcp.log 2>&1 < /dev/null &
+ln -sf /data/dndmcp.log /tmp/dndmcp.log
 sleep 3
 echo '--- status ---'
 # -fx here too (not plain -f): a substring match also catches the SSH wrapper's own bash -c
@@ -45,5 +51,5 @@ echo '--- status ---'
 # assignment above — printing that straight into whatever captured this script's stdout.
 # Learned the hard way: leaked a live prod API key into a terminal transcript this way.
 pgrep -afx 'python3.11 -m dndmcp.app' || echo 'FAILED TO START'
-tail -20 /tmp/dndmcp.log
+tail -20 /data/dndmcp.log
 "
