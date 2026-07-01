@@ -39,6 +39,11 @@ Play in your agent harness; watch the world map sync live in the browser. Both s
 for any of this — Flash generation is opt-in (see "Optional env vars" below) and everything
 falls back to deterministic procedural content when it's off, which is the default.
 
+**Working from a `bd worktree` to test a fix?** Skip everything below and run
+`scripts/dev_worktree.sh` from inside your worktree instead — it auto-picks free ports and an
+isolated state dir per worktree, so multiple agents can each run their own server with zero
+setup and zero collisions. See `dndmcp/CLAUDE.md` → "Test locally before you push" for details.
+
 Examples below use `<repo>` for wherever you cloned this — `cd` there first and either
 substitute the real path or just leave `<repo>` as a relative `.` if you're already in it.
 

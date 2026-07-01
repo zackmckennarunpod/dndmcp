@@ -26,6 +26,28 @@ Never `ssh` in and hand-edit files on the pod, and never restart the process by 
 other than `redeploy_pod.sh` — both bypass the one thing that makes this safe: the pod
 always ends up running exactly what's on `origin/main`.
 
+## Test locally before you push — one command, fully isolated
+
+Every worktree can run its own GUI+MCP server with zero setup and zero collision risk with
+other agents, the shared local dev world, or the live pod:
+
+```bash
+cd <your worktree>
+../scripts/dev_worktree.sh   # or scripts/dev_worktree.sh if you're at the worktree's own root
+```
+
+This auto-picks two free ports, uses a state dir unique to that worktree
+(`~/.dndmcp_worktrees/<worktree-name>`), and runs the code from *that* worktree using the main
+repo's already-installed `.venv` (deps are shared unless your branch touched
+`dndmcp/requirements.txt` — the script tells you if you need your own venv). Ctrl-C stops it;
+nothing it touches is shared state, so there's nothing to clean up or coordinate with other
+agents. The script prints the GUI URL to open and the state dir path if you want to inspect
+or `rm` the DB.
+
+This is the ONLY thing multiple agents working in parallel worktrees should run to test
+changes — never point a worktree at `~/.dndmcp` (the single shared local dev DB) or anywhere
+near the pod flow below until your change is verified and merged.
+
 ## The database is precious — do not wipe it casually
 
 `/data/campaign.db` (and `tickets.db`) hold the ENTIRE shared world — every player's

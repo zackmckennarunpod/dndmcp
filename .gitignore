@@ -12,3 +12,7 @@ research/_skills-repo/.git/
 .dolt/
 *.db
 .beads-credential-key
+# bd worktree
+8pw/
+# bd worktree
+rz3/
