@@ -239,7 +239,12 @@ function renderGraph(rooms, players, you){
  const nodeSel = nodeLayer.selectAll('g.node').data(nodes, d=>d.id)
    .join(enter => {
      const g = enter.append('g').attr('class','node').style('cursor','pointer');
-     g.append('circle').attr('r',16).attr('stroke-width',2);
+     // The actual "wow" moment: a room didn't just silently exist on the next poll, it grew
+     // into existence right now. r=0 -> full size with a bouncy overshoot, so a freshly
+     // Flash-generated room visibly POPS in rather than appearing already-rendered. Fill/
+     // stroke color still gets set normally right after (below) — only the radius animates.
+     g.append('circle').attr('r',0).attr('stroke-width',2)
+       .transition().duration(650).ease(d3.easeBackOut.overshoot(1.8)).attr('r',16);
      g.append('text').attr('class','label').attr('y',30).attr('text-anchor','middle')
        .attr('fill','#7d8794').attr('font-size',10);
      g.append('text').attr('class','count').attr('y',4).attr('text-anchor','middle')
