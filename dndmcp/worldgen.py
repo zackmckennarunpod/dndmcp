@@ -49,10 +49,15 @@ _ROOM_JSON = ('{"name": short evocative room name, "kind": one or two words (e.g
               'scene-prose — but ground every detail in THIS world\'s actual theme/premise, '
               'never generic dungeon-crawl dressing (no "collapsed pillar" filler unless this '
               'world genuinely is that kind of place), '
-              '"features": array of exactly 2 specific, examinable details, each tied to this '
-              'world\'s actual theme/premise (not interchangeable with any other setting), '
+              '"features": array of exactly 2 specific, examinable details — fixed, NOT '
+              'portable (architecture, furniture, scenery), each tied to this world\'s actual '
+              'theme/premise (not interchangeable with any other setting), '
               '"has_monster": true or false, '
-              '"notable_item": short item description or null, '
+              '"notable_items": array of 1-2 SMALL, PORTABLE objects a player could actually '
+              'pick up and carry — a scroll, a trinket, a tool, a coin pouch, a key, a '
+              'weapon — distinct from features (which are fixed/scenery, never portable). '
+              'Most rooms have at least one loose object worth finding; only use an empty '
+              'array on the rare room that is genuinely bare of anything portable, '
               '"exits": {"<direction>": short physical description (4-8 words) of THAT '
               'exit\'s threshold as seen from THIS room — a door/archway/stairwell/gap, '
               'material + condition, NOT what lies beyond it (unknown/unexplored) — one '
@@ -107,6 +112,11 @@ async def generate_room_content(room_id: str, theme: str, *, entry_from: str | N
 
     via = "procedural"
     want_monster = any(c.get("type") == "monster" for c in base["contents"])
+    # `items` starts as whatever the procedural dice roll picked (0 or 1 loot dict from the
+    # thin, theme-mismatched game.py pool) — the FALLBACK. If Flash succeeds it REPLACES this
+    # wholesale (same override pattern as want_monster below), never just adds on top of it —
+    # otherwise a generic "pouch of gold" keeps surviving next to genuinely on-theme content.
+    items = [c for c in base["contents"] if c.get("type") == "loot"]
     messages = _room_messages(theme, entry_from, list(base["exits"].keys()), nearby, recent_events)
     gen = await flash_llm.generate(messages, max_tokens=280, temperature=0.95)
     if gen:
@@ -127,17 +137,24 @@ async def generate_room_content(room_id: str, theme: str, *, entry_from: str | N
                         base.setdefault("features", []).append(f.strip())
             elif data.get("feature"):  # back-compat: older prompt/response shape (singular)
                 base.setdefault("features", []).append(data["feature"])
-            item = data.get("notable_item")
-            if item:
+            def _normalize_item(raw):
                 # the model doesn't reliably return a plain string here despite the schema —
                 # sometimes a dict like {"item_name": ..., "description": ...} with varying
                 # key names. Normalize to a single display string either way.
-                if isinstance(item, dict):
-                    item = (item.get("description") or item.get("name") or item.get("item_name")
-                           or item.get("type") or item.get("item_type") or next(iter(item.values()), ""))
-                if item:
-                    base.setdefault("contents", []).append(
-                        {"type": "loot", "id": uuid.uuid4().hex[:8], "name": str(item)})
+                if isinstance(raw, dict):
+                    raw = (raw.get("description") or raw.get("name") or raw.get("item_name")
+                          or raw.get("type") or raw.get("item_type") or next(iter(raw.values()), ""))
+                return str(raw).strip() if raw else ""
+
+            items_from_flash = data.get("notable_items")
+            if isinstance(items_from_flash, list):
+                # full override, same as want_monster below — an empty list here is a real
+                # answer ("nothing of note in this room"), not "keep the procedural pick".
+                items = [{"type": "loot", "id": uuid.uuid4().hex[:8], "name": name}
+                        for raw in items_from_flash if (name := _normalize_item(raw))]
+            elif data.get("notable_item"):  # back-compat: older prompt/response shape (singular)
+                if name := _normalize_item(data["notable_item"]):
+                    items = [{"type": "loot", "id": uuid.uuid4().hex[:8], "name": name}]
             # per-exit threshold descriptors — only override the procedural default for
             # directions the model actually addressed AND that are real exits of this room;
             # never trust an exit key the model invented on its own.
@@ -176,8 +193,12 @@ async def generate_room_content(room_id: str, theme: str, *, entry_from: str | N
             if f not in feats:
                 feats.append(f)
 
-    # place a REAL SRD monster (rules-accurate) if wanted
-    base["contents"] = [c for c in base["contents"] if c.get("type") != "monster"]
+    # place a REAL SRD monster (rules-accurate) if wanted, and the final decided item list —
+    # both strip whatever the procedural roll originally put in base["contents"] and replace
+    # it wholesale, so a Flash-decided "no monster"/"no items" actually means none, not
+    # "procedural filler plus whatever Flash added."
+    base["contents"] = [c for c in base["contents"] if c.get("type") not in ("monster", "loot")]
+    base["contents"].extend(items)
     if want_monster:
         mon = compendium.encounter_from_names(_creatures_for(theme), rng)
         if mon:
