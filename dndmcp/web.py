@@ -9,6 +9,8 @@ position, character, and the log.
 from __future__ import annotations
 
 import asyncio
+import datetime
+import html
 import json
 import os
 import subprocess
@@ -635,12 +637,13 @@ filterBtn.addEventListener('click', () => {
   connectStream();
 });
 
-// Clicking the header counter jumps straight to the (now Flash-filtered) stream panel —
-// "see all the flash calls that were made" in one click, not a separate view to hunt for.
+// Clicking the header counter opens the FULL Flash-call history on its own page (new tab) —
+// every call this world has ever made, uncapped, not a live-filtered view of the panel below
+// (that's what the "⚡ Flash calls only" toggle on the stream panel is for instead).
 document.getElementById('flashcount').style.cursor = 'pointer';
+document.getElementById('flashcount').title = 'Click to see every Flash call this world has made';
 document.getElementById('flashcount').addEventListener('click', () => {
-  if (!flashOnly) filterBtn.click();
-  document.getElementById('streamSection').scrollIntoView({behavior:'smooth', block:'start'});
+  window.open('/flash-calls?campaign='+encodeURIComponent(campaignId), '_blank');
 });
 
 connectStream();
@@ -817,6 +820,55 @@ async def export_story(request: Request):
     return Response(content=markdown, media_type="text/markdown; charset=utf-8",
                     headers={"Content-Disposition": f'attachment; filename="{safe_name}.md"',
                              "X-Story-Via": via})
+
+
+@app.get("/flash-calls", response_class=HTMLResponse)
+def flash_calls_page(request: Request) -> str:
+    """Every Flash call this world has EVER made, in full, on its own page — not a capped/
+    truncated panel. What #flashcount in the header links to (opens in a new tab): the whole
+    history at once, not a live-filtered view of the existing stream."""
+    campaign_id = request.query_params.get("campaign") or "main"
+    c = _db()
+    try:
+        rows = c.execute(
+            "SELECT ts, kind, text, player_id, subject_type, subject_id FROM log"
+            " WHERE campaign_id=? AND text LIKE '%(flash)%' ORDER BY seq DESC",
+            (campaign_id,),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        rows = []
+    finally:
+        c.close()
+
+    def row_html(r: sqlite3.Row) -> str:
+        ts = datetime.datetime.fromtimestamp(r["ts"]).strftime("%Y-%m-%d %H:%M:%S") if r["ts"] else "?"
+        who = f'<span class=who>{html.escape(r["player_id"][:6])}</span> ' if r["player_id"] else ""
+        subj = (f'<span class=subj>{html.escape(r["subject_type"])}:{html.escape(r["subject_id"])}</span>'
+               if r["subject_type"] else "")
+        return (f'<div class=row><span class=ts>{ts}</span><span class=kind>{html.escape(r["kind"])}</span>'
+               f'{who}<span class=text>{html.escape(r["text"])}</span>{subj}</div>')
+
+    body = "".join(row_html(r) for r in rows) or '<div class=empty>No Flash calls yet in this world.</div>'
+    return f"""<!doctype html><html><head><meta charset=utf-8><title>Flash calls — {html.escape(campaign_id)}</title>
+<style>
+:root{{--bg:#0a0713;--panel:#150f24;--border:#2b2145;--border-soft:#221a38;--text:#e7e1f5;
+  --muted:#8d7fae;--warm:#e8b339;--warm-bright:#f5cc66;--ghost:#4fd8c4;--ghost-bright:#8ff0e0}}
+body{{margin:0;background:var(--bg);color:var(--text);font:13px 'IBM Plex Mono',ui-monospace,Menlo,monospace}}
+header{{padding:14px 20px;border-bottom:1px solid var(--border);display:flex;gap:12px;align-items:baseline}}
+h1{{font-size:16px;margin:0;color:var(--warm-bright)}}
+.count{{color:var(--muted)}}
+main{{padding:10px 20px}}
+.row{{display:flex;gap:12px;padding:7px 0;border-bottom:1px solid var(--border-soft);font-size:12.5px;align-items:baseline}}
+.ts{{color:var(--muted);flex-shrink:0;width:150px}}
+.kind{{color:var(--warm);flex-shrink:0;width:130px}}
+.who{{color:var(--ghost)}}
+.subj{{color:var(--muted);margin-left:auto}}
+.text{{color:var(--text)}}
+.empty{{color:var(--muted);padding:20px 0}}
+</style></head><body>
+<header><h1>⚡ Flash calls</h1><span class=count>{len(rows)} total in this world</span></header>
+<main>{body}</main>
+</body></html>"""
 
 
 @app.get("/stream/events")
