@@ -317,13 +317,16 @@ _NPC_DENSITY_LIMIT = 2
 
 
 async def _maybe_spawn_entity_persona(new_room: dict, dest_id: str, theme: str,
-                                      nearby_room_ids: list[str], *, campaign_id: str) -> None:
+                                      nearby_room_ids: list[str], *, campaign_id: str,
+                                      recent_events: list[str] | None = None) -> None:
     """If this room's procedural gen placed a monster, decide (deterministically, from what's
     already alive nearby) whether it's worth a full LLM persona, generate one, and store it
     as a first-class `entity` row. Mutates new_room['contents'] in place so the monster's
     display name matches its generated identity before the room is even saved — call this
     BEFORE world.upsert_room. `campaign_id` is required (not resolved from a player_id, since
-    this runs during background room-gen with no requesting player in scope)."""
+    this runs during background room-gen with no requesting player in scope). `recent_events`:
+    nearby log text (see _generate_and_link) so a freshly-spawned NPC's persona can react to
+    what's already happened around it, not invent one in a vacuum."""
     mon = next((c for c in new_room["contents"] if c.get("type") == "monster"), None)
     if not mon:
         return
@@ -331,7 +334,8 @@ async def _maybe_spawn_entity_persona(new_room: dict, dest_id: str, theme: str,
         return  # stays a nameless mechanical encounter — still fights fine
     kind = mon["name"]  # SRD species name (e.g. "Goblin") — capture before we overwrite it
     persona = await worldgen.generate_npc_persona(
-        mon, theme, new_room["name"], new_room.get("kind", ""), new_room["description"])
+        mon, theme, new_room["name"], new_room.get("kind", ""), new_room["description"],
+        recent_events=recent_events)
     mon["name"] = persona["name"]
     world.upsert_entity(entity_id=mon["id"], campaign_id=campaign_id, kind=kind,
                         name=persona["name"], location_id=dest_id,
@@ -349,11 +353,18 @@ async def _generate_and_link(dest_id: str, theme: str, campaign_id: str, salt: s
     the owning campaign's — see game._seeded for why every room in a world must share it."""
     nearby_full = _nearby_region(back_to_id, depth=2)
     nearby = [(name, kind) for name, kind, _rid in nearby_full]
+    # Stigmergy feeding INTO generation, not just narration: what just happened in the room
+    # you're generating FROM should be able to ripple into what this new room actually is —
+    # a fight/discovery next door, not a blank slate. exclude_player_id is deliberately
+    # omitted here — unlike _render_scene's viewer-facing traces, generation should see
+    # everyone's recent actions, including the very player who's about to walk through.
+    recent_events = [e.text for e in world.recent_log(
+        5, campaign_id=campaign_id, subject_type="room", subject_id=back_to_id)]
     new_room = await worldgen.generate_room_content(
-        dest_id, theme, entry_from=entry_from, nearby=nearby, salt=salt)
+        dest_id, theme, entry_from=entry_from, nearby=nearby, recent_events=recent_events, salt=salt)
     new_room["exits"][game.opposite_of(entry_from)] = back_to_id
     await _maybe_spawn_entity_persona(new_room, dest_id, theme, [rid for _, _, rid in nearby_full],
-                                      campaign_id=campaign_id)
+                                      campaign_id=campaign_id, recent_events=recent_events)
     world.upsert_room(room_id=dest_id, campaign_id=campaign_id, name=new_room["name"],
                       description=new_room["description"], exits=new_room["exits"],
                       contents=new_room["contents"], features=new_room.get("features"),
@@ -572,7 +583,10 @@ async def talk_to(player_id: str, message: str, npc_name: str | None = None) -> 
         # No persona yet — the spawn-time density gate skipped it, or this NPC predates the
         # feature. Generate one lazily now that a player actually cares enough to talk to it.
         kind = npc["name"]  # SRD species name before we overwrite it below
-        gen = await worldgen.generate_npc_persona(npc, camp.theme, room.name, room.kind, room.description)
+        recent_events = [e.text for e in world.recent_log(
+            5, campaign_id=ch.campaign_id, subject_type="room", subject_id=room.id)]
+        gen = await worldgen.generate_npc_persona(npc, camp.theme, room.name, room.kind,
+                                                  room.description, recent_events=recent_events)
         npc["name"] = gen["name"]
         ent = world.upsert_entity(entity_id=npc["id"], campaign_id=ch.campaign_id, kind=kind,
                                   name=gen["name"], location_id=room.id,

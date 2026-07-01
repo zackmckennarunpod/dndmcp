@@ -54,7 +54,8 @@ _ROOM_JSON = ('{"name": short evocative room name, "kind": one or two words (e.g
 
 
 def _room_messages(theme: str, came_from: str | None, exits: list[str],
-                   nearby: list[tuple[str, str]] | None = None) -> list[dict]:
+                   nearby: list[tuple[str, str]] | None = None,
+                   recent_events: list[str] | None = None) -> list[dict]:
     system = (f"{setting.GEN_BRIEF}\n\n"
               f"You are the world-builder for a {theme} dungeon crawl in this setting. You invent "
               f"what is TRUE about each room — facts for a Dungeon Master to narrate from, not "
@@ -65,6 +66,11 @@ def _room_messages(theme: str, came_from: str | None, exits: list[str],
         listed = ", ".join(f"{name} ({kind})" if kind else name for name, kind in nearby)
         context = (f" Nearby, already-explored areas: {listed}. Keep this room's tone/architecture "
                    f"consistent with them — same building, not a random mismatch of styles.")
+    if recent_events:
+        # Stigmergy reaching into generation itself, not just narration: what happened next
+        # door can ripple into what THIS room is — the same fight/discovery a moment ago is
+        # what makes a freshly-generated room feel like a continuation, not a blank slate.
+        context += f" Recently, nearby: {'; '.join(recent_events)}."
     user = (f"Generate the next room{enter}. Exits lead: {', '.join(exits) or 'none'}.{context} "
             f"Return JSON: {_ROOM_JSON}")
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
@@ -72,20 +78,24 @@ def _room_messages(theme: str, came_from: str | None, exits: list[str],
 
 async def generate_room_content(room_id: str, theme: str, *, entry_from: str | None = None,
                                 nearby: list[tuple[str, str]] | None = None,
+                                recent_events: list[str] | None = None,
                                 salt: str = "") -> dict:
     """Generate a room's content for the graph. Tries Flash (structured JSON); falls back
     to procedural. Returns game.generate_room's shape + `features` + a `via` marker.
 
     `nearby`: (name, kind) pairs of already-generated rooms within a couple hops, so the LLM
     keeps tone/architecture consistent with the surrounding region instead of each room being
-    generated in isolation. `salt`: the owning campaign's salt (state.py Campaign.salt) — see
-    game._seeded for why this must be passed through, not just room_id alone."""
+    generated in isolation. `recent_events`: recent log text for the room being generated
+    FROM (see server.py's _generate_and_link) — lets a fight/discovery next door ripple into
+    what this new room actually is, not just how it's narrated. `salt`: the owning campaign's
+    salt (state.py Campaign.salt) — see game._seeded for why this must be passed through, not
+    just room_id alone."""
     rng = game._seeded(room_id, salt)  # deterministic per (room_id, salt)
     base = game.generate_room(room_id, theme, entry_from=entry_from, salt=salt)  # procedural skeleton
 
     via = "procedural"
     want_monster = any(c.get("type") == "monster" for c in base["contents"])
-    messages = _room_messages(theme, entry_from, list(base["exits"].keys()), nearby)
+    messages = _room_messages(theme, entry_from, list(base["exits"].keys()), nearby, recent_events)
     gen = await flash_llm.generate(messages, max_tokens=280, temperature=0.95)
     if gen:
         try:
