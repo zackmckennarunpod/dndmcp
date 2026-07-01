@@ -51,6 +51,15 @@ def _db() -> sqlite3.Connection:
     return c
 
 
+def _client_ip(request: Request) -> str | None:
+    """Same X-Forwarded-For-first resolution as server.py's _RequestContextMiddleware — the
+    pod sits behind Runpod's proxy, so request.client.host alone would just be the proxy."""
+    xff = request.headers.get("x-forwarded-for")
+    if xff:
+        return xff.split(",")[0].strip()
+    return request.client.host if request.client else None
+
+
 PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</title>
 <link rel=preconnect href=https://fonts.googleapis.com>
 <link rel=preconnect href=https://fonts.gstatic.com crossorigin>
@@ -95,6 +104,8 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
  .hl-item{color:var(--warm);font-weight:600}
 #flashcount{color:var(--warm);font-weight:600;margin-left:auto;transition:transform .15s}
 #flashcount.pulse{transform:scale(1.3);color:var(--warm-bright)}
+#metricsLink{color:var(--ghost);cursor:pointer;font-weight:600}
+#metricsLink:hover{color:var(--ghost-bright)}
 #staleBanner{display:none;background:var(--warm);color:#1a1206;font-weight:600;font-size:12.5px;
   padding:7px 18px;text-align:center}
 #staleBanner a{color:#1a1206;text-decoration:underline}
@@ -149,6 +160,7 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
 <div id=staleBanner>⟳ This tab is running an older version of the page — <a href="#" onclick="location.reload();return false">refresh to update</a></div>
 <header><h1>⚔ DNDMCP</h1><span class=sub id=where>—</span>
  <span id=flashcount>⚡ 0 Flash calls</span>
+ <span id=metricsLink title="Click to see system-wide metrics for this world">📊 Metrics</span>
  <button id=shareBtn title="Copies instructions to paste into your agent (Claude Code/Desktop) running dndmcp">🔗 Share</button></header>
 <details open id=connectPanel class=panel style="margin:16px 18px 16px">
  <summary>🎲 Connect &amp; play — anyone can join, no account needed</summary>
@@ -701,6 +713,10 @@ document.getElementById('flashcount').addEventListener('click', () => {
   window.open('/flash-calls?campaign='+encodeURIComponent(campaignId), '_blank');
 });
 
+document.getElementById('metricsLink').addEventListener('click', () => {
+  window.open('/metrics?campaign='+encodeURIComponent(campaignId), '_blank');
+});
+
 connectStream();
 </script></body></html>"""
 
@@ -888,10 +904,10 @@ async def export_story(request: Request):
     c = _db()
     try:
         c.execute(
-            "INSERT INTO log (ts,kind,text,player_id,subject_type,subject_id,campaign_id)"
-            " VALUES (?,?,?,?,?,?,?)",
+            "INSERT INTO log (ts,kind,text,player_id,subject_type,subject_id,campaign_id,ip)"
+            " VALUES (?,?,?,?,?,?,?,?)",
             (time.time(), "story.exported", f"{char['name']} exported their story ({via}).",
-             player_id, "character", player_id, campaign_id),
+             player_id, "character", player_id, campaign_id, _client_ip(request)),
         )
         c.commit()
     finally:
@@ -949,6 +965,117 @@ main{{padding:10px 20px}}
 </style></head><body>
 <header><h1>⚡ Flash calls</h1><span class=count>{len(rows)} total in this world</span></header>
 <main>{body}</main>
+</body></html>"""
+
+
+@app.get("/metrics", response_class=HTMLResponse)
+def metrics_page(request: Request) -> str:
+    """System-wide counters for this world: event volume over time, unique players/IPs seen,
+    breakdown by event kind, and a per-player table (last seen, last IP, event count). All
+    derived from the existing `log`/`character` tables via aggregate queries — no new table,
+    same "just use what's there more fully" approach as the rest of EVENT_STREAM_SPEC.md.
+    Hackathon-demo surface, not an ops dashboard: counters + plain tables, no charting lib."""
+    campaign_id = request.query_params.get("campaign") or "main"
+    c = _db()
+    try:
+        total_events = c.execute(
+            "SELECT COUNT(*) FROM log WHERE campaign_id=?", (campaign_id,)).fetchone()[0]
+        unique_players = c.execute(
+            "SELECT COUNT(DISTINCT player_id) FROM log WHERE campaign_id=? AND player_id IS NOT NULL",
+            (campaign_id,)).fetchone()[0]
+        unique_ips = c.execute(
+            "SELECT COUNT(DISTINCT ip) FROM log WHERE campaign_id=? AND ip IS NOT NULL",
+            (campaign_id,)).fetchone()[0]
+        # Same three-kind Flash definition /state's header counter and /flash-calls use.
+        flash_calls = c.execute(
+            "SELECT COUNT(*) FROM log WHERE campaign_id=?"
+            " AND kind IN ('room.generated','entity.spawned','npc.talked','item.picked_up','story.exported')"
+            " AND text LIKE '%(flash)%'",
+            (campaign_id,)).fetchone()[0]
+        by_kind = c.execute(
+            "SELECT kind, COUNT(*) AS n FROM log WHERE campaign_id=? GROUP BY kind ORDER BY n DESC LIMIT 20",
+            (campaign_id,)).fetchall()
+        hourly = c.execute(
+            "SELECT strftime('%Y-%m-%d %H:00', ts, 'unixepoch') AS bucket, COUNT(*) AS n"
+            " FROM log WHERE campaign_id=? AND ts >= ? GROUP BY bucket ORDER BY bucket ASC",
+            (campaign_id, time.time() - 86400)).fetchall()
+        players = c.execute(
+            "SELECT ch.player_id AS player_id, ch.name AS name, ch.klass AS klass,"
+            " (SELECT COUNT(*) FROM log WHERE player_id=ch.player_id AND campaign_id=ch.campaign_id) AS events,"
+            " (SELECT MAX(ts) FROM log WHERE player_id=ch.player_id AND campaign_id=ch.campaign_id) AS last_seen,"
+            " (SELECT ip FROM log WHERE player_id=ch.player_id AND campaign_id=ch.campaign_id"
+            "  AND ip IS NOT NULL ORDER BY seq DESC LIMIT 1) AS last_ip"
+            " FROM character ch WHERE ch.campaign_id=? ORDER BY last_seen DESC",
+            (campaign_id,)).fetchall()
+    except sqlite3.OperationalError:
+        total_events = unique_players = unique_ips = flash_calls = 0
+        by_kind = hourly = players = []
+    finally:
+        c.close()
+
+    def ts_fmt(ts: float | None) -> str:
+        return datetime.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S") if ts else "—"
+
+    kind_rows = "".join(
+        f'<div class=row><span class=kind>{html.escape(r["kind"])}</span>'
+        f'<span class=bar><span style="width:{min(100, r["n"] * 100 // max(by_kind[0]["n"], 1))}%"></span></span>'
+        f'<span class=n>{r["n"]}</span></div>'
+        for r in by_kind
+    ) or '<div class=empty>No events yet.</div>'
+
+    hour_rows = "".join(
+        f'<div class=row><span class=ts>{html.escape(r["bucket"])}</span><span class=n>{r["n"]}</span></div>'
+        for r in hourly
+    ) or '<div class=empty>No events in the last 24h.</div>'
+
+    player_rows = "".join(
+        f'<div class=row><span class=who>{html.escape(p["player_id"][:8])}</span>'
+        f'<span class=pname>{html.escape(p["name"] or "?")} <span class=muted>({html.escape(p["klass"] or "?")})</span></span>'
+        f'<span class=n>{p["events"]} events</span>'
+        f'<span class=ip>{html.escape(p["last_ip"] or "—")}</span>'
+        f'<span class=ts>{ts_fmt(p["last_seen"])}</span></div>'
+        for p in players
+    ) or '<div class=empty>No players yet.</div>'
+
+    return f"""<!doctype html><html><head><meta charset=utf-8><title>Metrics — {html.escape(campaign_id)}</title>
+<style>
+:root{{--bg:#0a0713;--panel:#150f24;--border:#2b2145;--border-soft:#221a38;--text:#e7e1f5;
+  --muted:#8d7fae;--warm:#e8b339;--warm-bright:#f5cc66;--ghost:#4fd8c4;--ghost-bright:#8ff0e0}}
+body{{margin:0;background:var(--bg);color:var(--text);font:13px 'IBM Plex Mono',ui-monospace,Menlo,monospace}}
+header{{padding:14px 20px;border-bottom:1px solid var(--border);display:flex;gap:12px;align-items:baseline}}
+h1{{font-size:16px;margin:0;color:var(--warm-bright)}}
+.count{{color:var(--muted)}}
+main{{padding:14px 20px;max-width:820px}}
+.cards{{display:flex;gap:14px;margin-bottom:22px;flex-wrap:wrap}}
+.card{{background:var(--panel);border:1px solid var(--border);border-radius:6px;padding:12px 18px;min-width:130px}}
+.card .num{{font-size:22px;color:var(--ghost-bright);font-weight:600}}
+.card .label{{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.04em}}
+section{{margin-bottom:26px}}
+h2{{font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin:0 0 8px}}
+.row{{display:flex;gap:12px;padding:6px 0;border-bottom:1px solid var(--border-soft);font-size:12.5px;align-items:center}}
+.kind{{color:var(--warm);flex-shrink:0;width:150px}}
+.bar{{flex:1;background:var(--border-soft);height:8px;border-radius:4px;overflow:hidden}}
+.bar span{{display:block;height:100%;background:var(--warm);border-radius:4px}}
+.n{{color:var(--text);flex-shrink:0;width:70px;text-align:right}}
+.ts{{color:var(--muted);flex-shrink:0;width:150px}}
+.who{{color:var(--ghost);flex-shrink:0;width:80px}}
+.pname{{flex:1}}
+.muted{{color:var(--muted)}}
+.ip{{color:var(--muted);flex-shrink:0;width:130px}}
+.empty{{color:var(--muted);padding:10px 0}}
+</style></head><body>
+<header><h1>📊 Metrics</h1><span class=count>{html.escape(campaign_id)}</span></header>
+<main>
+<div class=cards>
+ <div class=card><div class=num>{total_events}</div><div class=label>Events</div></div>
+ <div class=card><div class=num>{unique_players}</div><div class=label>Players</div></div>
+ <div class=card><div class=num>{unique_ips}</div><div class=label>Unique IPs</div></div>
+ <div class=card><div class=num>{flash_calls}</div><div class=label>Flash calls</div></div>
+</div>
+<section><h2>Events by kind</h2>{kind_rows}</section>
+<section><h2>Activity, last 24h (hourly)</h2>{hour_rows}</section>
+<section><h2>Players</h2>{player_rows}</section>
+</main>
 </body></html>"""
 
 

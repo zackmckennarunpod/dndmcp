@@ -116,6 +116,36 @@ zero new storage.
   avoids new infra risk through the pod's proxy (which has already broken once — see the 421/
   DNS-rebinding fix, `daea618`).
 
+## ✅ 5. Request provenance + a metrics page
+
+**What:** `log` gains two nullable columns, `ip` and `session_id`, populated for every new
+event via a `contextvars.ContextVar` pair (`state.py`'s `request_context()`) that the
+transport layer sets for the duration of one inbound request — a single choke point, so
+none of the ~15 existing `world.log(...)` call sites in `server.py` needed to change.
+`web.py`'s `/metrics` page (linked from the header, same click-to-new-tab pattern as
+`#flashcount` → `/flash-calls`) surfaces counters computed from `log`/`character` via
+aggregate queries: total events, unique players, unique IPs, Flash-call count, a breakdown
+by `kind`, hourly activity for the last 24h, and a per-player table (name/class, event
+count, last-seen IP, last-seen time).
+
+**Why:** Hackathon-demo surface — "how much is actually happening in this world, and who's
+in it" as visible counters, not just a raw scrolling feed.
+
+**How IP is captured:**
+- **Web GUI** (`web.py`): `_client_ip(request)` reads `X-Forwarded-For` first (the pod sits
+  behind Runpod's proxy, so `request.client.host` alone is the proxy, not the caller),
+  falling back to `request.client.host`.
+- **MCP tool calls** (`server.py` — the actual gameplay traffic): `FastMCP.run(transport=...)`
+  builds+serves its Starlette app in one call with no middleware hook, so `main()` now calls
+  a new `_run_http()` that replicates `run_streamable_http_async`/`run_sse_async`'s two
+  internal lines but wraps a pure-ASGI `_RequestContextMiddleware` around the app first. Same
+  XFF-first resolution as the web side, plus captures the inbound `Mcp-Session-Id` header.
+  Deliberately NOT `Starlette.BaseHTTPMiddleware` (buffers the body, can break
+  streamable-http's long-lived SSE responses).
+
+**Not done:** no new "user" table/auth — `player_id` (self-minted) stays the identity, IP is
+just a signal riding on `log` rows, computed on read.
+
 ## Deploy note
 
 None of the above adds/renames/removes a column or table — new `kind` values, a new edge

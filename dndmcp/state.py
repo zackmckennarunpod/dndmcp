@@ -10,14 +10,38 @@ key or missing field fails loudly here, not three calls later in a tool handler.
 
 from __future__ import annotations
 
+import contextvars
 import json
 import os
 import secrets
 import sqlite3
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 from .models import Campaign, Character, Entity, LogEntry, Room
+
+# Set by the transport layer (server.py's ASGI middleware, web.py's request handlers) for the
+# duration of one inbound request, read by World.log() as its default for ip/session_id — a
+# single choke point so the ~15 existing world.log(...) call sites in server.py need zero
+# changes to start carrying request provenance. Metrics-only (see EVENT_STREAM_SPEC.md); never
+# read for gameplay logic.
+_request_ip: contextvars.ContextVar[str | None] = contextvars.ContextVar("_request_ip", default=None)
+_request_session_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "_request_session_id", default=None)
+
+
+@contextmanager
+def request_context(ip: str | None, session_id: str | None = None):
+    """Wrap one inbound request so every world.log() call made while handling it — however
+    deep in server.py's tool-handler call stack — is tagged with where it came from."""
+    ip_token = _request_ip.set(ip)
+    session_token = _request_session_id.set(session_id)
+    try:
+        yield
+    finally:
+        _request_ip.reset(ip_token)
+        _request_session_id.reset(session_token)
 
 
 def _state_dir() -> Path:
@@ -124,6 +148,11 @@ class World:
         # implicitly part of) via ALTER's DEFAULT, which SQLite applies to existing rows too.
         for table in ("rooms", "character", "log", "entity"):
             self._add_column_if_missing(table, "campaign_id", f"TEXT DEFAULT '{MAIN_CAMPAIGN_ID}'")
+        # Request provenance for metrics (EVENT_STREAM_SPEC.md) — nullable, populated only for
+        # events logged from here on; old rows just read back as NULL, same backfill-free
+        # pattern as every other additive column here.
+        self._add_column_if_missing("log", "ip", "TEXT")
+        self._add_column_if_missing("log", "session_id", "TEXT")
         # Migrate the old singleton `campaign` row (id=1) into campaigns/"main", once — INSERT
         # OR IGNORE makes re-running this on every startup a no-op after the first time.
         self._c.execute(
@@ -477,7 +506,8 @@ class World:
     # --- log (domain events) ---------------------------------------------------
     def log(self, kind: str, text: str, *, player_id: str | None = None,
            campaign_id: str | None = None, subject_type: str | None = None,
-           subject_id: str | None = None) -> None:
+           subject_id: str | None = None, ip: str | None = None,
+           session_id: str | None = None) -> None:
         """Emit a domain event, scoped to a world. `campaign_id` is optional when `player_id`
         is given — resolved from that character's own campaign, so the ~15 existing call
         sites keyed by player_id needed zero changes when multi-world landed. Callers with NO
@@ -489,16 +519,23 @@ class World:
         by category as well as by player. `subject_type`/`subject_id` (e.g. "room"/room_id,
         "item"/item_id, "entity"/entity_id) should be set for anything a later visitor might
         reasonably notice — it's what recent_log(subject_type=..., subject_id=...) surfaces
-        as stigmergic traces. Both or neither — a subject_id without its type is ambiguous."""
+        as stigmergic traces. Both or neither — a subject_id without its type is ambiguous.
+
+        `ip`/`session_id` default to whatever request_context() currently has set (the
+        transport-layer middleware) — existing call sites don't need to pass these."""
         assert (subject_type is None) == (subject_id is None), \
             "subject_type and subject_id must be set together"
         if campaign_id is None:
             ch = self.character(player_id) if player_id else None
             campaign_id = ch.campaign_id if ch else MAIN_CAMPAIGN_ID
+        if ip is None:
+            ip = _request_ip.get()
+        if session_id is None:
+            session_id = _request_session_id.get()
         self._c.execute(
-            "INSERT INTO log (ts,kind,text,player_id,campaign_id,subject_type,subject_id)"
-            " VALUES (?,?,?,?,?,?,?)",
-            (time.time(), kind, text, player_id, campaign_id, subject_type, subject_id))
+            "INSERT INTO log (ts,kind,text,player_id,campaign_id,subject_type,subject_id,ip,session_id)"
+            " VALUES (?,?,?,?,?,?,?,?,?)",
+            (time.time(), kind, text, player_id, campaign_id, subject_type, subject_id, ip, session_id))
         self._c.commit()
 
     def recent_log(self, n: int = 10, *, player_id: str | None = None,

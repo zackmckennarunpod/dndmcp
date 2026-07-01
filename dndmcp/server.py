@@ -21,7 +21,7 @@ from mcp.server.fastmcp import FastMCP
 from . import art, compendium, game, linear_gen, worldgen
 from .linear_world import TicketWorld
 from .models import Campaign, Room
-from .state import MAIN_CAMPAIGN_ID, World
+from .state import MAIN_CAMPAIGN_ID, World, request_context
 
 WELCOME = """This MCP server hosts a solo/shared tabletop RPG (a graph of nodes + edges, with
 Flash-generated content). Call start_adventure to begin; once started, BECOME the Dungeon
@@ -67,7 +67,7 @@ How to run the game:
     move there        -> move(direction)
     any check/attack  -> roll_dice / attack  (NEVER invent dice — always call the tool)
     look around       -> look      check self -> character_sheet     recap -> get_state
-    leave/drop item   -> drop_item(player_id, item_name)
+    leave/drop item   -> drop_item(player_id, item_id) (prefer the id from character_sheet)
     investigate a noise/something unseen nearby -> sense_surroundings(player_id) — NEVER
       just invent what an ambient sound/sensation was from. This returns graded facts (full
       detail for rooms already visited, a vague "something's there" for known-not-visited
@@ -232,13 +232,18 @@ def _render_scene(room: Room, *, player_id: str | None = None, ambient: bool = T
     lines = [f"## {room.name.title()}", "", room.description]
     for f in room.features:
         lines.append(f"  • {f}")
+    has_loot = False
     for c in room.contents:
         if c["type"] == "monster":
             cr = f", CR {c.get('cr')}" if c.get("cr") is not None else ""
             traits = f" [{', '.join(c['traits'])}]" if c.get("traits") else ""
             lines.append(f"\n⚔  A {c['name']} is here (AC {c.get('ac','?')}, HP {c['hp']}{cr}).{traits} It looks hostile.")
         elif c["type"] == "loot":
-            lines.append(f"\n✦  You notice {c['name']}.")
+            has_loot = True
+            lines.append(f"\n✦  You notice {c['name']}. [item_id: {c['id']}]")
+    if has_loot:
+        lines.append("\n(item_id is for your own pick_up_item calls only — never say it to "
+                     "the player, describe items by name.)")
     # Stigmergy: what other players did here before you arrived — FACTS for the DM to weave
     # into narration (same pattern as everything else this function hands the agent), not
     # pre-written prose. Excludes the viewer's own past actions in this room — this is about
@@ -597,12 +602,15 @@ def attack(player_id: str, weapon_bonus: int = 3, damage_dice: str = "1d8") -> s
 
 
 @mcp.tool()
-async def pick_up_item(player_id: str, item_name: str | None = None) -> str:
-    """Pick up something from your current room and add it to your inventory. Omit item_name
-    to grab whatever pre-seeded loot is here. Pass a description to disambiguate OR to try
-    picking up something that ISN'T pre-seeded loot (e.g. "the chair in the corner",
-    "the child's doll") — the world-builder adjudicates whether that's actually plausible to
-    carry (most furniture/fixtures aren't) and fleshes out what it is if so."""
+async def pick_up_item(player_id: str, item_id: str | None = None,
+                       item_name: str | None = None) -> str:
+    """Pick up something from your current room and add it to your inventory. Prefer item_id
+    when you have it — every loot line in look()/move()'s output carries a bracketed
+    [item_id: ...] exactly for this, and it's an exact match (no ambiguity). Omit both to
+    grab whatever pre-seeded loot is here. Pass item_name to disambiguate when you don't have
+    an id, OR to try picking up something that ISN'T pre-seeded loot (e.g. "the chair in the
+    corner", "the child's doll") — the world-builder adjudicates whether that's actually
+    plausible to carry (most furniture/fixtures aren't) and fleshes out what it is if so."""
     ch = world.character(player_id)
     if not ch:
         return "Unknown player_id. Call start_adventure first."
@@ -612,7 +620,9 @@ async def pick_up_item(player_id: str, item_name: str | None = None) -> str:
     loot = [c for c in room.contents if c["type"] == "loot"]
 
     match = None
-    if item_name:
+    if item_id:
+        match = next((c for c in loot if c.get("id") == item_id), None)
+    elif item_name:
         match = next((c for c in loot if item_name.lower() in c["name"].lower()), None)
     elif loot:
         match = loot[0]
@@ -636,6 +646,9 @@ async def pick_up_item(player_id: str, item_name: str | None = None) -> str:
         detail = f" {desc}" if desc else ""
         return f"✦ You take {match['name']}.{detail} Added to your inventory."
 
+    if item_id and not item_name:
+        return f"No item with id {item_id!r} is here. It may already be gone — look() again."
+
     if not item_name:
         return "There's nothing here to pick up."
 
@@ -655,22 +668,28 @@ async def pick_up_item(player_id: str, item_name: str | None = None) -> str:
 
 
 @mcp.tool()
-def drop_item(player_id: str, item_name: str) -> str:
-    """Leave something from your inventory in your current room. This is the other half of
-    the stigmergic model this world runs on: players never talk to or see each other directly
-    (see the "ghosts" framing — you see their live position on the map, nothing more), but a
-    room is shared state, so whatever you drop here is really there for the NEXT player (or
-    you, later) to find and pick_up_item. No Flash call needed — the item already has its
-    description from whenever it was first picked up or generated."""
+def drop_item(player_id: str, item_id: str | None = None, item_name: str | None = None) -> str:
+    """Leave something from your inventory in your current room. Prefer item_id when you have
+    it — character_sheet()'s inventory line carries a bracketed [item_id: ...] exactly for
+    this, and it's an exact match (no ambiguity); item_name falls back to a substring match.
+    This is the other half of the stigmergic model this world runs on: players never talk to
+    or see each other directly (see the "ghosts" framing — you see their live position on the
+    map, nothing more), but a room is shared state, so whatever you drop here is really there
+    for the NEXT player (or you, later) to find and pick_up_item. No Flash call needed — the
+    item already has its description from whenever it was first picked up or generated."""
     ch = world.character(player_id)
     if not ch:
         return "Unknown player_id. Call start_adventure first."
     room = _require_room(ch.location_id)
-    match = next((i for i in ch.inventory if item_name.lower() in i["name"].lower()), None)
+    match = None
+    if item_id:
+        match = next((i for i in ch.inventory if i.get("id") == item_id), None)
+    elif item_name:
+        match = next((i for i in ch.inventory if item_name.lower() in i["name"].lower()), None)
     if not match:
-        return f"You aren't carrying anything called {item_name!r}."
-    item_id = match.get("id") or match["name"]  # matches remove_item's own fallback key
-    world.remove_item(player_id, item_id)
+        return f"You aren't carrying anything called {(item_id or item_name)!r}."
+    remove_id = match.get("id") or match["name"]  # matches remove_item's own fallback key
+    world.remove_item(player_id, remove_id)
     room.contents.append({"type": "loot", "id": match.get("id") or uuid.uuid4().hex[:8],
                           "name": match["name"]})
     world.upsert_room(room_id=room.id, campaign_id=ch.campaign_id, name=room.name,
@@ -883,10 +902,11 @@ def character_sheet(player_id: str) -> str:
     if not ch:
         return "Unknown player_id. Call start_adventure first."
     stats = "  ".join(f"{k} {v}" for k, v in ch.stats.items())
-    items = ", ".join(i["name"] for i in ch.inventory) or "empty"
+    items = ", ".join(f"{i['name']} [item_id: {i.get('id')}]" for i in ch.inventory) or "empty"
     return (f"**{ch.name}** — level {ch.level} {ch.klass}\n"
             f"HP {ch.hp}/{ch.max_hp}   AC {ch.ac}\n{stats}\n"
-            f"Inventory: {items}")
+            f"Inventory: {items} (item_id is for your own drop_item calls only — never say it "
+            f"to the player, describe items by name.)")
 
 
 @mcp.tool()
@@ -972,6 +992,46 @@ async def complete_ticket(ticket_id: str) -> str:
             f"{follow_up.description}")
 
 
+class _RequestContextMiddleware:
+    """Pure ASGI middleware — captures the inbound request's client IP and MCP session id
+    into request_context() for the lifetime of the request, so world.log() calls anywhere
+    deeper in the tool-handler call stack this request triggers pick them up automatically
+    (see state.py's request_context/World.log). Deliberately NOT Starlette's
+    BaseHTTPMiddleware, which buffers the response body and can break streamable-http's
+    long-lived SSE responses — this only reads scope/headers and passes everything through."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope.get("headers", [])}
+        # X-Forwarded-For first (the pod sits behind Runpod's proxy — scope["client"] there is
+        # the proxy, not the real caller); fall back to scope["client"] for local/direct runs.
+        xff = headers.get("x-forwarded-for", "")
+        client = scope.get("client")
+        ip = xff.split(",")[0].strip() if xff else (client[0] if client else None)
+        session_id = headers.get("mcp-session-id") or None
+        with request_context(ip, session_id):
+            await self.app(scope, receive, send)
+
+
+def _run_http(*, sse: bool) -> None:
+    """Equivalent to FastMCP.run(transport=...), but with _RequestContextMiddleware wrapped
+    around the Starlette app first. mcp.run() builds and serves the app in one call with no
+    hook to insert middleware, so this replicates its two internal lines instead (see
+    mcp.server.fastmcp.server.FastMCP.run_streamable_http_async / run_sse_async)."""
+    import uvicorn
+
+    app = mcp.sse_app() if sse else mcp.streamable_http_app()
+    app = _RequestContextMiddleware(app)
+    config = uvicorn.Config(app, host=mcp.settings.host, port=mcp.settings.port,
+                            log_level=mcp.settings.log_level.lower())
+    asyncio.run(uvicorn.Server(config).serve())
+
+
 def main() -> None:
     """stdio locally (Claude Desktop launches it); HTTP on a pod (remote brain).
 
@@ -993,7 +1053,7 @@ def main() -> None:
         # its public URL (that's the whole pod-hosted multiplayer premise), so disable it.
         mcp.settings.transport_security = TransportSecuritySettings(
             enable_dns_rebinding_protection=False)
-        mcp.run(transport="sse" if transport == "sse" else "streamable-http")
+        _run_http(sse=(transport == "sse"))
     else:
         mcp.run()  # stdio
 
