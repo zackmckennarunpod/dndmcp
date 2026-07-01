@@ -100,6 +100,11 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
   transition:background .15s}
 #shareBtn:hover{background:var(--visited)}
 #shareBtn.copied{background:var(--ghost);color:var(--bg)}
+#exportStoryBtn{display:none;background:var(--link);color:var(--ghost-bright);border:1px solid var(--border);
+  border-radius:6px;padding:7px 11px;font:600 12px 'IBM Plex Mono',monospace;cursor:pointer;
+  transition:background .15s}
+#exportStoryBtn:hover{background:var(--visited)}
+#exportStoryBtn:disabled{opacity:.6;cursor:default}
 #streamFilterBtn{background:transparent;color:var(--muted);border:1px solid var(--border);
   border-radius:5px;padding:2px 9px;font:600 10.5px 'IBM Plex Mono',monospace;cursor:pointer;
   text-transform:none;letter-spacing:0}
@@ -193,6 +198,8 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
   <div class=panel><h2>This world</h2><div class=ch id=worldInfo>—</div></div>
   <div class=panel><h2>Character</h2><div class=ch id=char>—</div>
    <button id=exportStoryBtn style="margin-top:10px;width:100%">📜 Export story</button></div>
+   <!-- exportStoryBtn is display:none by default (see CSS) — only shown once JS confirms
+        ?player= is actually present, since without it the button can't do anything. -->
   <div class=panel><h2>Selected room</h2><div class=ch id=roomInfo><span class=empty>click a room on the map</span></div></div>
   <div class=panel><h2>Recent</h2><div class=log id=log></div></div>
  </aside>
@@ -208,6 +215,8 @@ const params = new URLSearchParams(location.search);
 const playerId = params.get('player');
 const campaignId = params.get('campaign') || 'main';
 const W=700, H=420;
+
+if (playerId) document.getElementById('exportStoryBtn').style.display = 'block';
 
 // Share: copies join instructions, not just a URL — actually PLAYING requires the friend's
 // Connect & play panel: generic copy-to-clipboard for the install command / Desktop config,
