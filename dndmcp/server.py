@@ -14,6 +14,7 @@ import asyncio
 import os
 import random
 import secrets
+import time
 import uuid
 
 from mcp.server.fastmcp import FastMCP
@@ -414,6 +415,16 @@ def sense_surroundings(player_id: str) -> str:
 # encounter instead of getting a full identity.
 _NPC_DENSITY_LIMIT = 2
 
+# A player synchronously waiting inside move() must never be held hostage by a hung/cold Flash
+# endpoint — worldgen.generate_room_content's own retry loop (up to 4 attempts x 150s each) has
+# no overall budget on its own, so left unbounded a single reactive move() could stall up to
+# ~10min (the MCP client times out long before that, which just reads as "the game froze" mid-
+# play). Bound the WHOLE reactive generate-and-link operation (room content + NPC persona) to
+# this many seconds, then fall back to procedural — realistically 1-2 Flash attempts, not a
+# hardcoded attempt count. The background prefetch path (_prefetch_frontier) intentionally does
+# NOT pass this — it's not blocking a player, so it keeps the existing patient behavior.
+_MOVE_GEN_DEADLINE_S = 25.0
+
 
 def _spawn_phrase(name: str, kind: str) -> str:
     """"<name> the <kind> appeared" reads fine when a persona was actually invented (a real
@@ -426,7 +437,8 @@ def _spawn_phrase(name: str, kind: str) -> str:
 async def _maybe_spawn_entity_persona(new_room: dict, dest_id: str, theme: str,
                                       nearby_room_ids: list[str], *, campaign_id: str,
                                       nearby: list[tuple[str, str]] | None = None,
-                                      recent_events: list[str] | None = None) -> None:
+                                      recent_events: list[str] | None = None,
+                                      deadline_s: float | None = None) -> None:
     """If this room's procedural gen placed a monster, decide (deterministically, from what's
     already alive nearby) whether it's worth a full LLM persona, generate one, and store it
     as a first-class `entity` row. Mutates new_room['contents'] in place so the monster's
@@ -436,7 +448,10 @@ async def _maybe_spawn_entity_persona(new_room: dict, dest_id: str, theme: str,
     (name, kind) pairs and `recent_events` (nearby log text) are the SAME context
     generate_room_content already gets for this room — a freshly-spawned NPC's persona
     should be just as regionally/event-aware as the room it's appearing in, not invented
-    in a vacuum with less context than its own surroundings."""
+    in a vacuum with less context than its own surroundings. `deadline_s`: same budget
+    contract as worldgen.generate_room_content's — None (default, background prefetch) is
+    patient; a real budget (from move()'s reactive path, whatever's left after room-content
+    generation already ate into it) bounds this persona call too."""
     mon = next((c for c in new_room["contents"] if c.get("type") == "monster"), None)
     if not mon:
         return
@@ -446,7 +461,7 @@ async def _maybe_spawn_entity_persona(new_room: dict, dest_id: str, theme: str,
     persona = await worldgen.generate_npc_persona(
         mon, theme, new_room["name"], new_room.get("kind", ""), new_room["description"],
         nearby=nearby, recent_events=recent_events,
-        existing_names=world.entity_names_in(campaign_id))
+        existing_names=world.entity_names_in(campaign_id), deadline_s=deadline_s)
     mon["name"] = persona["name"]
     world.upsert_entity(entity_id=mon["id"], campaign_id=campaign_id, kind=kind,
                         name=persona["name"], location_id=dest_id,
@@ -458,12 +473,18 @@ async def _maybe_spawn_entity_persona(new_room: dict, dest_id: str, theme: str,
 
 
 async def _generate_and_link(dest_id: str, theme: str, campaign_id: str, salt: str, *,
-                             entry_from: str, back_to_id: str, premise: str = "") -> None:
+                             entry_from: str, back_to_id: str, premise: str = "",
+                             deadline_s: float | None = None) -> None:
     """Generate one room and apply the same bidirectional-link fix as the reactive path —
     used by both move() (reactive) and the fan-out prefetch (speculative) below. `salt` is
     the owning campaign's — see game._seeded for why every room in a world must share it.
     `premise`: the campaign's premise text — see worldgen.generate_room_content for why a
-    bare theme label isn't enough grounding on its own."""
+    bare theme label isn't enough grounding on its own. `deadline_s`: total wall-clock budget
+    for THIS WHOLE CALL (room content + any NPC persona) — None (default) is the existing
+    patient behavior, used by the background prefetch path since it never blocks a player.
+    move() passes a real budget (_MOVE_GEN_DEADLINE_S) so a hung/cold Flash endpoint can't
+    stall a player who's synchronously waiting on this call."""
+    start = time.monotonic()
     nearby_full = _nearby_region(back_to_id, depth=2)
     nearby = [(name, kind) for name, kind, _rid in nearby_full]
     # Stigmergy feeding INTO generation, not just narration: what just happened in the room
@@ -476,10 +497,17 @@ async def _generate_and_link(dest_id: str, theme: str, campaign_id: str, salt: s
     new_room = await worldgen.generate_room_content(
         dest_id, theme, entry_from=entry_from, nearby=nearby, recent_events=recent_events,
         salt=salt, premise=premise,
-        existing_names=[name for _, name, _ in world.room_ids_in(campaign_id)])
+        existing_names=[name for _, name, _ in world.room_ids_in(campaign_id)],
+        deadline_s=deadline_s)
     new_room["exits"][game.opposite_of(entry_from)] = back_to_id
+    # Whatever's left of the budget after room-content generation (which can itself burn the
+    # whole thing across retries) is what the persona call gets — never a fresh full budget,
+    # or the two calls together could still add up to well beyond deadline_s.
+    persona_deadline = (max(deadline_s - (time.monotonic() - start), 0.0)
+                        if deadline_s is not None else None)
     await _maybe_spawn_entity_persona(new_room, dest_id, theme, [rid for _, _, rid in nearby_full],
-                                      campaign_id=campaign_id, nearby=nearby, recent_events=recent_events)
+                                      campaign_id=campaign_id, nearby=nearby,
+                                      recent_events=recent_events, deadline_s=persona_deadline)
     world.upsert_room(room_id=dest_id, campaign_id=campaign_id, name=new_room["name"],
                       description=new_room["description"], exits=new_room["exits"],
                       contents=new_room["contents"], features=new_room.get("features"),
@@ -524,7 +552,8 @@ async def move(player_id: str, direction: str) -> str:
         # duplicate room on backtrack instead of returning you home. _generate_and_link
         # forces the real link.
         await _generate_and_link(dest_id, camp.theme, camp.id, camp.salt,
-                                 entry_from=direction, back_to_id=here.id, premise=camp.premise)
+                                 entry_from=direction, back_to_id=here.id, premise=camp.premise,
+                                 deadline_s=_MOVE_GEN_DEADLINE_S)
     world.set_location(player_id, dest_id)
     world.mark_visited(dest_id)
     world.discover(player_id, dest_id)
