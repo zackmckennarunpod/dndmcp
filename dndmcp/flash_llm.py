@@ -67,7 +67,10 @@ async def ensure() -> str:
             name=ENDPOINT_NAME, image=IMAGE, gpu=GpuGroup.ADA_24, workers=(0, 3),
             idle_timeout=300, template=PodTemplate(containerDiskInGb=50),
             min_cuda_version=CudaVersion.V13_0,
-            env={"MODEL_NAME": MODEL, "MAX_MODEL_LEN": "8192", "GPU_MEMORY_UTILIZATION": "0.90"},
+            env={"MODEL_NAME": MODEL, "MAX_MODEL_LEN": "8192", "GPU_MEMORY_UTILIZATION": "0.90",
+                 # verified 2026-07-01 on a disposable test endpoint: only changes behavior for
+                 # requests that include tools[]; plain chat (world-gen's calls) is unaffected.
+                 "ENABLE_AUTO_TOOL_CHOICE": "true", "TOOL_CALL_PARSER": "hermes"},
         )
         try:
             await asyncio.wait_for(ep.run({"input": {}}), timeout=10)

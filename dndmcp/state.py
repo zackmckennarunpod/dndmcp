@@ -29,7 +29,7 @@ def _state_dir() -> Path:
 # state, not a real player's save — a version mismatch means "start clean," not "write a
 # bespoke ALTER migration and hope every edge case is covered." One number, one source of
 # truth: SQLite's own `PRAGMA user_version`, no separate tracking table to drift out of sync.
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 class World:
@@ -84,15 +84,20 @@ class World:
             CREATE INDEX IF NOT EXISTS idx_edges_from ON edges(from_type, from_id);
             CREATE INDEX IF NOT EXISTS idx_edges_to ON edges(to_type, to_id);
             CREATE INDEX IF NOT EXISTS idx_edges_type ON edges(edge_type);
-            -- location_id: which room this event happened in, if any (world-level events like
-            -- "adventure.started" have none). This is what makes stigmergy possible — a LATER
-            -- player entering this room can query "what happened here before I arrived,"
-            -- distinct from player_id (whose events these are) and kind_prefix (what category).
+            -- subject_type/subject_id: a generic (aggregate_type, aggregate_id) pair, same
+            -- shape as edges.from_type/from_id — what this event is ABOUT, distinct from
+            -- player_id (who caused it). "room"+room_id is what makes stigmergy possible (a
+            -- LATER player entering a room can query "what happened here"); "item"+item_id /
+            -- "entity"+entity_id are the same query for a specific object/monster once those
+            -- have stable ids (see game.py/compendium.py/worldgen.py content-dict "id" field).
+            -- One pair, not a column per aggregate type — a fixed enum of columns here would
+            -- be exactly the rigid-schema problem WORLD_SCHEMA.md's loose-envelope principle
+            -- argues against; new subject types need zero schema change to start using.
             CREATE TABLE IF NOT EXISTS log (
                 seq INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, kind TEXT, text TEXT,
-                player_id TEXT, location_id TEXT
+                player_id TEXT, subject_type TEXT, subject_id TEXT
             );
-            CREATE INDEX IF NOT EXISTS idx_log_location ON log(location_id);
+            CREATE INDEX IF NOT EXISTS idx_log_subject ON log(subject_type, subject_id);
             """
         )
         self._c.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
@@ -251,18 +256,30 @@ class World:
         self._c.commit()
 
     # --- log (domain events) ---------------------------------------------------
-    def log(self, kind: str, text: str, *, player_id: str | None = None) -> None:
+    def log(self, kind: str, text: str, *, player_id: str | None = None,
+           subject_type: str | None = None, subject_id: str | None = None) -> None:
         """Emit a domain event. `kind` should be dotted-namespace: "player.moved",
         "room.generated", "combat.resolved", "memory.noted", "adventure.started" — so the
-        stream is filterable by category as well as by player."""
-        self._c.execute("INSERT INTO log (ts,kind,text,player_id) VALUES (?,?,?,?)",
-                        (time.time(), kind, text, player_id))
+        stream is filterable by category as well as by player. `subject_type`/`subject_id`
+        (e.g. "room"/room_id, "item"/item_id, "entity"/entity_id) should be set for anything
+        a later visitor might reasonably notice — it's what recent_log(subject_type=...,
+        subject_id=...) surfaces as stigmergic traces. Both or neither — a subject_id without
+        its type is ambiguous."""
+        assert (subject_type is None) == (subject_id is None), \
+            "subject_type and subject_id must be set together"
+        self._c.execute(
+            "INSERT INTO log (ts,kind,text,player_id,subject_type,subject_id) VALUES (?,?,?,?,?,?)",
+            (time.time(), kind, text, player_id, subject_type, subject_id))
         self._c.commit()
 
     def recent_log(self, n: int = 10, *, player_id: str | None = None,
-                   kind_prefix: str | None = None) -> list[LogEntry]:
+                   kind_prefix: str | None = None, subject_type: str | None = None,
+                   subject_id: str | None = None, exclude_player_id: str | None = None) -> list[LogEntry]:
         """Recent events, optionally filtered to one player (their own events + world-level
-        ones with no actor) and/or one event category (e.g. kind_prefix="combat")."""
+        ones with no actor), one event category (e.g. kind_prefix="combat"), one subject
+        (subject_type+subject_id — the stigmergic-trace query: "what happened to/in this
+        room/item/entity before I arrived"), and/or excluding one player's own events (so a
+        trace query doesn't narrate the viewer's own last action back at them)."""
         where, params = [], []
         if player_id is not None:
             where.append("(player_id = ? OR player_id IS NULL)")
@@ -270,9 +287,16 @@ class World:
         if kind_prefix is not None:
             where.append("kind LIKE ?")
             params.append(f"{kind_prefix}%")
+        if subject_type is not None:
+            where.append("subject_type = ? AND subject_id = ?")
+            params.extend([subject_type, subject_id])
+        if exclude_player_id is not None:
+            where.append("(player_id IS NULL OR player_id != ?)")
+            params.append(exclude_player_id)
         clause = f"WHERE {' AND '.join(where)}" if where else ""
         rows = self._c.execute(
-            f"SELECT ts,kind,text,player_id FROM log {clause} ORDER BY seq DESC LIMIT ?",
+            f"SELECT ts,kind,text,player_id,subject_type,subject_id FROM log {clause}"
+            f" ORDER BY seq DESC LIMIT ?",
             (*params, n),
         ).fetchall()
         return [LogEntry.model_validate(dict(r)) for r in reversed(rows)]

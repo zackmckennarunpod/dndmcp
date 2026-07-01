@@ -75,24 +75,3 @@ async def npc_reply(*, persona: str, memory: list[dict], situation: str, player_
             return {"text": _stub_reply(persona, player_says),
                     "via": f"stub (flash error: {type(exc).__name__})"}
     return {"text": _stub_reply(persona, player_says), "via": "stub"}
-
-
-# --- general generation proxy — reused by the WORLD-BUILDER (primary Flash use) ----------
-WORLDGEN_ENABLED = os.environ.get("FLASH_WORLDGEN", "0") == "1"
-
-
-async def complete(prompt: str, *, max_tokens: int = 400, temperature: float = 0.9) -> str | None:
-    """Proxy a freeform completion to the Flash LLM endpoint. Returns None if unavailable
-    (caller falls back to procedural generation). Same endpoint as NPC dialogue."""
-    if not (WORLDGEN_ENABLED and NPC_ENDPOINT_ID):
-        return None
-    try:
-        from runpod_flash import Endpoint
-        ep = Endpoint(id=NPC_ENDPOINT_ID)
-        resp = await ep.post("/v1/chat/completions", {
-            "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": max_tokens, "temperature": temperature,
-        })
-        return resp["choices"][0]["message"]["content"].strip()
-    except Exception:
-        return None

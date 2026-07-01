@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import random
 import re
+import uuid
 
 DIRECTIONS = ["north", "south", "east", "west", "up", "down"]
 OPPOSITE = {"north": "south", "south": "north", "east": "west", "west": "east",
@@ -136,9 +137,10 @@ def generate_room(room_id: str, theme: str, *, entry_from: str | None = None) ->
     roll_kind = rng.random()
     if roll_kind < 0.45:
         mon, hp, dmg = rng.choice(t["monsters"])
-        contents.append({"type": "monster", "name": mon, "hp": hp, "max_hp": hp, "damage": dmg})
+        contents.append({"type": "monster", "id": uuid.uuid4().hex[:8], "name": mon,
+                         "hp": hp, "max_hp": hp, "damage": dmg})
     elif roll_kind < 0.75:
-        contents.append({"type": "loot", "name": rng.choice(t["loot"])})
+        contents.append({"type": "loot", "id": uuid.uuid4().hex[:8], "name": rng.choice(t["loot"])})
     return {"id": room_id, "name": name, "exits": exit_map, "contents": contents,
             "description": f"You stand in {name_with_article(name)}.", "kind": ""}
 

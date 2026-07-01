@@ -34,7 +34,9 @@ class Character(BaseModel):
     max_hp: int
     ac: int = 12
     stats: dict[str, int]
-    inventory: list[dict] = []  # {"name": ..., "description": ...} — see pick_up_item/generate_item_content
+    inventory: list[dict] = []  # {"id": ..., "name": ..., "description": ...} — id is stable
+    # across the item's move from room.contents to here (same id, new owner) — see
+    # pick_up_item/generate_item_content and log.subject_type="item".
     location_id: str
 
 
@@ -62,4 +64,6 @@ class LogEntry(BaseModel):
     kind: str
     text: str
     player_id: str | None = None
+    subject_type: str | None = None  # "room" | "item" | "entity" | ... — see state.py.log()
+    subject_id: str | None = None
     ts: float = 0.0

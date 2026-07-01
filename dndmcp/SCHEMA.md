@@ -69,13 +69,15 @@ Monster fields beyond `type`/`name`/`hp` are populated from the SRD compendium
 (`compendium.py`) when a real monster is placed, or from the procedural theme table
 (`game.py`) as a lighter fallback — `attack` reads `.get(...)` with defaults, so both work.
 
-### `log` (event history, append-only)
+### `log` (event history, append-only) — SCHEMA_VERSION 6
 | column | type | notes |
 |---|---|---|
 | `seq` | INTEGER PK autoincrement | |
 | `ts` | REAL | unix timestamp |
-| `kind` | TEXT | `"start"`, `"move"`, `"combat"`, `"item"` |
+| `kind` | TEXT | dotted-namespace, e.g. `"player.moved"`, `"combat.resolved"`, `"item.picked_up"`, `"adventure.started"`, `"room.generated"`, `"memory.noted"` |
 | `text` | TEXT | human-readable line, already narration-ready |
+| `player_id` | TEXT, nullable | who caused it; null for world-level events with no single actor |
+| `subject_type` / `subject_id` | TEXT, nullable | generic (aggregate_type, aggregate_id) pair — what the event is ABOUT, not who caused it. Currently only `"room"`/room_id is populated (combat/item-pickup events, queried by `world.recent_log(subject_type="room", subject_id=...)` for stigmergic trace narration in `look()`). `"item"`/item_id and `"entity"`/entity_id are valid once those have stable ids — monster/loot content dicts already carry an `"id"` field (`compendium.py`/`game.py`/`worldgen.py`) but nothing logs against it yet. |
 
 → Pydantic model: `LogEntry`.
 

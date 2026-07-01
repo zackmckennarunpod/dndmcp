@@ -6,13 +6,16 @@ there) and we store it in the graph. By the time the agent enters and queries th
 it's ready. Burst to generate, scale to zero when exploration pauses.
 
 Stub→real: with Flash off (default), falls back to the procedural generator (game.py) so the
-world still builds — just template-rich instead of model-rich. Flip FLASH_WORLDGEN=1 to use Flash.
+world still builds — just template-rich instead of model-rich. Flip DND_FLASH_LLM=1 to use
+Flash (see flash_llm.py — that's the real switch; ignore any other FLASH_* flag you see
+referenced elsewhere, they gate unrelated/unused code paths).
 """
 
 from __future__ import annotations
 
 import json
 import random
+import uuid
 
 from . import compendium, flash_llm, game, setting
 
@@ -97,7 +100,8 @@ async def generate_room_content(room_id: str, theme: str, *, entry_from: str | N
                     item = (item.get("description") or item.get("name") or item.get("item_name")
                            or item.get("type") or item.get("item_type") or next(iter(item.values()), ""))
                 if item:
-                    base.setdefault("contents", []).append({"type": "loot", "name": str(item)})
+                    base.setdefault("contents", []).append(
+                        {"type": "loot", "id": uuid.uuid4().hex[:8], "name": str(item)})
             want_monster = bool(data.get("has_monster", want_monster))
             via = "flash"
         except Exception:
@@ -144,7 +148,8 @@ async def generate_item_content(description: str, theme: str, room_context: str 
     (structured JSON, decides portability); falls back to procedural (always portable — without
     a model to judge plausibility, permissive keeps the game playable with Flash off).
     Returns {"name", "description", "portable", "reason"}."""
-    base = {"name": description.strip().capitalize(), "description": "", "portable": True, "reason": None}
+    base = {"id": uuid.uuid4().hex[:8], "name": description.strip().capitalize(),
+           "description": "", "portable": True, "reason": None}
     messages = _item_messages(description, theme, room_context)
     gen = await flash_llm.generate(messages, max_tokens=120, temperature=0.8)
     if gen:
