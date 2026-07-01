@@ -66,6 +66,12 @@ How to run the game:
     move there        -> move(direction)
     any check/attack  -> roll_dice / attack  (NEVER invent dice — always call the tool)
     look around       -> look      check self -> character_sheet     recap -> get_state
+- The player will do things none of the above cover — read a diary, examine something
+  closely, search a corpse, notice a detail. ALWAYS call log_event(player_id, text) for
+  these. It's what makes the moment durable (future players see it as a trace when they
+  visit the same room/item) instead of just narrated once and forgotten. If you invent
+  actual content (what the diary SAYS, what the search TURNS UP), put that content in the
+  log_event text — that's the only place it gets remembered.
 - Narrate results dramatically but keep mechanics HONEST: use the exact numbers the tools return.
 - The world is PERSISTENT — the tools remember. Refer back to what happened; the world is real.
 - Room/character state is rigid on purpose (mechanics need one source of truth). For anything
@@ -219,13 +225,18 @@ def _render_scene(room: Room, *, player_id: str | None = None, ambient: bool = T
 @mcp.tool()
 async def start_adventure(theme: str = "gothic horror", character_name: str = "Wanderer",
                           character_class: str = "Fighter",
-                          campaign_id: str | None = None) -> str:
+                          campaign_id: str | None = None, premise: str | None = None) -> str:
     """Begin your adventure. `campaign_id` picks WHICH world:
       - omit it (or pass "main") -> the persistent default world everyone lands in
       - "new" -> create a brand-new world; the reply gives you back its shareable id — send
         that to others so they can join THIS world with campaign_id=<that id>
       - any other value -> join that specific existing world by its id (a clear error if it
         doesn't exist)
+    `premise` (only used when actually creating a new world — ignored when joining an
+    existing one): a short, evocative, YOUR-OWN-WORDS description of THIS world's opening
+    hook. Write one — don't rely on the generic fallback. Loose/free-form on purpose (see
+    WORLD_SCHEMA.md's envelope-fixed-content-loose principle) — this is creative writing,
+    not a form to fill in.
     Returns your player_id — pass it as player_id to every other tool call — and a link to
     watch your position live on the map."""
     player_id = uuid.uuid4().hex[:12]
@@ -243,8 +254,8 @@ async def start_adventure(theme: str = "gothic horror", character_name: str = "W
     camp = world.campaign(target_id)
     if not camp:
         start_id = "r0" if target_id == MAIN_CAMPAIGN_ID else f"{target_id}:r0"
-        premise = (f"A {theme} adventure. Something stirs in the dark, "
-                   f"seeking what others feared to find.")
+        premise = premise or (f"A {theme} adventure. Something stirs in the dark, "
+                              f"seeking what others feared to find.")
         camp = world.create_campaign(target_id, theme=theme, premise=premise, start_room=start_id)
         gen = await worldgen.generate_room_content(start_id, theme, salt=camp.salt)
         await _maybe_spawn_entity_persona(gen, start_id, theme, [])  # no neighbors yet
@@ -394,6 +405,27 @@ def remember(player_id: str, note: str) -> str:
         return "Unknown player_id. Call start_adventure first."
     world.log("memory.noted", note, player_id=player_id)
     return "Noted."
+
+
+@mcp.tool()
+def log_event(player_id: str, text: str, subject_type: str | None = None,
+             subject_id: str | None = None) -> str:
+    """Record something the player did that no other tool covers — reading a diary,
+    examining something closely, discovering a clue, any ad-hoc noteworthy moment. Unlike
+    remember() (your own private continuity notes), this becomes a STIGMERGIC TRACE: later
+    players who visit the same room/item/entity will see it surfaced as "Traces of those who
+    came before" (same mechanism _render_scene already uses), and it appears live on the
+    world event stream immediately. Call this whenever something world-changing or
+    noteworthy happens that move/attack/pick_up_item/talk_to don't already cover — it's what
+    makes an ad-hoc moment durable and visible to others, not just narrated and forgotten.
+    subject_type/subject_id default to the player's CURRENT ROOM if omitted (the common
+    case — most ad-hoc moments are about where the player currently is)."""
+    ch = world.character(player_id)
+    if not ch:
+        return "Unknown player_id. Call start_adventure first."
+    st, sid = (subject_type, subject_id) if subject_type else ("room", ch.location_id)
+    world.log("world.event", text, player_id=player_id, subject_type=st, subject_id=sid)
+    return "Recorded."
 
 
 @mcp.tool()
