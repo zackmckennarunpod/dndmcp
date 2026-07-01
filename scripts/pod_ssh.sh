@@ -9,7 +9,7 @@
 #   scripts/pod_ssh.sh copy <local> <remote>    -> scp-style single file push (via ssh cat)
 set -euo pipefail
 
-POD_ID="${DNDMCP_POD_ID:-tlm1x7bwn62jwg}"
+POD_ID="${DNDMCP_POD_ID:-ldghdgi0xxn6jj}"
 KEY="${DNDMCP_SSH_KEY:-$HOME/.ssh/id_ed25519}"
 
 resolve() {

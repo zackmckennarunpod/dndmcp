@@ -18,7 +18,7 @@ if [ "${1:-}" = "--local" ]; then
   exit 0
 fi
 
-POD_ID="${1:-tlm1x7bwn62jwg}"
+POD_ID="${1:-ldghdgi0xxn6jj}"
 URL="https://${POD_ID}-8000.proxy.runpod.net/mcp"
 
 claude mcp add --transport http dndmcp -s user "$URL"
