@@ -184,7 +184,32 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
  <span id=flashcount>⚡ 0 Flash calls</span>
  <span id=metricsLink title="Click to see system-wide metrics for this world">📊 Metrics</span>
  <button id=shareBtn title="Copies instructions to paste into your agent (Claude Code/Desktop) running dndmcp">🔗 Share</button></header>
-<details open class=panel style="margin:16px 18px 16px">
+<main style="margin-top:16px">
+ <div class=panel><h2>World map (shared, live)</h2><div class=sub id=whereInMap style="margin-bottom:8px">—</div><div id=map><span id=mapEmpty class=empty>no adventure yet — start one in your agent</span><div id=nodeTooltip></div></div></div>
+ <aside style="display:flex;flex-direction:column;gap:16px">
+  <details open class=panel>
+   <summary>Character</summary>
+   <div class=body style="margin-top:6px">
+    <div class=ch id=char>—</div>
+    <button id=exportStoryBtn style="margin-top:10px;width:100%">📜 Export story</button>
+    <!-- exportStoryBtn is display:none by default (see CSS) — only shown once JS confirms
+         ?player= is actually present, since without it the button can't do anything. -->
+   </div>
+  </details>
+  <details open class=panel>
+   <summary>Selected room</summary>
+   <div class=body style="margin-top:6px"><div class=ch id=roomInfo><span class=empty>click a room on the map</span></div></div>
+  </details>
+  <details open class=panel>
+   <summary>Recent</summary>
+   <div class=body style="margin-top:6px"><div class=log id=log></div></div>
+  </details>
+ </aside>
+</main>
+<!-- Moved below the map on purpose: this used to sit above it, pushing the map (the actual
+     game) below a scroll on a cold homepage visit. This info is worth having, just not
+     worth blocking the primary content for. -->
+<details class=panel style="margin:16px 18px 16px">
  <summary>This world</summary>
  <div class=ch id=worldInfo style="margin-top:10px">—</div>
  <div class=ch id=questList style="margin-top:10px">—</div>
@@ -248,28 +273,6 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
   other trace.</p>
  </div>
 </div>
-<main>
- <div class=panel><h2>World map (shared, live)</h2><div class=sub id=whereInMap style="margin-bottom:8px">—</div><div id=map><span id=mapEmpty class=empty>no adventure yet — start one in your agent</span><div id=nodeTooltip></div></div></div>
- <aside style="display:flex;flex-direction:column;gap:16px">
-  <details open class=panel>
-   <summary>Character</summary>
-   <div class=body style="margin-top:6px">
-    <div class=ch id=char>—</div>
-    <button id=exportStoryBtn style="margin-top:10px;width:100%">📜 Export story</button>
-    <!-- exportStoryBtn is display:none by default (see CSS) — only shown once JS confirms
-         ?player= is actually present, since without it the button can't do anything. -->
-   </div>
-  </details>
-  <details open class=panel>
-   <summary>Selected room</summary>
-   <div class=body style="margin-top:6px"><div class=ch id=roomInfo><span class=empty>click a room on the map</span></div></div>
-  </details>
-  <details open class=panel>
-   <summary>Recent</summary>
-   <div class=body style="margin-top:6px"><div class=log id=log></div></div>
-  </details>
- </aside>
-</main>
 <div style="padding:0 18px 18px" id=streamSection>
  <div class=panel><h2><span id=streamDot></span><span id=streamTitle>Live world stream — every player, every session</span>
    <button id=streamFilterBtn style="margin-left:10px">⚡ Flash calls only</button></h2>
@@ -460,10 +463,17 @@ const nodeLayer = zoomLayer.append('g');
 // re-fits itself to whatever's actually in the graph, so a growing world never silently drifts
 // half off-screen with no indication anything's missing.
 let userInteracted = false;
-const zoomBehavior = d3.zoom().scaleExtent([0.25, 4]).on('zoom', (event) => {
-  zoomLayer.attr('transform', event.transform);
-  if(event.sourceEvent) userInteracted = true;
-});
+const zoomBehavior = d3.zoom().scaleExtent([0.25, 4])
+  // Plain mouse-wheel over the SVG used to always zoom, which d3 implements by calling
+  // preventDefault() on the wheel event — that's what trapped page scroll the instant the
+  // cursor crossed into the map, making it feel "stuck" and impossible to scroll past.
+  // Require Ctrl/Cmd+wheel to zoom (the same convention Google Maps/Figma use) so a plain
+  // scroll always scrolls the PAGE; drag-to-pan (mousedown, not wheel) is untouched.
+  .filter((event) => event.type !== 'wheel' ? !event.button : (event.ctrlKey || event.metaKey))
+  .on('zoom', (event) => {
+    zoomLayer.attr('transform', event.transform);
+    if(event.sourceEvent) userInteracted = true;
+  });
 svg.call(zoomBehavior);
 
 function fitToView(nodes){
