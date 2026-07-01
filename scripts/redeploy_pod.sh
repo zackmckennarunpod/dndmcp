@@ -32,7 +32,10 @@ mkdir -p /data
 # one 7B endpoint now — one warm worker instead of two, and 7B beats the 1.5B on JSON/tool
 # compliance (fewer malformed-sample retries). The model value must match that endpoint's
 # own loaded MODEL_NAME; flash_llm resolves the endpoint by name and never reconfigures it.
-DNDMCP_STATE_DIR=/data DNDMCP_TRANSPORT=http PORT=8000 GUI_PORT=8002 DND_FLASH_LLM=1 \
+# DND_FLASH_ART=1: real per-room pixel art via Flash (flash_art.py/art.py) instead of the
+# ASCII placeholder. This is just the default — admin_flags.py can override it live with no
+# restart (scripts/pod_set_flag.sh flash_art 0/1), for backing it out fast if needed.
+DNDMCP_STATE_DIR=/data DNDMCP_TRANSPORT=http PORT=8000 GUI_PORT=8002 DND_FLASH_LLM=1 DND_FLASH_ART=1 \
   DND_LLM_ENDPOINT=dnd-dm-vllm DND_LLM_MODEL='Qwen/Qwen2.5-7B-Instruct' RUNPOD_API_KEY='$RUNPOD_API_KEY' \
   setsid nohup python3.11 -m dndmcp.app > /tmp/dndmcp.log 2>&1 < /dev/null &
 sleep 3

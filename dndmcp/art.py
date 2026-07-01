@@ -25,7 +25,7 @@ _NEGATIVE_PROMPT = "blurry, photorealistic, smooth gradients, 3d render, high de
 
 
 def is_enabled() -> bool:
-    return flash_art.ENABLED
+    return flash_art.enabled()
 
 
 def _art_dir() -> Path:
@@ -99,6 +99,6 @@ def generate(prompt: str, *, kind: str = "scene", ref: str | None = None) -> dic
     renders it as ANSI. Otherwise falls back to the ASCII placeholder. Synchronous and
     non-blocking either way; the only place a live Flash call happens is prefetch()."""
     resolved_ref = ref or f"{kind}:{hashlib.sha1(prompt.encode()).hexdigest()[:10]}"
-    ansi = _cached_ansi(resolved_ref) if flash_art.ENABLED else None
+    ansi = _cached_ansi(resolved_ref) if flash_art.enabled() else None
     return {"ref": resolved_ref, "kind": kind, "prompt": prompt,
             "ascii": ansi or _ascii_banner(prompt), "image_b64": None, "enabled": ansi is not None}

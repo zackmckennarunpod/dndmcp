@@ -127,6 +127,21 @@ world = World()
 # own SQLite DB, zero shared state with `world` above. See linear_world.py/linear_gen.py.
 tickets = TicketWorld()
 
+# asyncio only holds a WEAK reference to a task created via asyncio.create_task — if nothing
+# else keeps a strong reference, the task can be garbage-collected mid-run (silently, no
+# error) as soon as the enclosing scope that called create_task returns. Every fire-and-
+# forget background task (frontier prefetch, art prefetch, ...) MUST go through _track() so a
+# strong reference lives here until the task finishes; add_done_callback then cleans it up so
+# this set doesn't grow unbounded. See https://docs.python.org/3/library/asyncio-task.html
+# #asyncio.create_task's own warning about this exact footgun.
+_background_tasks: set[asyncio.Task] = set()
+
+
+def _track(task: asyncio.Task) -> asyncio.Task:
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return task
+
 
 def _nearby_region(from_room_id: str, *, depth: int = 2,
                    exclude: str | None = None) -> list[tuple[str, str, str]]:
@@ -353,7 +368,7 @@ async def start_adventure(theme: str = "gothic horror", character_name: str = "W
     world.discover(player_id, camp.start_room)
     world.log("adventure.started", f"{char.name} the {char.klass} joined the adventure.",
               player_id=player_id)
-    asyncio.create_task(_prefetch_frontier(room, camp.theme, camp.id, camp.salt, camp.premise))  # fire-and-forget
+    _track(asyncio.create_task(_prefetch_frontier(room, camp.theme, camp.id, camp.salt, camp.premise)))  # fire-and-forget, tracked (see _track)
     share_note = (f'\n\n🔗 **World id: `{camp.id}`** — share this so others can join THIS '
                  f'exact world (start_adventure with campaign_id="{camp.id}").'
                  if camp.id != MAIN_CAMPAIGN_ID else "")
@@ -515,6 +530,25 @@ async def _generate_and_link(dest_id: str, theme: str, campaign_id: str, salt: s
                       exit_descriptions=new_room.get("exit_descriptions"))
     world.log("room.generated", f"{new_room['name']} generated ({new_room.get('via', 'procedural')})",
              campaign_id=campaign_id)
+    # GPU room art, same fire-and-forget speculative pattern as _prefetch_frontier below (and
+    # tracked the same way — see _track): art.prefetch is a true no-op (returns False
+    # immediately) when DND_FLASH_ART isn't set, so this whole branch costs nothing by default.
+    # ref = dest_id: room ids are already unique across worlds (non-main worlds prefix with
+    # their own campaign_id), so no extra namespacing is needed for the cache key.
+    _track(asyncio.create_task(
+        _prefetch_room_art(dest_id, new_room["name"], new_room["description"], campaign_id)))
+
+
+async def _prefetch_room_art(room_id: str, name: str, description: str, campaign_id: str) -> None:
+    """Generate (via Flash) and link art for a just-generated room, fired-and-forgotten from
+    _generate_and_link right after the room itself is persisted. `room_id` doubles as the art
+    cache ref (see art.prefetch). Never raises — art.prefetch already swallows its own errors
+    and returns False on any failure/disabled state, in which case this is a true no-op (no
+    image_ref set, no log entry, matching "art off -> zero behavior change")."""
+    if await art.prefetch(room_id, f"{name}: {description}"):
+        world.set_room_image(room_id, room_id)
+        world.log("art.generated", f"art for {name} (flash)", campaign_id=campaign_id,
+                  subject_type="room", subject_id=room_id)
 
 
 async def _prefetch_frontier(room: Room, theme: str, campaign_id: str, salt: str,
@@ -559,7 +593,7 @@ async def move(player_id: str, direction: str) -> str:
     world.discover(player_id, dest_id)
     dest = _require_room(dest_id)
     world.log("player.moved", f"{ch.name} moved {direction} into {dest.name}", player_id=player_id)
-    asyncio.create_task(_prefetch_frontier(dest, camp.theme, camp.id, camp.salt, camp.premise))  # fire-and-forget
+    _track(asyncio.create_task(_prefetch_frontier(dest, camp.theme, camp.id, camp.salt, camp.premise)))  # fire-and-forget, tracked (see _track)
     return _render_scene(dest, player_id=player_id)
 
 
