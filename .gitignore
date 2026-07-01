@@ -4,7 +4,6 @@
 __pycache__/
 *.pyc
 *.egg-info/
-research/_skills-repo/.git/
 .runpod/
 .flash/
 
@@ -13,6 +12,6 @@ research/_skills-repo/.git/
 *.db
 .beads-credential-key
 # bd worktree
-8pw/
+1p9/
 # bd worktree
-rz3/
+h4y5/

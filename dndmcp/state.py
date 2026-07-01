@@ -15,11 +15,12 @@ import json
 import os
 import secrets
 import sqlite3
+import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
 
-from .models import Campaign, Character, Entity, LogEntry, Quest, Room
+from .models import Campaign, Character, Entity, LogEntry, Quest, Room, WebSession
 
 # Set by the transport layer (server.py's ASGI middleware, web.py's request handlers) for the
 # duration of one inbound request, read by World.log() as its default for ip/session_id — a
@@ -56,7 +57,7 @@ def _state_dir() -> Path:
 # be additive (CREATE TABLE IF NOT EXISTS / ALTER TABLE ADD COLUMN), never a blanket drop.
 # If a genuinely breaking change is ever needed, write an explicit versioned migration step
 # instead of wiping; do not restore the old "wipe on any mismatch" behavior.
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 11
 
 MAIN_CAMPAIGN_ID = "main"
 
@@ -68,9 +69,30 @@ class World:
 
     def __init__(self, db_path: str | Path | None = None):
         self.path = Path(db_path) if db_path else _state_dir() / "campaign.db"
-        self._c = sqlite3.connect(str(self.path))
-        self._c.row_factory = sqlite3.Row
+        self._local = threading.local()
         self._init()
+
+    @property
+    def _c(self) -> sqlite3.Connection:
+        # One connection PER THREAD, created lazily. A single shared connection breaks the
+        # moment World is used off its creating thread: the pod runs MCP on the main thread
+        # and the GUI on a daemon thread (app.py), and the browser-DM chat path (web.py ->
+        # dm_loop -> server.py tool functions) drives THIS object from the GUI thread —
+        # sqlite3's default check_same_thread=True makes that an instant ProgrammingError.
+        # Thread-local connections + WAL make cross-thread use safe without a global lock:
+        # WAL lets a reader and a writer proceed concurrently instead of blocking each other
+        # (the GUI polls every 1.5s while the game writes constantly), and the 5s busy
+        # timeout absorbs the rare write-write collision instead of surfacing "database is
+        # locked" mid-turn. WAL is a persistent property of the DB file; setting it on every
+        # connection is an idempotent no-op after the first.
+        conn = getattr(self._local, "conn", None)
+        if conn is None:
+            conn = sqlite3.connect(str(self.path), timeout=5)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=5000")
+            self._local.conn = conn
+        return conn
 
     def _init(self) -> None:
         # Additive only — every statement below is idempotent (IF NOT EXISTS), so re-running
@@ -155,6 +177,31 @@ class World:
                 steps TEXT DEFAULT '[]', given_by TEXT, created_by TEXT, created_at REAL
             );
             CREATE INDEX IF NOT EXISTS idx_quest_campaign ON quest(campaign_id);
+            -- Durable browser identity (e0b.4): session_id is the same value the dm_session
+            -- HttpOnly cookie carries (chat_sessions.COOKIE_NAME) -- this is what lets a
+            -- returning browser resume its OWN character across a redeploy even though
+            -- chat_sessions._sessions (the in-memory DMSession store, message history
+            -- included) does not survive one. player_id/campaign_id start NULL and are
+            -- filled in once start_adventure mints a player_id for this session (see
+            -- chat_sessions.py's resume path + web.py's POST /chat). message_count doubles
+            -- as the per-session lifetime-turn-cap counter precisely because it lives here
+            -- (SQLite), not in that in-memory store -- it survives the same redeploy the cap
+            -- is meant to survive.
+            CREATE TABLE IF NOT EXISTS web_session (
+                session_id TEXT PRIMARY KEY,
+                player_id TEXT, campaign_id TEXT,
+                created_at REAL, last_seen REAL, message_count INTEGER DEFAULT 0
+            );
+            -- Browser-chat observability (see record_dm_turn): one row per /chat turn with
+            -- the full streamed event payload — the "what did the model actually do when
+            -- the player says nothing happened" table. events is the verbatim JSON list of
+            -- everything the turn streamed (tool events + final text).
+            CREATE TABLE IF NOT EXISTS dm_turn (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts REAL, session_id TEXT, player_id TEXT, campaign_id TEXT,
+                user_message TEXT, events TEXT, error TEXT, duration_ms INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS idx_dm_turn_session ON dm_turn(session_id, ts);
             """
         )
         # rooms/character/log/entity predate multi-world and had no campaign_id column —
@@ -701,6 +748,80 @@ class World:
             (*params, n),
         ).fetchall()
         return [LogEntry.model_validate(dict(r)) for r in reversed(rows)]
+
+    # --- dm_turn (browser-chat observability) ------------------------------------
+    def record_dm_turn(self, *, session_id: str, player_id: str | None, campaign_id: str,
+                       user_message: str, events: list[dict], error: str | None,
+                       duration_ms: int) -> None:
+        """Persist one complete browser-DM turn — the user's message, every event the turn
+        streamed (tool calls + final narration, verbatim), any exception, and how long it
+        took. This exists because a failed/empty turn otherwise leaves NO durable trace
+        (logger.exception goes to an ephemeral process log on the pod): when a player says
+        "I typed X and nothing happened," this table answers what the model actually did.
+        Deliberately its own table, not `log` rows — full turn payloads are debug data, not
+        world events; putting them on the live stream would spam every spectator."""
+        self._c.execute(
+            "INSERT INTO dm_turn (ts, session_id, player_id, campaign_id, user_message,"
+            " events, error, duration_ms) VALUES (?,?,?,?,?,?,?,?)",
+            (time.time(), session_id, player_id, campaign_id, user_message,
+             json.dumps(events), error, duration_ms),
+        )
+        self._c.commit()
+
+    # --- web_session (durable browser identity, e0b.4) --------------------------
+    def get_web_session(self, session_id: str) -> WebSession | None:
+        r = self._c.execute(
+            "SELECT * FROM web_session WHERE session_id=?", (session_id,)
+        ).fetchone()
+        return WebSession.model_validate(dict(r)) if r else None
+
+    def save_web_session(self, session_id: str, *, player_id: str, campaign_id: str) -> None:
+        """Persist (or update) the durable session_id -> player_id mapping -- called once a
+        browser session's start_adventure call mints a player_id (see web.py's POST /chat),
+        so a LATER redeploy that wipes chat_sessions._sessions still lets this same browser
+        resume the same character (chat_sessions._resume_from_durable_store reads this back).
+        Safe to call again on a session_id already seen via touch_web_session below (e.g. the
+        bare row that call creates before any character exists yet) -- upserts in place
+        rather than clobbering created_at/message_count."""
+        now = time.time()
+        self._c.execute(
+            "INSERT INTO web_session (session_id, player_id, campaign_id, created_at, last_seen, message_count)"
+            " VALUES (?,?,?,?,?,0)"
+            " ON CONFLICT(session_id) DO UPDATE SET player_id=excluded.player_id,"
+            " campaign_id=excluded.campaign_id, last_seen=excluded.last_seen",
+            (session_id, player_id, campaign_id, now, now),
+        )
+        self._c.commit()
+
+    def delete_web_session(self, session_id: str) -> None:
+        """Sever this browser's durable identity mapping — the "new character" flow (web.py's
+        POST /chat/reset). Deletes ONLY the session row: the character it pointed at stays in
+        the world untouched (an abandoned ghost, consistent with every other way a character
+        gets left behind — death, a closed tab, a lost cookie)."""
+        self._c.execute("DELETE FROM web_session WHERE session_id=?", (session_id,))
+        self._c.commit()
+
+    def touch_web_session(self, session_id: str) -> int:
+        """Record one turn against this browser session: last_seen=now, message_count+=1 --
+        creates a bare row (player_id/campaign_id still NULL) the first time this session_id
+        is ever seen, e.g. a brand-new cookie whose very first message hasn't reached
+        start_adventure yet. Returns the NEW message_count -- this is what web.py's POST
+        /chat checks against the per-session lifetime cap (chat_sessions.session_cap_exceeded);
+        living in SQLite instead of the in-memory chat_sessions store is exactly what lets
+        that cap survive a redeploy rather than silently resetting to 0."""
+        now = time.time()
+        self._c.execute(
+            "INSERT INTO web_session (session_id, player_id, campaign_id, created_at, last_seen, message_count)"
+            " VALUES (?,NULL,NULL,?,?,1)"
+            " ON CONFLICT(session_id) DO UPDATE SET last_seen=excluded.last_seen,"
+            " message_count=web_session.message_count+1",
+            (session_id, now, now),
+        )
+        self._c.commit()
+        row = self._c.execute(
+            "SELECT message_count FROM web_session WHERE session_id=?", (session_id,)
+        ).fetchone()
+        return row["message_count"] if row else 0
 
     def snapshot(self, player_id: str) -> dict:
         """Full inspectable state for one player — the 'world remembers' proof. Dict-shaped at

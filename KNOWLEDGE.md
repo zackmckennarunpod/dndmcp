@@ -110,9 +110,9 @@ Client-mode `EndpointJob`: `job.id/output/error/done`, `await job.wait(timeout=)
 
 ---
 
-## KNOWN BUGS / FOOTGUNS (full list in `research/00-known-issues-and-positioning.md`)
+## KNOWN BUGS / FOOTGUNS
 1. **Only the function BODY ships.** Imports, helpers, module constants the fn uses MUST be inside the decorated body, or `NameError` under `flash dev` (deploy masks it). #1 cause of breakage.
-2. **torch unavailable under `flash dev` (live serverless)** — Linear AE-3186. Test torch primitives via `flash deploy`, not dev.
+2. **torch unavailable under `flash dev` (live serverless)** — confirmed by the Flash team. Test torch primitives via `flash deploy`, not dev.
 3. **Multi-endpoint build is all-or-nothing** — one endpoint's dep with no prebuilt wheel fails the WHOLE build. Keep deps lean; vet wheels.
 4. **No model-cache support** with Flash yet — use NetworkVolume for weights.
 5. **`flash deploy` can fail during worker init** (container won't start) — test the deploy path early; have a known-good base image.
@@ -166,10 +166,10 @@ Flash defaults ALL hosts to **prod** (`api.runpod.io`). A **dev** API key 401/40
 Richer CLI + typed GraphQL codegen (the pattern the user's CLAUDE.md references). GPU image default `zackmckennarunpod/flash-ts:latest`. Code-over-wire hot reload. **Decision (this kit): Python primary** — prior prep + primitives are Python and the proven mint loop is Python; TS as optional control-plane upgrade.
 
 ## Ecosystem assets
-- `flash` skill: `npx skills add runpod/skills` (saved copy: `research/_skills-repo/flash/`).
+- `flash` skill: `npx skills add runpod/skills` (saved copy: `.agents/skills/flash/`).
 - Docs: docs.runpod.io/flash/apps/overview. Examples: github.com/runpod/flash-examples. Source: github.com/runpod/flash.
 - `runpod/runpod-mcp` (`@runpod/mcp-server`): 35 pod/endpoint/volume/template/job tools incl. `list-gpu-types`, `list-data-centers` — but **no Flash-specific tools**. We also have `mcp__runpod__*` locally.
-- Positioning: Dean's Journey Map + JTBD (Figma/PDF) — "why Flash over traditional Serverless." Mirror its language in the pitch.
+- Positioning: "why Flash over traditional Serverless" — mirror that framing in the pitch.
 
 ## Decision tree — announcement → grab blocks (from `notes/prep-kit.md`)
 | If they announce… | Grab |

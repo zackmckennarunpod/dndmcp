@@ -83,7 +83,7 @@ Real numbers seen: cold start Delay ~60s / Exec ~46ms; availability returns live
 ## Non-negotiable gotchas (these WILL bite)
 1. **Only the handler BODY ships to the worker.** Put every import/helper/constant
    INSIDE `def handler(payload)`. Module-level names → `NameError` under `flash run`.
-2. **torch is broken under `flash run` (live serverless), works under `flash deploy`** (Linear AE-3186).
+2. **torch is broken under `flash run` (live serverless), works under `flash deploy`.**
    Test torch primitives (the LoRA flagship) via `flash deploy`, not the dev server.
 3. **Multi-endpoint build is all-or-nothing** — one dep with no prebuilt wheel fails the whole build. Keep deps lean.
 4. **`runsync` times out at 60s** — cold starts exceed it; use `forge.call` (run+wait) for first calls.

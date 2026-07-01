@@ -270,7 +270,7 @@ mcp__runpod__create-network-volume {
 **CUDA / GPU (only if baking a worker base)**
 - **Bare `pip install torch` → cu130 → silent CPU fallback (10× slower).** Always pin
   `--index-url .../whl/cu124`.
-- **`torch is unavailable under `flash dev`** (Live Serverless, Linear AE-3186) — works only in
+- **`torch is unavailable under `flash dev`** (Live Serverless) — works only in
   `flash deploy`. Don't plan torch/GPU demos on `flash dev`; test the torch path via `flash deploy` early.
 - **Multi-endpoint build is all-or-nothing** — one `@Endpoint`'s transitive dep with no prebuilt wheel fails
   the *whole* build. Keep deps lean, vet wheels, isolate risky endpoints.

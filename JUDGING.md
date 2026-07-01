@@ -13,7 +13,7 @@ clever infra earns nothing on its own; it must win on these four.
 ## Format facts (change the strategy)
 - **Video submission**, not live demo → cold-start/ramp risk is editable away. Pre-warm offstage, record clean, cut dead air.
 - **Deadline: Wednesday 12pm PST** (~2 days). Plenty of runway.
-- Send recorded video to Adriana via Slack.
+- Send recorded video to the hackathon organizer via Slack.
 
 ## The repositioning (hits all 4 pillars)
 Stop selling FORGE as "a substrate/infrastructure" (scores Creativity, WHIFFS Usefulness).
