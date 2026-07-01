@@ -91,6 +91,12 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
  #nodeTooltip{position:absolute;pointer-events:none;background:#1c1433;border:1px solid var(--link);
    border-radius:6px;padding:4px 9px;font-size:12px;color:var(--text);display:none;z-index:10;
    box-shadow:0 4px 16px rgba(0,0,0,.5)}
+ /* Same "custom div, not a native tooltip" reasoning as #nodeTooltip (native title/SVG-title
+    tooltips are slow/inconsistent across browsers) — position:fixed so it works anywhere on
+    the page, not just inside #map's own coordinate space. */
+ #itemTooltip{position:fixed;pointer-events:none;background:#1c1433;border:1px solid var(--link);
+   border-radius:6px;padding:6px 10px;font-size:12px;color:var(--text);display:none;z-index:50;
+   box-shadow:0 4px 16px rgba(0,0,0,.5);max-width:240px}
  .ch b{color:var(--ghost-bright)}.ch span{color:var(--muted)}
  .ch span.item{cursor:help;border-bottom:1px dotted var(--dim)}
  .log div{color:var(--muted);padding:2px 0;border-bottom:1px solid var(--border-soft);font-size:12px}
@@ -136,10 +142,25 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
  details.panel summary::-webkit-details-marker{display:none}
  details.panel summary::before{content:'▸';transition:transform .15s}
  details.panel[open] summary::before{content:'▾'}
- details.panel .body{margin-top:10px;color:var(--muted);line-height:1.6;font-size:12.5px}
- details.panel .body b{color:var(--ghost-bright)}
- details.panel .body a{color:var(--ghost-bright);text-decoration:underline;text-decoration-color:var(--ghost)}
- details.panel .body p{margin:0 0 10px}
+ /* .body used to only ever live inside a <details>, hence the old "details.panel .body"
+    ancestor-scoped selectors — now also used inside tab panes (.tabBody), so scoped to the
+    class alone. */
+ .body{margin-top:10px;color:var(--muted);line-height:1.6;font-size:12.5px}
+ .body b{color:var(--ghost-bright)}
+ .body a{color:var(--ghost-bright);text-decoration:underline;text-decoration-color:var(--ghost)}
+ .body p{margin:0 0 10px}
+ /* Tab group (Connect & play / Browse other worlds / How this works) — these are mutually
+    exclusive MODES a visitor picks, not things worth having open side-by-side, unlike the
+    always-visible "This world" status strip or the collapsible-but-independent sidebar
+    cards below. */
+ .tabbar{display:flex;gap:2px;border-bottom:1px solid var(--border);margin-bottom:2px}
+ .tabBtn{background:none;border:none;color:var(--muted);font-size:11px;text-transform:uppercase;
+   letter-spacing:1.5px;padding:8px 12px 9px;cursor:pointer;border-bottom:2px solid transparent;
+   font-family:'IBM Plex Mono',monospace;transition:color .15s,border-color .15s}
+ .tabBtn:hover{color:var(--text)}
+ .tabBtn.active{color:var(--ghost-bright);border-bottom-color:var(--ghost)}
+ .tabBody{display:none}
+ .tabBody.active{display:block}
  .world-card{display:block;background:var(--bg);border:1px solid var(--border-soft);border-radius:6px;
    padding:9px 11px;margin-bottom:6px;text-decoration:none;cursor:pointer}
  .world-card:hover{border-color:var(--ghost)}
@@ -147,7 +168,7 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
  .world-card .wc-meta{color:var(--muted);font-size:11px;float:right}
  .world-card .wc-premise{color:var(--muted);font-size:11.5px;margin-top:3px;
    display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
- details.panel .body code{background:var(--unvisited);padding:1px 5px;border-radius:4px;font-size:11.5px}
+ .body code{background:var(--unvisited);padding:1px 5px;border-radius:4px;font-size:11.5px}
  .codebox{display:flex;align-items:flex-start;gap:8px;background:#0d0819;border:1px solid var(--border);
    border-radius:6px;padding:9px 11px;margin:4px 0}
  .codebox code,.codebox pre{flex:1;background:none;padding:0;font:12px 'IBM Plex Mono',monospace;
@@ -158,13 +179,23 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
  .copyCodeBtn.copied{background:var(--ghost);color:var(--bg)}
 </style></head><body>
 <div id=staleBanner>⟳ This tab is running an older version of the page — <a href="#" onclick="location.reload();return false">refresh to update</a></div>
+<div id=itemTooltip></div>
 <header><h1>⚔ DNDMCP</h1><span class=sub id=where>—</span>
  <span id=flashcount>⚡ 0 Flash calls</span>
  <span id=metricsLink title="Click to see system-wide metrics for this world">📊 Metrics</span>
  <button id=shareBtn title="Copies instructions to paste into your agent (Claude Code/Desktop) running dndmcp">🔗 Share</button></header>
-<details open id=connectPanel class=panel style="margin:16px 18px 16px">
- <summary>🎲 Connect &amp; play — anyone can join, no account needed</summary>
- <div class=body>
+<details open class=panel style="margin:16px 18px 16px">
+ <summary>This world</summary>
+ <div class=ch id=worldInfo style="margin-top:10px">—</div>
+ <div class=ch id=questList style="margin-top:10px">—</div>
+</details>
+<div class=panel style="margin:0 18px 16px">
+ <div class=tabbar>
+  <button class=tabBtn data-tab=connect>🎲 Connect &amp; play</button>
+  <button class=tabBtn data-tab=browse>🌍 Browse other worlds</button>
+  <button class=tabBtn data-tab=howworks>❔ How this works</button>
+ </div>
+ <div class="tabBody body" id=tab-connect>
   <p><b>1. Connect your agent</b> — pick whichever you use:</p>
   <div class=codebox><code id=codeCC>curl -fsSL https://ldghdgi0xxn6jj-8002.proxy.runpod.net/install.sh | bash</code><button class=copyCodeBtn data-target=codeCC>Copy</button></div>
   <p class=sub style="margin:6px 0 14px">↑ <b>Claude Code</b> — one command, installs dndmcp pointed at this exact live shared world.</p>
@@ -183,19 +214,13 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
   naturally ("go through the door," "attack it," "look around"), you never need game-engine
   syntax. You're joining THIS shared world, live, with everyone else currently playing.</p>
  </div>
-</details>
-<details class=panel style="margin:0 18px 16px">
- <summary>🌍 Browse other worlds</summary>
- <div class=body>
+ <div class="tabBody body" id=tab-browse>
   <input id=worldSearch placeholder="Search by theme or premise..."
     style="width:100%;box-sizing:border-box;background:var(--bg);border:1px solid var(--border);
     border-radius:6px;padding:7px 10px;color:var(--text);font:12.5px 'IBM Plex Mono',monospace;margin-bottom:10px">
   <div id=worldsList><div class=empty>Loading worlds…</div></div>
  </div>
-</details>
-<details class=panel style="margin:0 18px 0">
- <summary>How this works — the Graph Context Engine underneath</summary>
- <div class=body>
+ <div class="tabBody body" id=tab-howworks>
   <p>Under the hood this isn't a D&amp;D-specific engine — it's a generic graph: every room,
   item, and NPC is a <b>node</b>, connections between them (an exit, ownership, a relationship)
   are typed <b>edges</b>, and everything that happens is an append-only <b>event log</b>. We
@@ -222,20 +247,27 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
   a room and it's really there — the next ghost to pass through can pick it up, same as any
   other trace.</p>
  </div>
-</details>
-<details open class=panel style="margin:16px 18px 16px">
- <summary>This world</summary>
- <div class=ch id=worldInfo style="margin-top:10px">—</div>
-</details>
+</div>
 <main>
  <div class=panel><h2>World map (shared, live)</h2><div class=sub id=whereInMap style="margin-bottom:8px">—</div><div id=map><span id=mapEmpty class=empty>no adventure yet — start one in your agent</span><div id=nodeTooltip></div></div></div>
  <aside style="display:flex;flex-direction:column;gap:16px">
-  <div class=panel><h2>Character</h2><div class=ch id=char>—</div>
-   <button id=exportStoryBtn style="margin-top:10px;width:100%">📜 Export story</button></div>
-   <!-- exportStoryBtn is display:none by default (see CSS) — only shown once JS confirms
-        ?player= is actually present, since without it the button can't do anything. -->
-  <div class=panel><h2>Selected room</h2><div class=ch id=roomInfo><span class=empty>click a room on the map</span></div></div>
-  <div class=panel><h2>Recent</h2><div class=log id=log></div></div>
+  <details open class=panel>
+   <summary>Character</summary>
+   <div class=body style="margin-top:6px">
+    <div class=ch id=char>—</div>
+    <button id=exportStoryBtn style="margin-top:10px;width:100%">📜 Export story</button>
+    <!-- exportStoryBtn is display:none by default (see CSS) — only shown once JS confirms
+         ?player= is actually present, since without it the button can't do anything. -->
+   </div>
+  </details>
+  <details open class=panel>
+   <summary>Selected room</summary>
+   <div class=body style="margin-top:6px"><div class=ch id=roomInfo><span class=empty>click a room on the map</span></div></div>
+  </details>
+  <details open class=panel>
+   <summary>Recent</summary>
+   <div class=body style="margin-top:6px"><div class=log id=log></div></div>
+  </details>
  </aside>
 </main>
 <div style="padding:0 18px 18px" id=streamSection>
@@ -252,9 +284,23 @@ const W=700, H=420;
 
 if (playerId) {
   document.getElementById('exportStoryBtn').style.display = 'block';
-  // Already connected and playing — the onboarding instructions are noise at this point,
-  // not the first thing they need. Still there (one click away), just not in the way.
-  document.getElementById('connectPanel').removeAttribute('open');
+}
+
+// Connect / Browse / How-it-works tab group — mutually exclusive modes, not simultaneous
+// panels (see the CSS comment above .tabbar). Clicking a tab is always available regardless
+// of default state.
+function showTab(name){
+  document.querySelectorAll('.tabBtn').forEach(b => b.classList.toggle('active', b.dataset.tab === name));
+  document.querySelectorAll('.tabBody').forEach(el => el.classList.toggle('active', el.id === 'tab-' + name));
+}
+document.querySelectorAll('.tabBtn').forEach(b => b.addEventListener('click', () => showTab(b.dataset.tab)));
+// Only the bare, cold "main" link (no ?player=, the world everyone lands on by default)
+// should open with the onboarding pitch already showing. A link into a SPECIFIC shared
+// world means someone was already invited there — the generic "anyone can join" pitch is
+// noise, and an already-playing character doesn't need it either. Otherwise no tab is
+// active by default; the map/world-info speaks first.
+if (campaignId === 'main' && !playerId) {
+  showTab('connect');
 }
 
 // Browse other worlds: campaign ids are opaque hex strings — nobody finds a world they don't
@@ -624,11 +670,20 @@ async function tick(){
   document.getElementById('worldInfo').innerHTML = camp
     ? `<b>${esc(camp.theme||'')}</b>${camp.name?` — <span>${esc(camp.name)}</span>`:''}<br>${esc(camp.premise||'')}`
     : '<span class=empty>no world seeded yet</span>';
+  const quests = s.quests||[];
+  document.getElementById('questList').innerHTML = quests.length
+    ? quests.map(q => {
+        const qsteps = (q.steps||[]).map(st =>
+          `<div>${st.done?'☑':'☐'} ${esc(st.text||'')}</div>`).join('')
+          || '<span class=empty>no steps yet</span>';
+        return `<div style="margin-bottom:8px"><b>📜 ${esc(q.title)}</b><br>${qsteps}</div>`;
+      }).join('')
+    : '<span class=empty>no active quests</span>';
   const ch = s.character;
   const invHtml = (ch?.inventory||[]).map(it => {
     const name = typeof it === 'string' ? it : it.name;
     const desc = typeof it === 'string' ? '' : (it.description||'');
-    return desc ? `<span class=item title="${esc(desc)}">${esc(name)}</span>` : `<span>${esc(name)}</span>`;
+    return desc ? `<span class=item data-desc="${esc(desc)}">${esc(name)}</span>` : `<span>${esc(name)}</span>`;
   }).join(', ');
   document.getElementById('char').innerHTML = ch? `<b>${esc(ch.name)}</b> <span>lvl ${ch.level} ${esc(ch.klass)}</span><br>HP ${ch.hp}/${ch.max_hp} · AC ${ch.ac}<br>${invHtml||'<span class=empty>empty-handed</span>'}`:'—';
   // esc() FIRST, always -- this was previously raw l.text with no escaping at all, a stored-
@@ -717,6 +772,26 @@ document.getElementById('metricsLink').addEventListener('click', () => {
   window.open('/metrics?campaign='+encodeURIComponent(campaignId), '_blank');
 });
 
+// Item description tooltip: delegated from the never-replaced #char panel div (its innerHTML
+// is rewritten every tick(), so listeners bound directly to .item spans would be lost on the
+// next redraw) — same custom-div-over-mouse-events approach as #nodeTooltip, for the same
+// reason (native title tooltips are slow/inconsistent across browsers).
+const itemTooltip = document.getElementById('itemTooltip');
+document.getElementById('char').addEventListener('mouseover', (e) => {
+  const el = e.target.closest('.item');
+  if (!el) return;
+  itemTooltip.textContent = el.dataset.desc || '';
+  itemTooltip.style.display = 'block';
+});
+document.getElementById('char').addEventListener('mousemove', (e) => {
+  if (itemTooltip.style.display !== 'block') return;
+  itemTooltip.style.left = (e.clientX + 14) + 'px';
+  itemTooltip.style.top = (e.clientY + 10) + 'px';
+});
+document.getElementById('char').addEventListener('mouseout', (e) => {
+  if (e.target.closest('.item')) itemTooltip.style.display = 'none';
+});
+
 connectStream();
 </script></body></html>"""
 
@@ -769,7 +844,7 @@ def install_script() -> Response:
     return Response(content=content, media_type="text/x-shellscript")
 
 
-_EMPTY_STATE = {"rooms": [], "players": [], "character": None, "you": None, "current_room": None, "log": [], "flash_calls": 0, "campaign": None, "server_version": SERVER_VERSION}
+_EMPTY_STATE = {"rooms": [], "players": [], "character": None, "you": None, "current_room": None, "log": [], "quests": [], "flash_calls": 0, "campaign": None, "server_version": SERVER_VERSION}
 
 
 @app.get("/state")
@@ -828,6 +903,12 @@ def state(request: Request) -> JSONResponse:
             "SELECT name, theme, premise, created_at FROM campaigns WHERE id=?", (campaign_id,)
         ).fetchone()
         campaign = dict(camp_row) if camp_row else None
+        quests = [dict(r) for r in c.execute(
+            "SELECT id, title, description, state, steps, given_by, created_at FROM quest"
+            " WHERE campaign_id=? AND state='active' ORDER BY created_at", (campaign_id,)
+        ).fetchall()]
+        for q in quests:
+            q["steps"] = json.loads(q["steps"] or "[]")
         char = None
         cur = None
         if player_id:
@@ -851,6 +932,7 @@ def state(request: Request) -> JSONResponse:
         ).fetchone()[0]
         return JSONResponse({"rooms": rooms, "players": players, "character": char,
                              "you": char, "current_room": (dict(cur) if cur else None), "log": log,
+                             "quests": quests,
                              "flash_calls": flash_calls, "campaign": campaign,
                              "server_version": SERVER_VERSION})
     except sqlite3.OperationalError:
