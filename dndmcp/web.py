@@ -280,6 +280,23 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
   them, the event log for what's already been tried or decided. It's what lets an agent (or a
   human) step away mid-task and pick up real context hours or days later instead of restarting
   from a blank prompt — the same way this world remembers a player's choices between sessions.</p>
+  <p>You're reaching all of this through <b>MCP</b> (Model Context Protocol) — the same open
+  standard your own agent uses for every tool call. The server exposes mechanics as typed
+  tools that return facts, never prose: a dice roll, an HP total, what's actually in a room.
+  The agent narrates from those facts; it never touches state directly, so nothing you read
+  was invented to sound good — it's downstream of something real. Even the Dungeon Master
+  persona ships through MCP's own <b>instructions</b> field: connecting doesn't just grant
+  tools, it assigns your agent a role for the session. And because MCP tools don't care which
+  transport carries them, this exact server runs solo over stdio and shared over HTTP on this
+  live pod with zero duplicated logic — a private local game and the world you're watching
+  right now are the same code path.</p>
+  <p>That MCP-native shape carries into how this gets built, too: it's a long-running process,
+  not re-read per call, so a code change means reconnecting the session, not restarting a
+  server — and whoever's developing it plays through the same tool calls you do, no separate
+  admin path. Even the pod this world runs on got provisioned that way: an agent using
+  MCP-exposed infrastructure tooling to look up the right API shapes and deploy it, rather than
+  a web console. The tooling you're using to read this is also, one layer down, how the thing
+  you're reading about got made.</p>
   <p>When new content is needed — the next room, an NPC's response, the next step of a task —
   the LLM is never generating in isolation. It's fed the <b>surrounding graph context</b>:
   nearby already-generated nodes a couple hops out, and recent events near this spot, so
