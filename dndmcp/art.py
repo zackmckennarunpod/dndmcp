@@ -109,7 +109,11 @@ def _quantize_to_palette(png_bytes: bytes) -> bytes:
     img = Image.open(io.BytesIO(png_bytes)).convert("RGB")
     quantized = img.quantize(palette=palette_img, dither=Image.Dither.FLOYDSTEINBERG)
     out = io.BytesIO()
-    quantized.convert("RGB").save(out, "PNG")
+    # Save in P (indexed/palette) mode, NOT converted back to RGB — the image only has 16
+    # real colors at this point, so indexed mode compresses ~2x smaller (measured: 145KB ->
+    # 81KB on a real generated image). _image_to_ansi already .convert("RGB")s on read
+    # regardless of source mode, so this doesn't change anything downstream.
+    quantized.save(out, "PNG")
     return out.getvalue()
 
 

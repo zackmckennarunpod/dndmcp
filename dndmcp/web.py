@@ -1384,7 +1384,13 @@ def art_image(ref: str) -> Response:
     path = Path(state_dir) / "art" / f"{ref}.png"
     if not path.is_file():
         return Response(status_code=404)
-    return Response(content=path.read_bytes(), media_type="image/png")
+    # A ref's image never changes once generated (only scripts/regen_art.sh's rare, manual
+    # admin action overwrites one) — cache hard, both browser- and Cloudflare-side (this URL
+    # is proxied through Cloudflare, which was defaulting to cf-cache-status: BYPASS with no
+    # Cache-Control at all, so every single view — including repeat views of the same room —
+    # was re-reading the file off the network volume and re-sending the full PNG).
+    return Response(content=path.read_bytes(), media_type="image/png",
+                    headers={"Cache-Control": "public, max-age=31536000, immutable"})
 
 
 @app.get("/chat/enabled")
