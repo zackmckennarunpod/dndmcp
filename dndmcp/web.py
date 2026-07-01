@@ -319,6 +319,30 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
    display:inline-block;margin:6px 0 4px}
  #wizJoinFeed{max-height:64px;overflow-y:auto;font-size:11.5px;color:var(--muted);margin-top:4px}
  #wizJoinFeed div{padding:2px 0}
+ /* RESPONSIVE (the real target: half-screen — agent terminal on one side, this UI on the
+    other). The 3-column grid only fits ~1280px+; below that the map got crushed. Two tiers:
+    - <=1280px (half a 1440p/1080p monitor, tablets): 2 columns — map keeps the left and
+      spans both rows; stream/chat + the character sidebar stack in the right column.
+    - <=760px (phones, very narrow splits): single column, map first at a viewport-relative
+      height so the panels below are reachable without scrolling past a 560px wall.
+    #map/#stream keep FIXED heights per tier (see the circular-layout comment below) — only
+    the tier changes them, never the grid row. The map's own ResizeObserver re-fits the
+    viewBox whenever these kick in. */
+ @media (max-width: 1280px){
+  main{grid-template-columns:minmax(0,1fr) minmax(280px,340px)}
+  main > .panel:first-child{grid-row:1 / span 2}
+  main > aside{grid-column:2}
+ }
+ @media (max-width: 760px){
+  main{grid-template-columns:minmax(0,1fr)}
+  main > .panel:first-child{grid-row:auto}
+  main > aside{grid-column:auto}
+  #map{height:46vh}
+  #stream{height:38vh}
+  #chatLog{height:38vh}
+  header{flex-wrap:wrap;row-gap:4px}
+  #flashcount{margin-left:0}
+ }
 </style></head><body>
 <div id=staleBanner>⟳ This tab is running an older version of the page — <a href="#" onclick="location.reload();return false">refresh to update</a></div>
 <div id=itemTooltip></div>
