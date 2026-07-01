@@ -137,8 +137,10 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
   text-transform:none;letter-spacing:0}
 #streamFilterBtn.active{background:var(--warm);color:#1a1206;border-color:var(--warm)}
  /* Was a fixed 120px when this lived as a thin strip below everything else — now it's a full
-    column next to the map, sized to match (see #map's height). */
- #stream{display:flex;flex-direction:column-reverse;gap:0;height:560px;overflow-y:auto}
+    column next to the map, sized to match (see #map's height). Plain column (not reversed):
+    newest event lands at the TOP via prepend() below, so the feed reads top-down in the
+    order things actually happened, with the newest visible without any scrolling. */
+ #stream{display:flex;flex-direction:column;gap:0;height:560px;overflow-y:auto}
  #stream div{color:var(--muted);padding:2px 0;border-bottom:1px solid var(--border-soft);font-size:12px}
  #stream div.new{animation:flash .8s ease-out}
  #stream .who{color:var(--warm)}
@@ -216,10 +218,13 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
   <p><b>3. Say "start an adventure."</b> That's it. Your agent becomes the Dungeon Master — talk
   naturally ("go through the door," "attack it," "look around"), you never need game-engine
   syntax. You're joining THIS shared world, live, with everyone else currently playing.</p>
+  <p><b>4. Watch yourself play.</b> Your agent will hand you back a URL to <i>your own</i> live
+  session (this same map, with your character highlighted and your log/inventory in the
+  sidebar) — open it in a browser to watch your position update in real time as you play.</p>
  </div>
 </details>
 <main style="margin-top:16px">
- <div class=panel><h2>World map (shared, live)</h2><div class=sub id=whereInMap style="margin-bottom:8px">—</div><div id=map><span id=mapEmpty class=empty>no adventure yet — start one in your agent</span><div id=nodeTooltip></div></div></div>
+ <div class=panel><h2>World map (shared, live)</h2><div class=sub id=whereInMap style="margin-bottom:2px">—</div><div class=sub style="margin-bottom:8px;opacity:.7">scroll + ⌘/Ctrl to zoom · drag to pan</div><div id=map><span id=mapEmpty class=empty>no adventure yet — start one in your agent</span><div id=nodeTooltip></div></div></div>
  <div class=panel><h2><span id=streamDot></span><span id=streamTitle>Live world stream</span></h2>
    <div class=sub style="margin-bottom:8px"><span id=streamSub>every player, every session</span>
    <button id=streamFilterBtn style="margin-left:6px">⚡ Flash calls only</button></div>
