@@ -123,6 +123,36 @@ def create_session(campaign_id: str = MAIN_CAMPAIGN_ID) -> "DMSession":
                      messages=[{"role": "system", "content": SYSTEM_PROMPT}])
 
 
+# Injected only into a RESUMED session (see create_resumed_session) — a fresh session's
+# messages never carry this, so the model only ever sees it the one time it's actually true.
+_RESUME_NOTE = (
+    "The player's browser already has a character from an earlier visit — the server "
+    "process just restarted, so this is a NEW session with no memory of the conversation, "
+    "but the character itself (name, class, HP, inventory, location) is real and unchanged "
+    "in the world. Do NOT start a new adventure or ask for a theme/name again. Greet the "
+    "player back in character and call character_sheet or look to reorient both of you, "
+    "then continue play from wherever they actually are."
+)
+
+
+def create_resumed_session(player_id: str, campaign_id: str = MAIN_CAMPAIGN_ID) -> "DMSession":
+    """Rebuild a DMSession for a browser player whose in-memory session (chat_sessions.
+    _sessions) was lost to a process restart/redeploy, but whose session_id -> player_id
+    mapping survived in state.py's web_session table (see chat_sessions.get_or_create).
+
+    Message HISTORY is NOT recovered — it never persisted anywhere but the in-memory store
+    (an accepted tradeoff, see chat_sessions.py's module docstring) — but the character
+    itself is real, already in the World, so this just points a fresh session at it and lets
+    the model re-orient via a normal tool call instead of asking the player to start over.
+    exit_map is rebuilt immediately (not lazily on the next move/look) so a resumed player
+    can act on their actual exits right away, same as a session that just called look."""
+    session = DMSession(campaign_id=campaign_id, player_id=player_id,
+                        messages=[{"role": "system", "content": SYSTEM_PROMPT},
+                                  {"role": "system", "content": _RESUME_NOTE}])
+    _rebuild_exit_map(session)
+    return session
+
+
 @dataclass
 class DMSession:
     """One browser player's session. `player_id` is minted server-side inside

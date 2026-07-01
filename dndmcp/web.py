@@ -23,7 +23,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from sse_starlette.sse import EventSourceResponse
 
-from . import chat_sessions, dm_loop, worldgen
+from . import chat_sessions, dm_loop, server, worldgen
 
 app = FastAPI(title="DNDMCP map")
 logger = logging.getLogger(__name__)
@@ -36,8 +36,37 @@ def _browser_dm_enabled() -> bool:
     return os.environ.get("DND_BROWSER_DM", "1") != "0"
 
 
-MAX_CHAT_MESSAGE_LEN = 500  # see POST /chat — message-length cap is the ONLY abuse guard here;
-                            # full rate limiting is a separate bead (e0b.4).
+MAX_CHAT_MESSAGE_LEN = 500  # see POST /chat — message-length cap.
+
+# Abuse-guard responses (e0b.4), written in the DM's own voice — the chat UI renders these as
+# a dim system line (not an error alert), see PAGE's addChatMessage('system', ...) branch.
+RATE_LIMIT_MESSAGE = ('The DM raises a hand. "Slow down a moment — even a Dungeon Master '
+                     'needs to breathe between turns." (try again in a few seconds)')
+SESSION_CAP_MESSAGE = ('The DM closes the book gently. "This character\'s tale has reached '
+                      'its telling for now — thank you for playing."')
+
+
+def _log_dm_event(ip: str | None, campaign_id: str | None, kind: str, text: str) -> None:
+    """Insert a domain-event log row the same raw-sqlite way /export_story does — world.log()
+    (state.py's World, one connection per THREAD) isn't reachable from here for the identical
+    reason /export_story already works around it: this module opens its own ad hoc connection
+    straight against campaign.db (see _db()) rather than sharing World's thread-local one.
+    Used for kind='dm.throttled' (see chat_sessions.check_ip_rate_limit /
+    session_cap_exceeded, which decide WHEN to call this — only the first rejection of a
+    throttle window, never every rejected request)."""
+    try:
+        c = _db()
+        try:
+            c.execute(
+                "INSERT INTO log (ts,kind,text,player_id,subject_type,subject_id,campaign_id,ip)"
+                " VALUES (?,?,?,?,?,?,?,?)",
+                (time.time(), kind, text, None, None, None, campaign_id, ip),
+            )
+            c.commit()
+        finally:
+            c.close()
+    except Exception:
+        logger.exception("failed to log %s event", kind)
 
 
 def _server_version() -> str:
@@ -229,6 +258,9 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
  .chatMsg.player{text-align:right;color:var(--ghost-bright)}
  .chatMsg.dm{text-align:left;color:var(--text)}
  .chatMsg.error{text-align:left;color:var(--warm)}
+ /* Throttle/cap responses (e0b.4) are expected, routine traffic-shaping, not a failure —
+    dim + italic like a breadcrumb, deliberately NOT the same alarmed .error color above. */
+ .chatMsg.system{text-align:left;color:var(--dim);font-style:italic}
  .chatBreadcrumb{color:var(--muted);font-size:11px;padding:2px 2px;opacity:.85;font-style:italic}
  #chatForm{display:flex;gap:6px;flex-shrink:0}
  #chatInput{flex:1;background:var(--bg);border:1px solid var(--border);border-radius:6px;
@@ -1018,7 +1050,11 @@ chatForm.addEventListener('submit', async (e) => {
     });
     if(!r.ok){
       const err = await r.json().catch(() => ({}));
-      addChatMessage('error', err.error || `error ${r.status}`);
+      // 429 (per-IP rate limit or per-session lifetime cap, e0b.4) is routine traffic-shaping,
+      // not a failure -- render it as a dim system line, same as a tool breadcrumb, not the
+      // alarmed error-red used for actual failures (409 in-flight, 413 too long, 503 disabled).
+      if(r.status === 429) addChatMessage('system', err.error || 'please slow down a moment.');
+      else addChatMessage('error', err.error || `error ${r.status}`);
       return;
     }
     // NDJSON: one JSON object per newline-terminated line. Buffer partial lines across
@@ -1132,11 +1168,14 @@ async def chat(request: Request):
     anywhere in this response or gets accepted as a request field — see chat_sessions.py's
     module docstring for the full boundary.
 
-    Guards (see MAX_CHAT_MESSAGE_LEN / chat_sessions.py for what's deliberately NOT here yet):
-    message length cap (413), one turn in flight per session (409, via chat_sessions.lock_for
-    — checked-then-acquired with no `await` in between, safe under asyncio's single-threaded
-    scheduling), and the process-wide chat_sessions.turn_semaphore protecting the single warm
-    LLM worker from a burst of simultaneous browser turns.
+    Guards, in order: message length cap (413); kill switch (503, checked first, above);
+    per-IP sliding-window rate limit (429, chat_sessions.check_ip_rate_limit — e0b.4); the
+    per-session lifetime message cap (429, chat_sessions.session_cap_exceeded, backed by
+    state.py's web_session.message_count so it survives a redeploy — e0b.4); one turn in
+    flight per session (409, via chat_sessions.lock_for — checked-then-acquired with no
+    `await` in between, safe under asyncio's single-threaded scheduling); and the process-wide
+    chat_sessions.turn_semaphore protecting the single warm LLM worker from a burst of
+    simultaneous browser turns.
     """
     if not _browser_dm_enabled():
         return JSONResponse({"error": "browser play is currently disabled"}, status_code=503)
@@ -1157,7 +1196,30 @@ async def chat(request: Request):
     minted_cookie = session_id is None
     if minted_cookie:
         session_id = chat_sessions.new_session_id()
+    # get_or_create is where a returning browser's OWN character gets resumed (durable
+    # web_session mapping, e0b.4) if the in-memory store lost it to a redeploy — see
+    # chat_sessions.py's module docstring and _resume_from_durable_store.
     session = chat_sessions.get_or_create(session_id)
+
+    ip = _client_ip(request)
+    allowed, first_throttle = chat_sessions.check_ip_rate_limit(ip)
+    if not allowed:
+        if first_throttle:
+            _log_dm_event(ip, session.campaign_id, "dm.throttled",
+                          f"per-IP rate limit ({chat_sessions.MAX_MESSAGES_PER_IP_PER_MINUTE}/min) hit.")
+        return JSONResponse({"error": RATE_LIMIT_MESSAGE}, status_code=429)
+
+    # Lifetime cap check: peek the durable count WITHOUT incrementing it yet (a rejected
+    # request never counts as a used turn) — see World.touch_web_session for the actual
+    # increment, which only happens once the turn is allowed to run, below.
+    existing = server.world.get_web_session(session_id)
+    message_count = existing.message_count if existing else 0
+    exceeded, first_cap_hit = chat_sessions.session_cap_exceeded(session_id, message_count)
+    if exceeded:
+        if first_cap_hit:
+            _log_dm_event(ip, session.campaign_id, "dm.throttled",
+                          f"per-session lifetime cap ({chat_sessions.MAX_SESSION_MESSAGES}) hit.")
+        return JSONResponse({"error": SESSION_CAP_MESSAGE}, status_code=429)
 
     lock = chat_sessions.lock_for(session_id)
     if lock.locked():
@@ -1180,6 +1242,17 @@ async def chat(request: Request):
                 "text": "The DM pauses, momentarily lost in thought... (something went wrong — try again?)",
             }) + "\n"
         finally:
+            # Durable bookkeeping for THIS turn: bump the lifetime-cap counter (regardless of
+            # success/failure above — a failed turn still consumed a slot), and persist the
+            # session_id -> player_id mapping once start_adventure has minted one (or refresh
+            # it if it already existed) — see state.py's web_session table / e0b.4.
+            try:
+                server.world.touch_web_session(session_id)
+                if session.player_id:
+                    server.world.save_web_session(
+                        session_id, player_id=session.player_id, campaign_id=session.campaign_id)
+            except Exception:
+                logger.exception("POST /chat: failed to persist web_session bookkeeping")
             yield json.dumps({"type": "done"}) + "\n"
             lock.release()
 
@@ -1190,8 +1263,11 @@ async def chat(request: Request):
         # explicitly here since this is a plain streamed response, not EventSourceResponse.
         headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"})
     if minted_cookie:
+        # 30 days — durable identity (e0b.4, state.py's web_session table) now lets a
+        # returning browser resume its OWN character across a redeploy, so the cookie itself
+        # is worth keeping around far longer than the in-memory session store ever survived.
         resp.set_cookie(chat_sessions.COOKIE_NAME, session_id, httponly=True, samesite="lax",
-                        max_age=60 * 60 * 24 * 7)  # a week — in-memory store dies on redeploy well before this matters
+                        max_age=60 * 60 * 24 * 30)
     return resp
 
 
