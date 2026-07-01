@@ -6,5 +6,11 @@ sse-starlette>=2.0.0
 pydantic>=2.0.0
 # runpod-flash only needed when art.py calls Flash for GPU image gen (wired later)
 runpod-flash>=1.7.0
-# Pillow is optional: only imported (lazily, inside art.py's _image_to_ansi) when
-# DND_FLASH_ART=1 and a real generated image comes back. Not required for normal play.
+# Pillow: art.py decodes/quantizes every real generated image with it (both the ANSI
+# terminal renderer AND the shared-palette quantize step, flash-hackathon-6c3) whenever
+# DND_FLASH_ART=1 and a real image comes back. This used to be listed ONLY in pyproject.toml
+# on the (now stale) assumption it was a rare path — but redeploy_pod.sh only ever installs
+# from THIS file, so it was never actually present on the live pod. Confirmed live: every
+# art generation since 6c3 shipped crashed with ModuleNotFoundError, after the real (billed)
+# Flash GPU call completed and before the PNG was ever written to disk.
+Pillow>=12.0.0

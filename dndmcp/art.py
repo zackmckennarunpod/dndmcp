@@ -15,10 +15,13 @@ from __future__ import annotations
 
 import hashlib
 import io
+import logging
 import os
 from pathlib import Path
 
 from . import flash_art
+
+logger = logging.getLogger(__name__)
 
 _STYLE_SUFFIX = ", 16-bit pixel art, retro RPG sprite, limited color palette, pixelated"
 _NEGATIVE_PROMPT = "blurry, photorealistic, smooth gradients, 3d render, high detail, realistic"
@@ -122,7 +125,16 @@ async def prefetch(ref: str, prompt: str) -> bool:
                                          width=256, height=256, steps=4)
     if not png:
         return False
-    path.write_bytes(_quantize_to_palette(png))
+    # The Flash GPU call above is already paid for by this point — losing the image now (e.g.
+    # a quantize-side bug or missing dependency) would waste that spend for nothing. Cache the
+    # raw image rather than the whole generation on any quantize failure; confirmed live this
+    # isn't hypothetical (a missing Pillow install did exactly this — see flash-hackathon-lg3).
+    try:
+        path.write_bytes(_quantize_to_palette(png))
+    except Exception:
+        logger.warning("art.prefetch: palette quantize failed, caching raw image instead",
+                       exc_info=True)
+        path.write_bytes(png)
     return True
 
 
