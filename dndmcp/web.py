@@ -328,6 +328,11 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
    <div id=stream><div class=empty>waiting for the world to move...</div></div>
   </div>
   <div id=midTab-chat class=midTabBody>
+   <div class=sub style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px">
+    <span>returning? you resume your last character automatically</span>
+    <a href="#" id=chatResetBtn title="Start over with a brand-new character — your current one stays in the world"
+      style="color:var(--muted);text-decoration:underline dotted;white-space:nowrap;margin-left:8px">↺ new character</a>
+   </div>
    <div id=chatLog><div class=empty>say "start an adventure" to begin</div></div>
    <form id=chatForm>
     <input id=chatInput type=text autocomplete=off maxlength=500
@@ -1029,6 +1034,25 @@ function addChatBreadcrumb(name, summary){
   chatScrollToBottom();
 }
 
+// "New character": sever this browser's identity server-side (POST /chat/reset rotates the
+// HttpOnly cookie + deletes the durable mapping) and reset the pane. The old character stays
+// in the world as a ghost — the confirm() says so explicitly, since "reset" could otherwise
+// read as "delete my character."
+document.getElementById('chatResetBtn').addEventListener('click', async (e) => {
+  e.preventDefault();
+  if (chatTurnInFlight) { addChatMessage('system', 'wait for the current turn to finish first.'); return; }
+  if (!confirm('Start over with a brand-new character? Your current character stays in the world as a ghost.')) return;
+  try{
+    const r = await fetch('/chat/reset', {method: 'POST', credentials: 'same-origin'});
+    if(!r.ok){ const err = await r.json().catch(() => ({})); addChatMessage('error', err.error || `error ${r.status}`); return; }
+    chatLog.innerHTML = '';
+    addChatMessage('system', 'fresh start — say "start an adventure" to begin anew.');
+    chatInput.focus();
+  }catch(err){
+    addChatMessage('error', 'connection trouble — try again?');
+  }
+});
+
 chatForm.addEventListener('submit', async (e) => {
   e.preventDefault();
   if (chatTurnInFlight) return;
@@ -1268,6 +1292,35 @@ async def chat(request: Request):
         # is worth keeping around far longer than the in-memory session store ever survived.
         resp.set_cookie(chat_sessions.COOKIE_NAME, session_id, httponly=True, samesite="lax",
                         max_age=60 * 60 * 24 * 30)
+    return resp
+
+
+@app.post("/chat/reset")
+async def chat_reset(request: Request):
+    """The "new character" flow: sever this browser's identity (in-memory session + durable
+    web_session row) and rotate the cookie, so the next /chat message starts the normal
+    opening flow fresh. The old character is NOT deleted — it stays in the world as an
+    abandoned ghost, consistent with every other way a character gets left behind.
+
+    Note the rotation intentionally resets the per-session lifetime message cap — a new
+    character is legitimately a new session. The per-IP sliding window still applies
+    unchanged, so this isn't a rate-limit bypass, only a budget-per-character reset."""
+    if not _browser_dm_enabled():
+        return JSONResponse({"error": "browser play is currently disabled"}, status_code=503)
+    session_id = request.cookies.get(chat_sessions.COOKIE_NAME)
+    if session_id:
+        if chat_sessions.lock_for(session_id).locked():
+            return JSONResponse(
+                {"error": "a turn is still in progress — wait for it to finish first"},
+                status_code=409)
+        chat_sessions.drop(session_id)
+        try:
+            server.world.delete_web_session(session_id)
+        except Exception:
+            logger.exception("POST /chat/reset: failed to delete web_session row")
+    resp = JSONResponse({"ok": True})
+    resp.set_cookie(chat_sessions.COOKIE_NAME, chat_sessions.new_session_id(), httponly=True,
+                    samesite="lax", max_age=60 * 60 * 24 * 30)
     return resp
 
 

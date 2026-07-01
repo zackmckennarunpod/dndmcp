@@ -764,6 +764,14 @@ class World:
         )
         self._c.commit()
 
+    def delete_web_session(self, session_id: str) -> None:
+        """Sever this browser's durable identity mapping — the "new character" flow (web.py's
+        POST /chat/reset). Deletes ONLY the session row: the character it pointed at stays in
+        the world untouched (an abandoned ghost, consistent with every other way a character
+        gets left behind — death, a closed tab, a lost cookie)."""
+        self._c.execute("DELETE FROM web_session WHERE session_id=?", (session_id,))
+        self._c.commit()
+
     def touch_web_session(self, session_id: str) -> int:
         """Record one turn against this browser session: last_seen=now, message_count+=1 --
         creates a bare row (player_id/campaign_id still NULL) the first time this session_id

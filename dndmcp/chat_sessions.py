@@ -80,6 +80,17 @@ def get_or_create(session_id: str) -> dm_loop.DMSession:
     return session
 
 
+def drop(session_id: str) -> None:
+    """Forget this browser session entirely — the "new character" flow (web.py's POST
+    /chat/reset). Clears the in-memory session/lock/cap-notified state only; the caller also
+    deletes the durable web_session row (state.delete_web_session) and rotates the cookie.
+    The character the session pointed at is deliberately NOT touched — it stays in the world
+    as an abandoned ghost, same as any character whose player closed the tab forever."""
+    _sessions.pop(session_id, None)
+    _locks.pop(session_id, None)
+    _session_cap_notified.discard(session_id)
+
+
 def get(session_id: str) -> dm_loop.DMSession | None:
     """Read-only lookup for callers that must NOT mint a new session as a side effect — e.g.
     /state resolving "who is this cookie's player" for map highlighting: a spectator tab with
