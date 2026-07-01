@@ -1378,21 +1378,26 @@ _EMPTY_STATE = {"rooms": [], "players": [], "character": None, "you": None, "cur
 @app.get("/state")
 def state(request: Request) -> JSONResponse:
     player_id = request.query_params.get("player")
+    # Multi-world: each world's map is independent now — "main" is the well-known default
+    # (what every pre-multi-world link/bookmark still means), anything else is a specific
+    # world someone created/shared (see server.py start_adventure's campaign_id).
+    campaign_id = request.query_params.get("campaign") or "main"
     # Browser-chat path (e0b.3): no ?player= in the URL at all for that flow — the credential
     # lives only in the dm_session cookie -> chat_sessions store, never in a URL a viewer could
     # see over someone's shoulder or find in browser history. Falls back to the cookie ONLY
     # when ?player= is absent, so an explicit ?player= (the BYO-agent share-link flow) keeps
     # working exactly as before and is never silently overridden by a stale cookie.
+    # CAMPAIGN-SCOPED on purpose (fresh-player test finding #1): the cookie identifies a
+    # character in ONE world — browsing a DIFFERENT world's page used to still resolve "you"
+    # from the cookie, so the header/Character panel showed your main-world character and
+    # room inside someone else's world, which reads as completely broken. A cookie session
+    # only counts as "you" on the page of the world it actually belongs to.
     if not player_id:
         session_id = request.cookies.get(chat_sessions.COOKIE_NAME)
         if session_id:
             session = chat_sessions.get(session_id)
-            if session and session.player_id:
+            if session and session.player_id and session.campaign_id == campaign_id:
                 player_id = session.player_id
-    # Multi-world: each world's map is independent now — "main" is the well-known default
-    # (what every pre-multi-world link/bookmark still means), anything else is a specific
-    # world someone created/shared (see server.py start_adventure's campaign_id).
-    campaign_id = request.query_params.get("campaign") or "main"
     try:
         c = _db()
     except Exception:
