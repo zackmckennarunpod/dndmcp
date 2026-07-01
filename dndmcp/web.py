@@ -211,10 +211,10 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
   other trace.</p>
  </div>
 </details>
+<div class=panel style="margin:0 18px 16px"><h2>This world</h2><div class=ch id=worldInfo>—</div></div>
 <main>
  <div class=panel><h2>World map (shared, live)</h2><div class=sub id=whereInMap style="margin-bottom:8px">—</div><div id=map><span id=mapEmpty class=empty>no adventure yet — start one in your agent</span><div id=nodeTooltip></div></div></div>
  <aside style="display:flex;flex-direction:column;gap:16px">
-  <div class=panel><h2>This world</h2><div class=ch id=worldInfo>—</div></div>
   <div class=panel><h2>Character</h2><div class=ch id=char>—</div>
    <button id=exportStoryBtn style="margin-top:10px;width:100%">📜 Export story</button></div>
    <!-- exportStoryBtn is display:none by default (see CSS) — only shown once JS confirms
