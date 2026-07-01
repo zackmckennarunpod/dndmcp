@@ -57,7 +57,7 @@ def _state_dir() -> Path:
 # be additive (CREATE TABLE IF NOT EXISTS / ALTER TABLE ADD COLUMN), never a blanket drop.
 # If a genuinely breaking change is ever needed, write an explicit versioned migration step
 # instead of wiping; do not restore the old "wipe on any mismatch" behavior.
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 MAIN_CAMPAIGN_ID = "main"
 
@@ -202,6 +202,20 @@ class World:
                 user_message TEXT, events TEXT, error TEXT, duration_ms INTEGER
             );
             CREATE INDEX IF NOT EXISTS idx_dm_turn_session ON dm_turn(session_id, ts);
+            -- Durable browser identity, PER WORLD (e0b.10): web_session above keyed identity
+            -- by session_id ALONE, which was fine while a browser could only ever be in ONE
+            -- world (main) at a time. Now that the chat follows the PAGE's own campaign_id
+            -- (one browser can hold an independent character in main AND in any number of
+            -- other worlds simultaneously), the durable key has to widen to the pair -- one
+            -- row per (session_id, campaign_id), not per session_id. The OLD web_session
+            -- table is left completely untouched (still written nowhere new, just no longer
+            -- read by the per-world code paths) as a rollback safety net -- if this needs to
+            -- be reverted, the old single-world behavior's data is still sitting right there.
+            CREATE TABLE IF NOT EXISTS web_session_world (
+                session_id TEXT NOT NULL, campaign_id TEXT NOT NULL,
+                player_id TEXT, created_at REAL, last_seen REAL, message_count INTEGER DEFAULT 0,
+                PRIMARY KEY (session_id, campaign_id)
+            );
             """
         )
         # rooms/character/log/entity predate multi-world and had no campaign_id column —
@@ -225,6 +239,20 @@ class World:
             " SELECT ?, '', theme, premise, created_at, start_room, turn, ?"
             " FROM campaign WHERE id=1",
             (MAIN_CAMPAIGN_ID, secrets.token_hex(4)),
+        )
+        # One-time backfill (e0b.10): every existing web_session row already names EXACTLY one
+        # world (its own campaign_id column, NULL meaning "main" per the old single-world
+        # code) — give each one a matching web_session_world row so a browser that was already
+        # playing before this migration resumes its real character on its first request after
+        # upgrade, instead of silently starting fresh. INSERT OR IGNORE + the composite PK
+        # makes this idempotent across every restart from here on, same pattern as the
+        # campaigns backfill just above.
+        self._c.execute(
+            "INSERT OR IGNORE INTO web_session_world"
+            " (session_id, campaign_id, player_id, created_at, last_seen, message_count)"
+            " SELECT session_id, COALESCE(campaign_id, ?), player_id, created_at, last_seen, message_count"
+            " FROM web_session",
+            (MAIN_CAMPAIGN_ID,),
         )
         self._c.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         self._c.commit()
@@ -820,6 +848,71 @@ class World:
         self._c.commit()
         row = self._c.execute(
             "SELECT message_count FROM web_session WHERE session_id=?", (session_id,)
+        ).fetchone()
+        return row["message_count"] if row else 0
+
+    # --- web_session_world (durable browser identity, PER WORLD — e0b.10) -------
+    # Parallel to the web_session_* methods above, not a replacement — same shape, keyed by
+    # the (session_id, campaign_id) PAIR instead of session_id alone. See the table's own
+    # comment in _init for why: one browser can now hold an independent character in more
+    # than one world at once, so "which world" has to be part of the durable identity key,
+    # not resolved from a single nullable column on one session_id row.
+    def get_web_session_world(self, session_id: str, campaign_id: str) -> WebSession | None:
+        r = self._c.execute(
+            "SELECT * FROM web_session_world WHERE session_id=? AND campaign_id=?",
+            (session_id, campaign_id),
+        ).fetchone()
+        return WebSession.model_validate(dict(r)) if r else None
+
+    def save_web_session_world(self, session_id: str, campaign_id: str, *, player_id: str) -> None:
+        """Persist (or update) the durable (session_id, campaign_id) -> player_id mapping --
+        called once a browser session's start_adventure call mints a player_id for THIS
+        world (see web.py's POST /chat finally-bookkeeping). campaign_id here is always the
+        world the turn actually ENDED in (session.campaign_id after dm_loop's start_adventure
+        wrapper may have switched it mid-turn for a freshly-created world) -- never the page's
+        original campaign_id -- so a browser redirected to its brand-new world's page resumes
+        the right character on its very next request."""
+        now = time.time()
+        self._c.execute(
+            "INSERT INTO web_session_world (session_id, campaign_id, player_id, created_at, last_seen, message_count)"
+            " VALUES (?,?,?,?,?,0)"
+            " ON CONFLICT(session_id, campaign_id) DO UPDATE SET player_id=excluded.player_id,"
+            " last_seen=excluded.last_seen",
+            (session_id, campaign_id, player_id, now, now),
+        )
+        self._c.commit()
+
+    def delete_web_session_world(self, session_id: str, campaign_id: str) -> None:
+        """Sever this browser's durable identity mapping for ONE world only (the "new
+        character" flow, now per-world — web.py's POST /chat/reset). Other worlds' rows for
+        the SAME session_id are untouched, which is the whole point versus the old
+        whole-cookie-rotation reset: resetting your character on a friend's world must not
+        also abandon your character back in main (or any other world)."""
+        self._c.execute(
+            "DELETE FROM web_session_world WHERE session_id=? AND campaign_id=?",
+            (session_id, campaign_id),
+        )
+        self._c.commit()
+
+    def touch_web_session_world(self, session_id: str, campaign_id: str) -> int:
+        """Record one turn against this browser session IN THIS WORLD: last_seen=now,
+        message_count+=1 -- creates a bare row (player_id still NULL) the first time this
+        (session_id, campaign_id) pair is ever seen. Returns the NEW message_count, which is
+        what web.py's POST /chat checks against the per-(session,world) lifetime cap (see
+        chat_sessions.session_cap_exceeded) -- the cap is now scoped per world, an accepted
+        consequence of identity itself being scoped per world (see the e0b.10 task notes)."""
+        now = time.time()
+        self._c.execute(
+            "INSERT INTO web_session_world (session_id, campaign_id, player_id, created_at, last_seen, message_count)"
+            " VALUES (?,?,NULL,?,?,1)"
+            " ON CONFLICT(session_id, campaign_id) DO UPDATE SET last_seen=excluded.last_seen,"
+            " message_count=web_session_world.message_count+1",
+            (session_id, campaign_id, now, now),
+        )
+        self._c.commit()
+        row = self._c.execute(
+            "SELECT message_count FROM web_session_world WHERE session_id=? AND campaign_id=?",
+            (session_id, campaign_id),
         ).fetchone()
         return row["message_count"] if row else 0
 

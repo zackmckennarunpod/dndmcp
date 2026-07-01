@@ -121,19 +121,43 @@ a browser chat window. RULES, absolute:
 # stair") into a fully hallucinated room for a character that didn't exist yet. An instruction
 # not to invent scenery loses to in-context examples OF scenery; the fix is a prompt with
 # nothing to parrot, paired with a tool list where start_adventure is the only option.
-INTAKE_PROMPT = """You are the host welcoming a new player to a tabletop RPG, in a browser \
-chat. No game exists for this player yet — there are no rooms, no exits, no scenes, and \
-describing any is an error. Your only job: learn a short theme (e.g. 'gothic horror', \
-'deep-space salvage') and a character name + class, offering to invent any of them if the \
-player would rather you pick, then IMMEDIATELY call start_adventure with what you have. If \
-the player leaves anything up to you, choose something evocative yourself and call the tool \
-without asking again. Keep replies to 1-3 friendly sentences."""
+#
+# TWO variants (e0b.10 addendum), picked per-turn by handle_message via _needs_theme_question:
+# server.start_adventure only ever USES its `theme` argument the very first time a campaign_id
+# is created (see its own `if not camp:` branch) — asking about a theme for a world that
+# already exists is pure friction, and worse, actively misleads the model (and the player)
+# into thinking the model just chose which world this is. Observed live on prod: a player on
+# an existing shared world's page said "start a new character in this world," the intake had
+# no idea what world that was, asked for/invented a theme, and the resulting confusion read as
+# "wrong world." _state_line's per-turn [SERVER STATE] line (below) is what actually NAMES the
+# target world every turn; these prompts just tell the model whether it's allowed to ask about
+# one at all.
+INTAKE_PROMPT_NEW_WORLD = """You are the host welcoming a new player to a tabletop RPG, in a \
+browser chat. No game exists for this player yet — there are no rooms, no exits, no scenes, \
+and describing any is an error. The player chose to found a BRAND NEW world just now, so your \
+job includes picking its theme: learn a short theme (e.g. 'gothic horror', 'deep-space \
+salvage') and a character name + class, offering to invent any of them if the player would \
+rather you pick, then IMMEDIATELY call start_adventure with what you have. If the player \
+leaves anything up to you, choose something evocative yourself and call the tool without \
+asking again. Keep replies to 1-3 friendly sentences."""
+
+INTAKE_PROMPT_EXISTING_WORLD = """You are the host welcoming a new player to a tabletop RPG, \
+in a browser chat. No CHARACTER exists for this player yet — there are no rooms, no exits, no \
+scenes, and describing any is an error — but the WORLD itself already exists and is named for \
+you in a [SERVER STATE] message below (its theme, id, and premise). Do NOT ask the player for \
+a theme, and do NOT invent a different one — that choice was already made when this world was \
+founded, long before this conversation. Your only job: learn a character name + class, \
+offering to invent either if the player would rather you pick (or if they've already told you \
+to just make one, e.g. "make me a character" / "surprise me"), then IMMEDIATELY call \
+start_adventure with what you have. If the player asks what world this is, answer from the \
+[SERVER STATE] line, in your own words. Keep replies to 1-3 friendly sentences."""
 
 
 def create_session(campaign_id: str = MAIN_CAMPAIGN_ID) -> "DMSession":
-    """Factory for one browser session. campaign_id defaults to the shared "main" world per
-    this task's scope (browser sessions join the shared world for now — world-choice UI is a
-    later task, same as DM_PERSONA's numbered choice is for the MCP-agent path today)."""
+    """Factory for one browser session, for ONE world. campaign_id defaults to the shared
+    "main" world, but callers (chat_sessions.get_or_create, e0b.10) always pass the PAGE's own
+    campaign_id explicitly — the browser's world-selection choice card (web.py's PAGE script)
+    is what actually decides which world a given DMSession is for."""
     return DMSession(campaign_id=campaign_id,
                      messages=[{"role": "system", "content": SYSTEM_PROMPT}])
 
@@ -170,17 +194,26 @@ def create_resumed_session(player_id: str, campaign_id: str = MAIN_CAMPAIGN_ID) 
 
 @dataclass
 class DMSession:
-    """One browser player's session. `player_id` is minted server-side inside
-    _tool_start_adventure and stored here — it is NEVER a field the model can set (no tool
-    schema below accepts it), which is the whole prompt-injection boundary this module exists
-    to enforce. `exit_map` is derived, per-current-room state (descriptor -> real direction),
-    rebuilt every time a tool changes/reveals the player's room — it's what lets the model
-    address exits by descriptor only (see _resolve_direction) while server.move() still gets
-    a real compass direction underneath."""
+    """One browser player's session, for ONE world (e0b.10 — a browser can hold one of these
+    per (session_id, campaign_id), see chat_sessions.py). `player_id` is minted server-side
+    inside _tool_start_adventure and stored here — it is NEVER a field the model can set (no
+    tool schema below accepts it), which is the whole prompt-injection boundary this module
+    exists to enforce. `exit_map` is derived, per-current-room state (descriptor -> real
+    direction), rebuilt every time a tool changes/reveals the player's room — it's what lets
+    the model address exits by descriptor only (see _resolve_direction) while server.move()
+    still gets a real compass direction underneath.
+
+    `pending_new_world` (e0b.10): set True by web.py's POST /chat, ONLY while this session has
+    no character yet, when the browser's "Create my world" choice-card button fired. The next
+    start_adventure this turn calls swaps in campaign_id="new" instead of session.campaign_id
+    (see _tool_start_adventure) — after it succeeds, session.campaign_id is updated to the
+    REAL new campaign id and this flag is cleared, so it can only ever fire once per session.
+    """
     campaign_id: str = MAIN_CAMPAIGN_ID
     player_id: str | None = None
     messages: list[dict] = field(default_factory=list)
     exit_map: dict[str, str] = field(default_factory=dict)
+    pending_new_world: bool = False
 
 
 # --- tool schemas exposed to the model -------------------------------------------------------
@@ -282,9 +315,10 @@ TOOLS: list[dict] = [
         }, "required": ["note"]}}},
 ]
 
-# Intake mode's entire tool surface: start_adventure alone. Paired with INTAKE_PROMPT (see
-# its comment) — a session with no character can't call move/attack/look because those tools
-# simply don't exist for it, which is a harder guarantee than any instruction.
+# Intake mode's entire tool surface: start_adventure alone. Paired with the INTAKE_PROMPT_*
+# variants (see their comment) — a session with no character can't call move/attack/look
+# because those tools simply don't exist for it, which is a harder guarantee than any
+# instruction.
 INTAKE_TOOLS: list[dict] = [t for t in TOOLS if t["function"]["name"] == "start_adventure"]
 
 
@@ -405,9 +439,19 @@ def _require_started(session: DMSession) -> str | None:
 async def _tool_start_adventure(session: DMSession, theme: str = "gothic horror",
                                 character_name: str = "Wanderer",
                                 character_class: str = "Fighter") -> str:
+    # "Create my world" (e0b.10): a session with pending_new_world set (web.py's POST /chat,
+    # only ever set while this session had no character yet) passes campaign_id="new" instead
+    # of its own campaign_id — server.start_adventure mints a brand-new world for that. The
+    # REAL id it minted is resolved below via world.character(...).campaign_id once the call
+    # returns, per the task's own preference over re-parsing the reply's world-id line: it's
+    # one authoritative lookup instead of a second regex alongside the player_id one just
+    # below, and it can't ever drift from server.py's actual contract the way text-scraping
+    # could.
+    requesting_new_world = session.pending_new_world
+    campaign_id = "new" if requesting_new_world else session.campaign_id
     raw = await server.start_adventure(theme=theme, character_name=character_name,
                                        character_class=character_class,
-                                       campaign_id=session.campaign_id)
+                                       campaign_id=campaign_id)
     # Extract the freshly-minted player_id from server.start_adventure's own reply — the
     # task brief calls out this is fine over re-implementing world-creation ourselves, since
     # the format ("**player_id: `<id>`**") is fixed and grep-able. It's captured into the
@@ -418,6 +462,10 @@ async def _tool_start_adventure(session: DMSession, theme: str = "gothic horror"
     if not m:
         raise RuntimeError("start_adventure did not return a player_id — server.py contract changed?")
     session.player_id = m.group(1)
+    if requesting_new_world:
+        ch = server.world.character(session.player_id)
+        session.campaign_id = ch.campaign_id if ch else session.campaign_id
+        session.pending_new_world = False
     _rebuild_exit_map(session)
     return _sanitize_scene(raw, session)
 
@@ -598,15 +646,50 @@ def _truncate_history(messages: list[dict]) -> list[dict]:
     return system + kept
 
 
+def _needs_theme_question(session: DMSession) -> bool:
+    """True exactly when start_adventure's `theme` argument will actually be USED — i.e. this
+    turn is going to CREATE a brand-new world, not join one that already exists.
+    server.start_adventure only ever consumes/persists `theme` the first time a given
+    campaign_id is founded (see its own `if not camp:` branch) — every other case, asking the
+    player for one is pure friction and actively misleading (see the INTAKE_PROMPT_* comment
+    for the live prod incident this fixes). Two ways a turn ends up creating a new world:
+    the player explicitly chose to (session.pending_new_world, "Create my world"), or this
+    session's own target campaign_id genuinely hasn't been founded yet (world.campaign(...) is
+    None) — the one case where even MAIN itself might still need its founding theme, on a
+    truly fresh install nobody has ever started an adventure on."""
+    if session.pending_new_world:
+        return True
+    return server.world.campaign(session.campaign_id) is None
+
+
 def _state_line(session: DMSession) -> str:
     """One authoritative sentence of server-known session state, refreshed every turn (see
     handle_message). The model must never have to infer whether an adventure exists, who the
-    character is, or whether they're alive — the server knows all three for free."""
+    character is, or whether they're alive — the server knows all three for free. Also the
+    ONLY place (besides the intake system prompt swap in handle_message) that tells the model
+    WHICH WORLD it's actually in — critical while no character exists yet, since a session's
+    campaign_id is otherwise invisible to the model (see _needs_theme_question's comment)."""
     if not session.player_id:
-        return ("[SERVER STATE] No character exists for this session yet. There are NO rooms, "
-                "exits, or scenes — do NOT describe or invent any. Your ONLY valid opening: "
-                "ask for a theme + character name/class (or offer to invent them), then call "
-                "start_adventure. Every other tool will fail until then.")
+        if _needs_theme_question(session):
+            return ("[SERVER STATE] No character exists for this session yet. This is a BRAND "
+                    "NEW world being founded right now — there are NO rooms, exits, or scenes "
+                    "yet, do NOT describe or invent any. Your ONLY valid opening: ask for a "
+                    "theme + character name/class (or offer to invent them), then call "
+                    "start_adventure. Every other tool will fail until then.")
+        camp = server.world.campaign(session.campaign_id)
+        theme = (camp.theme if camp else "") or "an unnamed world"
+        premise = (camp.premise if camp else "") or ""
+        premise_first = premise.split(". ")[0].strip().rstrip(".") if premise else ""
+        world_label = (theme if session.campaign_id == MAIN_CAMPAIGN_ID
+                      else f"{theme} ({session.campaign_id})")
+        premise_note = f" Premise: {premise_first}." if premise_first else ""
+        return (f"[SERVER STATE] No character exists for this session yet. This session is "
+                f"joining an ALREADY-EXISTING world: {world_label}.{premise_note} That world's "
+                f"theme is fixed — do NOT ask the player for a theme or invent a different "
+                f"one; if asked what world this is, answer from this line. There are NO rooms, "
+                f"exits, or scenes revealed to you yet — do not describe or invent any. Your "
+                f"ONLY valid opening: ask for (or offer to invent) a character name and class, "
+                f"then call start_adventure. Every other tool will fail until then.")
     ch = server.world.character(session.player_id)
     if not ch:
         return ("[SERVER STATE] This session's character no longer exists (world was reset). "
@@ -617,9 +700,12 @@ def _state_line(session: DMSession) -> str:
                 f"new character.")
     room = server.world.room(ch.location_id)
     where = room.name if room else "an unknown place"
+    camp = server.world.campaign(session.campaign_id)
+    world_note = (f" in the world \"{camp.theme}\" ({session.campaign_id})"
+                 if camp and session.campaign_id != MAIN_CAMPAIGN_ID else "")
     return (f"[SERVER STATE] Playing {ch.name} the {ch.klass}, HP {ch.hp}/{ch.max_hp}, "
-            f"currently in {where}. Narrate ONLY from tool results, never from memory of "
-            f"rooms not returned by a tool this session.")
+            f"currently in {where}{world_note}. Narrate ONLY from tool results, never from "
+            f"memory of rooms not returned by a tool this session.")
 
 
 async def handle_message(session: DMSession, user_text: str) -> AsyncIterator[dict]:
@@ -656,14 +742,21 @@ async def handle_message(session: DMSession, user_text: str) -> AsyncIterator[di
 
     while True:
         session.messages = _truncate_history(session.messages)
-        # Intake mode while no character exists: swap in the scenery-free INTAKE_PROMPT
+        # Intake mode while no character exists: swap in the scenery-free INTAKE_PROMPT_*
         # (session.messages[0] is always the stored SYSTEM_PROMPT — swapped at CALL time
         # only, the stored history keeps its real prompt) and offer start_adventure as the
-        # ONLY tool. The moment start_adventure lands mid-turn, session.player_id is set and
-        # the very next loop iteration proceeds in full DM mode with the full tool list.
+        # ONLY tool. Which variant depends on whether THIS turn is founding a brand-new world
+        # or joining one that already exists (_needs_theme_question, e0b.10) — only the
+        # former should ever ask the player for a theme. The moment start_adventure lands
+        # mid-turn, session.player_id is set and the very next loop iteration proceeds in full
+        # DM mode with the full tool list.
         in_intake = not session.player_id
-        call_messages = ([{"role": "system", "content": INTAKE_PROMPT}] + session.messages[1:]
-                         if in_intake else session.messages)
+        if in_intake:
+            intake_prompt = (INTAKE_PROMPT_NEW_WORLD if _needs_theme_question(session)
+                             else INTAKE_PROMPT_EXISTING_WORLD)
+            call_messages = [{"role": "system", "content": intake_prompt}] + session.messages[1:]
+        else:
+            call_messages = session.messages
         tools = (INTAKE_TOOLS if in_intake else TOOLS)
         try:
             message = await _chat(call_messages, tools)
@@ -696,6 +789,10 @@ async def handle_message(session: DMSession, user_text: str) -> AsyncIterator[di
             except json.JSONDecodeError:
                 args = None
 
+            # Captured BEFORE the handler runs — the only way to notice a world switch below
+            # is to compare against what session.campaign_id was walking in, since
+            # _tool_start_adventure (e0b.10) mutates it in place on success.
+            campaign_before_call = session.campaign_id
             handler = TOOL_HANDLERS.get(name)
             if handler is None or args is None:
                 malformed_count += 1
@@ -717,6 +814,14 @@ async def handle_message(session: DMSession, user_text: str) -> AsyncIterator[di
                 "role": "tool", "tool_call_id": tc.get("id") or uuid.uuid4().hex,
                 "content": result_text,
             })
+            # New-world flow (e0b.10): this turn's start_adventure just landed in a DIFFERENT
+            # campaign than it started the turn in — i.e. "Create my world" actually minted
+            # one. Surface it as its own event, BEFORE the turn's final narration text, so the
+            # page's own JS can show a "your world is ready" line and redirect once the turn
+            # finishes (see web.py's PAGE script and POST /chat's finally-bookkeeping, which
+            # persists the durable web_session_world row under this NEW campaign_id).
+            if name == "start_adventure" and session.campaign_id != campaign_before_call:
+                yield {"type": "world", "campaign_id": session.campaign_id}
 
             if malformed_count >= 2:
                 stop_after_tools = True
