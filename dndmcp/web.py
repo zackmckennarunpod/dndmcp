@@ -124,6 +124,7 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
 <main>
  <div class=panel><h2>World map (shared, live)</h2><div class=sub id=whereInMap style="margin-bottom:8px">—</div><div id=map><span id=mapEmpty class=empty>no adventure yet — start one in your agent</span><div id=nodeTooltip></div></div></div>
  <aside style="display:flex;flex-direction:column;gap:16px">
+  <div class=panel><h2>This world</h2><div class=ch id=worldInfo>—</div></div>
   <div class=panel><h2>Character</h2><div class=ch id=char>—</div></div>
   <div class=panel><h2>Selected room</h2><div class=ch id=roomInfo><span class=empty>click a room on the map</span></div></div>
   <div class=panel><h2>Recent</h2><div class=log id=log></div></div>
@@ -393,6 +394,10 @@ async function tick(){
   document.getElementById('whereInMap').textContent = whereText;
   renderGraph(s.rooms||[], s.players||[], s.you||null);
   rebuildHighlightIndex(s);
+  const camp = s.campaign;
+  document.getElementById('worldInfo').innerHTML = camp
+    ? `<b>${esc(camp.theme||'')}</b>${camp.name?` — <span>${esc(camp.name)}</span>`:''}<br>${esc(camp.premise||'')}`
+    : '<span class=empty>no world seeded yet</span>';
   const ch = s.character;
   const invHtml = (ch?.inventory||[]).map(it => {
     const name = typeof it === 'string' ? it : it.name;
@@ -444,7 +449,7 @@ def index() -> str:
     return PAGE
 
 
-_EMPTY_STATE = {"rooms": [], "players": [], "character": None, "you": None, "current_room": None, "log": [], "flash_calls": 0}
+_EMPTY_STATE = {"rooms": [], "players": [], "character": None, "you": None, "current_room": None, "log": [], "flash_calls": 0, "campaign": None}
 
 
 @app.get("/state")
@@ -495,6 +500,14 @@ def state(request: Request) -> JSONResponse:
                    for p in c.execute(
                        "SELECT player_id, name, location_id FROM character WHERE campaign_id=?",
                        (campaign_id,)).fetchall()]
+        # The world's founding hook — theme + premise, seeded once at create_campaign and
+        # never touched again. Currently only ever shown once, in start_adventure's own reply
+        # text, then lost to scrollback — surfacing it here so anyone watching (a spectator,
+        # a returning player) can see what this world's premise actually was.
+        camp_row = c.execute(
+            "SELECT name, theme, premise, created_at FROM campaigns WHERE id=?", (campaign_id,)
+        ).fetchone()
+        campaign = dict(camp_row) if camp_row else None
         char = None
         cur = None
         if player_id:
@@ -518,7 +531,7 @@ def state(request: Request) -> JSONResponse:
         ).fetchone()[0]
         return JSONResponse({"rooms": rooms, "players": players, "character": char,
                              "you": char, "current_room": (dict(cur) if cur else None), "log": log,
-                             "flash_calls": flash_calls})
+                             "flash_calls": flash_calls, "campaign": campaign})
     except sqlite3.OperationalError:
         # schema not initialized yet — no one has called start_adventure on this pod yet
         return JSONResponse(_EMPTY_STATE)
