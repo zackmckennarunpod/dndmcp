@@ -66,6 +66,7 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
 <script>
 const params = new URLSearchParams(location.search);
 const playerId = params.get('player');
+const campaignId = params.get('campaign') || 'main';
 const W=700, H=420;
 function esc(s){ return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 
@@ -188,9 +189,11 @@ function renderGraph(rooms, players, you){
 
 async function tick(){
  try{
-  const url = playerId ? ('/state?player='+encodeURIComponent(playerId)) : '/state';
+  const url = '/state?campaign='+encodeURIComponent(campaignId)
+    + (playerId ? '&player='+encodeURIComponent(playerId) : '');
   const s = await (await fetch(url)).json();
-  document.getElementById('where').textContent = s.current_room ? ('You are in: '+(s.current_room.name||'')) : (playerId ? 'unknown player' : 'spectating — no ?player= in link');
+  const worldTag = campaignId !== 'main' ? `[world: ${campaignId}] ` : '';
+  document.getElementById('where').textContent = worldTag + (s.current_room ? ('You are in: '+(s.current_room.name||'')) : (playerId ? 'unknown player' : 'spectating — no ?player= in link'));
   renderGraph(s.rooms||[], s.players||[], s.you||null);
   const ch = s.character;
   const invHtml = (ch?.inventory||[]).map(it => {
@@ -217,7 +220,7 @@ setInterval(tick,1500);tick();
 // stigmergic mechanic that shows up in-game as "Traces of those who came before."
 const streamEl = document.getElementById('stream');
 const streamDot = document.getElementById('streamDot');
-const es = new EventSource('/stream/events');
+const es = new EventSource('/stream/events?campaign='+encodeURIComponent(campaignId));
 es.addEventListener('world-event', (e) => {
   const ev = JSON.parse(e.data);
   const empty = streamEl.querySelector('.empty');
@@ -246,26 +249,36 @@ _EMPTY_STATE = {"rooms": [], "players": [], "character": None, "you": None, "cur
 @app.get("/state")
 def state(request: Request) -> JSONResponse:
     player_id = request.query_params.get("player")
+    # Multi-world: each world's map is independent now — "main" is the well-known default
+    # (what every pre-multi-world link/bookmark still means), anything else is a specific
+    # world someone created/shared (see server.py start_adventure's campaign_id).
+    campaign_id = request.query_params.get("campaign") or "main"
     try:
         c = _db()
     except Exception:
         return JSONResponse(_EMPTY_STATE)
     try:
         # exits live in the generic `edges` table now (from_type/to_type='room'), not a JSON
-        # column on the room row — same pattern as the Context DB's own edges table.
+        # column on the room row — same pattern as the Context DB's own edges table. Room ids
+        # are unique across worlds by construction (non-main worlds prefix with their own
+        # campaign_id — see server.py), so scoping via "from_id belongs to this campaign" is
+        # enough without a campaign_id column on edges itself.
         exits_by_room: dict[str, dict[str, str]] = {}
         for e in c.execute(
             "SELECT from_id, edge_type, to_id FROM edges WHERE from_type='room' AND to_type='room'"
+            " AND from_id IN (SELECT id FROM rooms WHERE campaign_id=?)", (campaign_id,)
         ).fetchall():
             exits_by_room.setdefault(e["from_id"], {})[e["edge_type"]] = e["to_id"]
 
         rooms = []
-        for r in c.execute("SELECT * FROM rooms").fetchall():
+        for r in c.execute("SELECT * FROM rooms WHERE campaign_id=?", (campaign_id,)).fetchall():
             rooms.append({"id": r["id"], "name": r["name"],
                           "visited": bool(r["visited"]),
                           "exits": exits_by_room.get(r["id"], {})})  # {direction: dest_room_id}
         players = [{"player_id": p["player_id"], "name": p["name"], "location_id": p["location_id"]}
-                   for p in c.execute("SELECT player_id, name, location_id FROM character").fetchall()]
+                   for p in c.execute(
+                       "SELECT player_id, name, location_id FROM character WHERE campaign_id=?",
+                       (campaign_id,)).fetchall()]
         char = None
         cur = None
         if player_id:
@@ -274,9 +287,12 @@ def state(request: Request) -> JSONResponse:
                 char = dict(row)
                 char["inventory"] = json.loads(char["inventory"] or "[]")
                 cur = c.execute("SELECT * FROM rooms WHERE id=?", (char["location_id"],)).fetchone()
-        log = [dict(r) for r in c.execute("SELECT text FROM log ORDER BY seq DESC LIMIT 8").fetchall()][::-1]
+        log = [dict(r) for r in c.execute(
+            "SELECT text FROM log WHERE campaign_id=? ORDER BY seq DESC LIMIT 8", (campaign_id,)
+        ).fetchall()][::-1]
         flash_calls = c.execute(
-            "SELECT COUNT(*) FROM log WHERE kind='room.generated' AND text LIKE '%(flash)%'"
+            "SELECT COUNT(*) FROM log WHERE campaign_id=? AND kind='room.generated' AND text LIKE '%(flash)%'",
+            (campaign_id,),
         ).fetchone()[0]
         return JSONResponse({"rooms": rooms, "players": players, "character": char,
                              "you": char, "current_room": (dict(cur) if cur else None), "log": log,
@@ -292,21 +308,25 @@ def state(request: Request) -> JSONResponse:
 async def stream_events(request: Request):
     """The world's live pulse, pushed to every connected tab as events happen.
 
-    Default (no query params): EVERY player's actions, unfiltered — the out-of-world view of
-    the same stigmergic mechanic that surfaces in-world as 'Traces of those who came before'
-    (server.py's _render_scene). This is the demo centerpiece; don't filter it by default.
+    Default (no query params beyond ?campaign=): EVERY player's actions in ONE world,
+    unfiltered by who's watching — the out-of-world view of the same stigmergic mechanic
+    that surfaces in-world as 'Traces of those who came before' (server.py's _render_scene).
+    This is the demo centerpiece; don't filter it by player by default. Scoped to ?campaign=
+    (default "main") since multi-world landed — otherwise another world's ghosts would leak
+    into yours, which breaks the premise just as badly as per-player filtering would.
 
     Optional filters (EVENT_STREAM_SPEC.md #4 — a separate capability layered on top, same
     feed mechanism): ?player_id=  (one player's own events), ?subject_type=&subject_id=
     (one room/npc's history), ?kind_prefix=  (e.g. "flash." for system/GPU events vs
     everything else). Combine freely; each is AND'd in."""
+    campaign_id = request.query_params.get("campaign") or "main"
     player_id = request.query_params.get("player_id")
     subject_type = request.query_params.get("subject_type")
     subject_id = request.query_params.get("subject_id")
     kind_prefix = request.query_params.get("kind_prefix")
 
-    where = []
-    params: list[object] = []
+    where = ["campaign_id = ?"]
+    params: list[object] = [campaign_id]
     if player_id:
         where.append("player_id = ?")
         params.append(player_id)

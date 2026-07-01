@@ -113,13 +113,18 @@ def new_character(name: str, klass: str) -> dict:
             "stats": stats, "inventory": starting_kit}
 
 
-def _seeded(room_id: str) -> random.Random:
-    return random.Random(int(hashlib.sha1(room_id.encode()).hexdigest()[:8], 16))
+def _seeded(room_id: str, salt: str = "") -> random.Random:
+    """Deterministic per (room_id, salt) — same room_id in the SAME world always resolves the
+    same way (reproducible within a session/world), but different worlds (different salt,
+    minted once per campaign) don't generate identical rooms even from the same starting
+    room_id ("r0"). Without a salt, every fresh world was hashing the exact same string and
+    landing on the exact same "random" room name every time — the bug this fixes."""
+    return random.Random(int(hashlib.sha1(f"{salt}:{room_id}".encode()).hexdigest()[:8], 16))
 
 
-def generate_room(room_id: str, theme: str, *, entry_from: str | None = None) -> dict:
+def generate_room(room_id: str, theme: str, *, entry_from: str | None = None, salt: str = "") -> dict:
     """Procedurally build a room: name, exits, and contents (monster/loot/nothing)."""
-    rng = _seeded(room_id)
+    rng = _seeded(room_id, salt)
     t = _theme(theme)
     name = rng.choice(t["rooms"])
     # 1-3 exits, always include the way back if we entered from somewhere

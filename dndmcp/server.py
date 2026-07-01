@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import secrets
 import uuid
 
 from mcp.server.fastmcp import FastMCP
@@ -19,7 +20,7 @@ from mcp.server.fastmcp import FastMCP
 from . import art, compendium, game, linear_gen, worldgen
 from .linear_world import TicketWorld
 from .models import Campaign, Room
-from .state import World
+from .state import MAIN_CAMPAIGN_ID, World
 
 # This server hosts more than one world on the same graph engine — D&D is one instance of it,
 # the task graph is another. Shown to the connecting agent FIRST, before either world's own
@@ -74,13 +75,15 @@ world = World()
 tickets = TicketWorld()
 
 
-def _nearby_region(from_room_id: str, *, depth: int = 2, exclude: str | None = None) -> list[tuple[str, str]]:
-    """BFS outward through already-generated (linked) rooms up to `depth` hops — a compact
-    (name, kind) summary fed to the next room's LLM prompt for tonal/architectural continuity.
-    Pure DB reads; no extra LLM calls."""
+def _nearby_region(from_room_id: str, *, depth: int = 2,
+                   exclude: str | None = None) -> list[tuple[str, str, str]]:
+    """BFS outward through already-generated (linked) rooms up to `depth` hops — (name, kind,
+    room_id) triples. The (name, kind) pair feeds the next room's LLM prompt for tonal/
+    architectural continuity; room_id lets callers also check what's already living nearby
+    (see _maybe_spawn_entity_persona's density gate). Pure DB reads; no extra LLM calls."""
     seen = {from_room_id} | ({exclude} if exclude else set())
     frontier = [from_room_id]
-    out: list[tuple[str, str]] = []
+    out: list[tuple[str, str, str]] = []
     for _ in range(depth):
         next_frontier = []
         for rid in frontier:
@@ -93,7 +96,7 @@ def _nearby_region(from_room_id: str, *, depth: int = 2, exclude: str | None = N
                 seen.add(dest_id)
                 dest = world.room(dest_id)
                 if dest:
-                    out.append((dest.name, dest.kind))
+                    out.append((dest.name, dest.kind, dest_id))
                     next_frontier.append(dest_id)
         frontier = next_frontier
         if not frontier:
@@ -109,9 +112,9 @@ def _require_room(room_id: str) -> Room:
     return room
 
 
-def _require_campaign() -> Campaign:
-    camp = world.campaign()
-    assert camp is not None, "campaign referenced but none exists yet"
+def _require_campaign(campaign_id: str = MAIN_CAMPAIGN_ID) -> Campaign:
+    camp = world.campaign(campaign_id)
+    assert camp is not None, f"campaign {campaign_id!r} referenced but none exists yet"
     return camp
 
 
@@ -126,12 +129,14 @@ def _gui_link() -> str:
 def list_worlds() -> str:
     """List the worlds this server hosts. Call this first when connecting, before assuming
     which one the user wants."""
-    camp = world.campaign()
+    camp = world.campaign()  # the main dnd world specifically
     dnd_status = f"in progress ({camp.theme})" if camp else "not started yet"
     n_tickets = len(tickets.all_tickets())
     return (
-        "**dnd** — solo/shared tabletop RPG. start_adventure to begin. "
-        f"Status: {dnd_status}.\n"
+        "**dnd** — solo/shared tabletop RPG. start_adventure joins the main shared world by "
+        'default (everyone\'s ghosts pass through here). Pass campaign_id="new" to start your '
+        "own world instead (you get back a shareable id), or campaign_id=<id> to join a "
+        f"specific world someone shared with you. Main world status: {dnd_status}.\n"
         "**tickets** — a task graph (Linear-style). list_tickets / seed_demo_tickets to begin. "
         f"Status: {n_tickets} ticket(s) loaded."
     )
@@ -183,7 +188,8 @@ def _render_scene(room: Room, *, player_id: str | None = None, ambient: bool = T
         for t in traces:
             lines.append(f"  - {t.text}")
     if ambient:
-        camp = world.campaign()
+        ch = world.character(player_id) if player_id else None
+        camp = world.campaign(ch.campaign_id if ch else MAIN_CAMPAIGN_ID)
         lines.append(f"\n_{game.ambient_event(camp.theme if camp else 'default')}_")
     lines.append("")
     lines.append(game.ascii_map(room.model_dump()))
@@ -204,33 +210,58 @@ def _render_scene(room: Room, *, player_id: str | None = None, ambient: bool = T
 
 @mcp.tool()
 async def start_adventure(theme: str = "gothic horror", character_name: str = "Wanderer",
-                          character_class: str = "Fighter") -> str:
-    """Begin your adventure in the shared world (joins the existing campaign if one is already
-    running, otherwise starts one). Returns your player_id — pass it as player_id to every
-    other tool call — and a link to watch your position live on the map."""
+                          character_class: str = "Fighter",
+                          campaign_id: str | None = None) -> str:
+    """Begin your adventure. `campaign_id` picks WHICH world:
+      - omit it (or pass "main") -> the persistent default world everyone lands in
+      - "new" -> create a brand-new world; the reply gives you back its shareable id — send
+        that to others so they can join THIS world with campaign_id=<that id>
+      - any other value -> join that specific existing world by its id (a clear error if it
+        doesn't exist)
+    Returns your player_id — pass it as player_id to every other tool call — and a link to
+    watch your position live on the map."""
     player_id = uuid.uuid4().hex[:12]
-    camp = world.campaign()
-    start_id = camp.start_room if camp else "r0"
+
+    if campaign_id is None or campaign_id == MAIN_CAMPAIGN_ID:
+        target_id = MAIN_CAMPAIGN_ID
+    elif campaign_id == "new":
+        target_id = secrets.token_hex(4)
+    else:
+        if not world.campaign_exists(campaign_id):
+            return (f'No world with id "{campaign_id}" exists. Omit campaign_id to join the '
+                     'main world, or pass campaign_id="new" to start your own.')
+        target_id = campaign_id
+
+    camp = world.campaign(target_id)
     if not camp:
-        gen = await worldgen.generate_room_content(start_id, theme)
+        start_id = "r0" if target_id == MAIN_CAMPAIGN_ID else f"{target_id}:r0"
         premise = (f"A {theme} adventure. Something stirs in the dark, "
                    f"seeking what others feared to find.")
-        world.new_campaign(theme=theme, premise=premise, start_room=start_id)
-        world.upsert_room(room_id=start_id, name=gen["name"], description=gen["description"],
-                          exits=gen["exits"], contents=gen["contents"], features=gen.get("features"),
+        camp = world.create_campaign(target_id, theme=theme, premise=premise, start_room=start_id)
+        gen = await worldgen.generate_room_content(start_id, theme, salt=camp.salt)
+        await _maybe_spawn_entity_persona(gen, start_id, theme, [])  # no neighbors yet
+        world.upsert_room(room_id=start_id, campaign_id=target_id, name=gen["name"],
+                          description=gen["description"], exits=gen["exits"],
+                          contents=gen["contents"], features=gen.get("features"),
                           kind=gen.get("kind", ""))
-    camp = _require_campaign()
-    room = _require_room(start_id)
+    room = _require_room(camp.start_room)
     ch = game.new_character(character_name, character_class)
-    char = world.new_character(player_id, name=ch["name"], klass=ch["klass"], hp=ch["hp"], ac=ch["ac"],
-                               stats=ch["stats"], inventory=ch["inventory"], location_id=start_id)
-    world.mark_visited(start_id)
+    char = world.new_character(player_id, camp.id, name=ch["name"], klass=ch["klass"], hp=ch["hp"],
+                               ac=ch["ac"], stats=ch["stats"], inventory=ch["inventory"],
+                               location_id=camp.start_room)
+    world.mark_visited(camp.start_room)
     world.log("adventure.started", f"{char.name} the {char.klass} joined the adventure.",
               player_id=player_id)
-    asyncio.create_task(_prefetch_frontier(room, camp.theme))  # fire-and-forget
+    asyncio.create_task(_prefetch_frontier(room, camp.theme, camp.id, camp.salt))  # fire-and-forget
+    share_note = (f'\n\n🔗 **World id: `{camp.id}`** — share this so others can join THIS '
+                 f'exact world (start_adventure with campaign_id="{camp.id}").'
+                 if camp.id != MAIN_CAMPAIGN_ID else "")
+    map_link = f"{_gui_link()}/?player={player_id}"
+    if camp.id != MAIN_CAMPAIGN_ID:
+        map_link += f"&campaign={camp.id}"
     return (f"# {camp.premise}\n\nYou are **{char.name}**, a level 1 {char.klass} "
             f"(HP {char.hp}, AC {char.ac}).\n\n**player_id: `{player_id}`** — pass this to every "
-            f"other tool call.\n\n🗺 Watch your adventure live: {_gui_link()}/?player={player_id}\n\n"
+            f"other tool call.{share_note}\n\n🗺 Watch your adventure live: {map_link}\n\n"
             + _render_scene(room, player_id=player_id))
 
 
@@ -243,20 +274,57 @@ def look(player_id: str) -> str:
     return _render_scene(_require_room(ch.location_id), player_id=player_id)
 
 
-async def _generate_and_link(dest_id: str, theme: str, *, entry_from: str, back_to_id: str) -> None:
+# Max alive named NPCs within a depth-2 neighborhood before we stop generating more personas
+# nearby — a deterministic, non-LLM gate (per-room persona generation is the expensive part)
+# that keeps distinct personalities from clustering shoulder-to-shoulder. Spawned monsters
+# beyond this limit still exist and still fight — they just stay a nameless mechanical
+# encounter instead of getting a full identity.
+_NPC_DENSITY_LIMIT = 2
+
+
+async def _maybe_spawn_entity_persona(new_room: dict, dest_id: str, theme: str,
+                                      nearby_room_ids: list[str]) -> None:
+    """If this room's procedural gen placed a monster, decide (deterministically, from what's
+    already alive nearby) whether it's worth a full LLM persona, generate one, and store it
+    as a first-class `entity` row. Mutates new_room['contents'] in place so the monster's
+    display name matches its generated identity before the room is even saved — call this
+    BEFORE world.upsert_room."""
+    mon = next((c for c in new_room["contents"] if c.get("type") == "monster"), None)
+    if not mon:
+        return
+    if world.count_alive_entities_in(nearby_room_ids) >= _NPC_DENSITY_LIMIT:
+        return  # stays a nameless mechanical encounter — still fights fine
+    kind = mon["name"]  # SRD species name (e.g. "Goblin") — capture before we overwrite it
+    persona = await worldgen.generate_npc_persona(
+        mon, theme, new_room["name"], new_room.get("kind", ""), new_room["description"])
+    mon["name"] = persona["name"]
+    world.upsert_entity(entity_id=mon["id"], kind=kind, name=persona["name"],
+                        location_id=dest_id, disposition=persona["disposition"],
+                        persona=persona["persona"], goal=persona["goal"])
+    world.log("entity.spawned", f"{persona['name']} the {kind} appeared in {new_room['name']}.",
+             subject_type="entity", subject_id=mon["id"])
+
+
+async def _generate_and_link(dest_id: str, theme: str, campaign_id: str, salt: str, *,
+                             entry_from: str, back_to_id: str) -> None:
     """Generate one room and apply the same bidirectional-link fix as the reactive path —
-    used by both move() (reactive) and the fan-out prefetch (speculative) below."""
-    nearby = _nearby_region(back_to_id, depth=2)
+    used by both move() (reactive) and the fan-out prefetch (speculative) below. `salt` is
+    the owning campaign's — see game._seeded for why every room in a world must share it."""
+    nearby_full = _nearby_region(back_to_id, depth=2)
+    nearby = [(name, kind) for name, kind, _rid in nearby_full]
     new_room = await worldgen.generate_room_content(
-        dest_id, theme, entry_from=entry_from, nearby=nearby)
+        dest_id, theme, entry_from=entry_from, nearby=nearby, salt=salt)
     new_room["exits"][game.opposite_of(entry_from)] = back_to_id
-    world.upsert_room(room_id=dest_id, name=new_room["name"], description=new_room["description"],
-                      exits=new_room["exits"], contents=new_room["contents"],
-                      features=new_room.get("features"), kind=new_room.get("kind", ""))
-    world.log("room.generated", f"{new_room['name']} generated ({new_room.get('via', 'procedural')})")
+    await _maybe_spawn_entity_persona(new_room, dest_id, theme, [rid for _, _, rid in nearby_full])
+    world.upsert_room(room_id=dest_id, campaign_id=campaign_id, name=new_room["name"],
+                      description=new_room["description"], exits=new_room["exits"],
+                      contents=new_room["contents"], features=new_room.get("features"),
+                      kind=new_room.get("kind", ""))
+    world.log("room.generated", f"{new_room['name']} generated ({new_room.get('via', 'procedural')})",
+             campaign_id=campaign_id)
 
 
-async def _prefetch_frontier(room: Room, theme: str) -> None:
+async def _prefetch_frontier(room: Room, theme: str, campaign_id: str, salt: str) -> None:
     """Fan out generation for every exit of `room` that doesn't exist yet, in parallel, so
     whichever way the player heads next it's already there — the Flash-burst story: the world
     builds itself ahead of you. Fire-and-forget; never blocks the caller's move/look response."""
@@ -264,7 +332,7 @@ async def _prefetch_frontier(room: Room, theme: str) -> None:
     if not missing:
         return
     await asyncio.gather(*(
-        _generate_and_link(dest_id, theme, entry_from=d, back_to_id=room.id)
+        _generate_and_link(dest_id, theme, campaign_id, salt, entry_from=d, back_to_id=room.id)
         for d, dest_id in missing
     ), return_exceptions=True)
 
@@ -275,7 +343,7 @@ async def move(player_id: str, direction: str) -> str:
     ch = world.character(player_id)
     if not ch:
         return "Unknown player_id. Call start_adventure first."
-    camp = _require_campaign()
+    camp = _require_campaign(ch.campaign_id)
     direction = direction.strip().lower()
     here = _require_room(ch.location_id)
     if direction not in here.exits:
@@ -286,12 +354,13 @@ async def move(player_id: str, direction: str) -> str:
         # f"{dest_id}:{opposite}", which is NOT here.id — that would silently create a
         # duplicate room on backtrack instead of returning you home. _generate_and_link
         # forces the real link.
-        await _generate_and_link(dest_id, camp.theme, entry_from=direction, back_to_id=here.id)
+        await _generate_and_link(dest_id, camp.theme, camp.id, camp.salt,
+                                 entry_from=direction, back_to_id=here.id)
     world.set_location(player_id, dest_id)
     world.mark_visited(dest_id)
     dest = _require_room(dest_id)
     world.log("player.moved", f"{ch.name} moved {direction} into {dest.name}", player_id=player_id)
-    asyncio.create_task(_prefetch_frontier(dest, camp.theme))  # fire-and-forget
+    asyncio.create_task(_prefetch_frontier(dest, camp.theme, camp.id, camp.salt))  # fire-and-forget
     return _render_scene(dest, player_id=player_id)
 
 
@@ -418,8 +487,9 @@ async def pick_up_item(player_id: str, item_name: str | None = None) -> str:
 @mcp.tool()
 async def talk_to(player_id: str, message: str, npc_name: str | None = None) -> str:
     """Talk to a monster/NPC in your current room. Generates an in-character response.
-    Conversation history is stored on the NPC itself, not on you — since the world is shared,
-    a different player who talks to the same NPC later sees the same accumulated history."""
+    Identity and conversation memory live on the entity itself, not on you — since the world
+    is shared, a different player who talks to the same NPC later sees the same persona and
+    accumulated history."""
     ch = world.character(player_id)
     if not ch:
         return "Unknown player_id. Call start_adventure first."
@@ -436,13 +506,26 @@ async def talk_to(player_id: str, message: str, npc_name: str | None = None) -> 
         npc = npcs[0]
 
     camp = _require_campaign()
-    npc.setdefault("conversation", [])
-    result = await worldgen.generate_npc_response(npc, camp.theme, room.description, message)
-    npc["conversation"].append({"role": "player", "content": message})
-    npc["conversation"].append({"role": "npc", "content": result["text"]})
-    world.upsert_room(room_id=room.id, name=room.name, description=room.description,
-                      exits=room.exits, contents=room.contents, features=room.features)
-    world.log("npc.talked", f"{ch.name} talked to {npc['name']}: {message!r}", player_id=player_id)
+    ent = world.entity(npc["id"])
+    if not ent:
+        # No persona yet — the spawn-time density gate skipped it, or this NPC predates the
+        # feature. Generate one lazily now that a player actually cares enough to talk to it.
+        kind = npc["name"]  # SRD species name before we overwrite it below
+        gen = await worldgen.generate_npc_persona(npc, camp.theme, room.name, room.kind, room.description)
+        npc["name"] = gen["name"]
+        ent = world.upsert_entity(entity_id=npc["id"], kind=kind, name=gen["name"],
+                                  location_id=room.id, disposition=gen["disposition"],
+                                  persona=gen["persona"], goal=gen["goal"])
+        world.upsert_room(room_id=room.id, name=room.name, description=room.description,
+                          exits=room.exits, contents=room.contents, features=room.features)
+
+    npc_for_llm = {**npc, "persona": ent.persona, "goal": ent.goal,
+                  "disposition": ent.disposition, "conversation": ent.memory}
+    result = await worldgen.generate_npc_response(npc_for_llm, camp.theme, room.description, message)
+    world.append_entity_memory(ent.id, "player", message)
+    world.append_entity_memory(ent.id, "npc", result["text"])
+    world.log("npc.talked", f"{ch.name} talked to {npc['name']}: {message!r}", player_id=player_id,
+             subject_type="entity", subject_id=ent.id)
     return f"💬 {npc['name']}: \"{result['text']}\""
 
 

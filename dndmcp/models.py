@@ -13,20 +13,28 @@ from pydantic import BaseModel, ConfigDict
 
 
 class Campaign(BaseModel):
+    """One world. `id` is the shareable join code — "main" is the well-known default world
+    everyone lands in without specifying one; anything else is a world someone created and
+    can share the id/link for others to join. `salt` seeds room generation (game.py._seeded)
+    so two different worlds of the same theme don't generate identical rooms — see the
+    room-repeat bug this fixes."""
     model_config = ConfigDict(extra="forbid")
 
-    id: int = 1
+    id: str = "main"
+    name: str = ""
     theme: str
     premise: str
     created_at: float
     start_room: str
     turn: int = 0
+    salt: str = ""
 
 
 class Character(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     player_id: str
+    campaign_id: str = "main"
     name: str
     klass: str
     level: int = 1
@@ -55,6 +63,24 @@ class Room(BaseModel):
                     # informs exit-count feel and gives nearby-region context to later gens
 
 
+class Entity(BaseModel):
+    """A first-class NPC/monster identity — persona, goal, disposition, and conversation
+    memory for one specific spawned instance. Mechanical combat stats (hp/ac/attack/damage)
+    stay on the room.contents dict as before (attack()/damage() already mutate that in
+    place); this table is the narrative half only, joined to that dict by `id`."""
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    kind: str = ""  # SRD species/type, e.g. "Goblin" — the compendium anchor
+    name: str
+    location_id: str | None = None
+    disposition: str = "neutral"  # hostile | neutral | ally
+    alive: bool = True
+    persona: str = ""
+    goal: str = ""
+    memory: list[dict] = []  # [{"role": "player"|"npc", "content": ...}, ...]
+
+
 class LogEntry(BaseModel):
     """A domain event. `kind` is dotted-namespace (e.g. "player.moved", "room.generated",
     "combat.resolved", "memory.noted") so the stream is filterable by category, not just by
@@ -64,6 +90,7 @@ class LogEntry(BaseModel):
     kind: str
     text: str
     player_id: str | None = None
+    campaign_id: str = "main"
     subject_type: str | None = None  # "room" | "item" | "entity" | ... — see state.py.log()
     subject_id: str | None = None
     ts: float = 0.0
