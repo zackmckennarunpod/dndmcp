@@ -1,126 +1,157 @@
 # DNDMCP — Handoff / Resume Point
 
-**Date:** 2026-06-30 (hackathon day; video due Wed 12pm PST). Account: **CLEAN** (only
-`runpod-coder-v1` remains; zero forge leaks). Read this first, then BUILD.md / REQUIREMENTS.md /
-WORLD_SCHEMA.md / MCP_SURFACE.md / JUDGING.md / STRATEGY.md / ideas/.
+**Date:** 2026-07-01, ~00:50 (hackathon day; video due Wed 12pm PST — check current time against this).
+Read this first. Then REQUIREMENTS.md / WORLD_SCHEMA.md / JUDGING.md / STRATEGY.md.
 
-## What this is
-**DNDMCP** — an MCP server that turns any agent harness into a Dungeon Master for a solo RPG in
-**The Sundered Weave** (original setting: runaway-AI-magic collapsed civilization; the world's
-"magic" is AI — thematic wink for a Flash/AI hackathon). The MCP **proxies GPU generation to
-Runpod Flash** ("an MCP that proxies requests to GPUs"). All through tools; terminal-rendered
-(text/ASCII), GUI map optional.
+## ⭐ THE BIG NEWS: Flash LLM world-gen is WORKING, confirmed live, end to end
 
-## ✅ WORKS NOW (playable, zero-GPU fallback)
-- Game engine + DM persona — proven in a real Sonnet 5 session. Tools: start_adventure, look,
-  move, roll_dice, attack, character_sheet, get_state (+ be_the_dm prompt).
-- Persistent world graph (SQLite, `dndmcp/state.py`): campaign, character, rooms(+features+exits), log.
-- **SRD compendium** (`dndmcp/compendium.py`): 334 real monsters + 15 conditions vendored
-  (`dndmcp/srd/`), wired into combat → rules-accurate (real AC/HP/attacks/traits).
-- **Liveness**: room features, ambient events, real monsters → fixed "not alive" feedback (procedural).
-- **World-builder** (`dndmcp/worldgen.py`): structured directional room gen via Flash LLM, with
-  procedural fallback. Setting bible (`dndmcp/setting.py`) injected into all gen.
-- Container brain (`Dockerfile`, `dndmcp/app.py`): MCP(HTTP)+GUI together; builds + runs locally.
-- GUI map (`dndmcp/web.py`): live world map synced to DB. Local dev setup (`dndmcp/SETUP.md`,
-  `claude_desktop_config.snippet.json`).
-- **forge kit** (`forge/`): the Flash GPU-proxy layer — mint/call/fanout/cost/teardown/diagnostics.
-  Live-validated days ago (selftest, cross-silicon, evolver).
+This was the critical blocker all session. It's resolved. The working recipe:
 
-## 🟢 FLASH LLM — THE RECIPE (resolved the saga; resume here)
-After a long debugging marathon, the working pattern for an LLM on Flash is the **canonical
-class pattern from our OWN repos** (`tetra-rp/tetra-examples/2_ml_inference/llm_inference/vllm_inference.py`
-and `coding-model` → runpod-coder-v1). NOT a cloudpickle function handler, NOT the
-worker-v1-vllm image-without-a-staged-model. **The script `scripts/deploy_vllm_class.py` has it:**
+- **SDK version matters — a lot.** `runpod-flash==1.7.0` (what `.venv` had) silently discards
+  `Endpoint(image=...)` and deploys Flash's own default image instead (a real upstream bug,
+  fixed in `runpod/flash` PR #339, merged 2026-05-27). `.venv` was Python 3.14, and no
+  `runpod-flash` release above 1.7.0 supports 3.14 — that's why we were stuck on the buggy
+  version. **Fix:** rebuilt `.venv` on **Python 3.13** (`.venv-py314-old` is the backup of the
+  broken one), `pip install runpod-flash==1.18.0`. Confirmed fix via the new log line Flash
+  prints: `"Endpoint 'X': using user-supplied image '...' (overrides Flash runtime image)"`.
+- **Image:** `runpod/worker-v1-vllm:v2.22.4` — NOT `runpod/worker-vllm:stable-cuda12.1.0` (that
+  Docker Hub repo is abandoned since July 2024, bundles vLLM 0.4.2, predates Qwen2.5 entirely —
+  weights load, but generation silently 400s with a blank message). `runpod/worker-v1-vllm` is
+  the actively maintained repo (new releases weekly).
+- **Must pin `min_cuda_version=CudaVersion.V13_0`** on the `Endpoint(...)`. This image's
+  container declares `cuda>=13.0`; without pinning, Flash can schedule the pod onto an
+  older-driver host, which fails at container-init (`nvidia-container-cli: unsatisfied
+  condition: cuda>=13.0`) — intermittent, host-dependent, looks like a random flake otherwise.
+- **Calling convention:** use the documented OpenAI-compatible HTTP route directly —
+  `POST https://api.runpod.ai/v2/{endpoint_id}/openai/v1/chat/completions` with a standard
+  `{model, messages, max_tokens, temperature}` body. The QB `ep.run({"input": {...}})` job
+  format hits an unrelated bug (a blank-message `BadRequestError` from the worker's internal
+  `JobInput` routing) — not our bug, don't chase it, just use the HTTP route.
+- **Constructing `Endpoint(...)` does NOT deploy it.** Deploy is lazy, triggered by the first
+  actual call. `dndmcp/flash_llm.py::ensure()` fires one throwaway `.run({"input": {}})` (its
+  error is expected and ignored — it's the known blank-message bug, harmless here since we're
+  just forcing deployment) then resolves the real endpoint ID via a `myself { endpoints { id
+  name } }` GraphQL query. Locked with an `asyncio.Lock` so concurrent fan-out calls don't race
+  to construct duplicate endpoints.
+- `dndmcp/flash_llm.py` is fully rewritten to this recipe, no `forge` dependency (bare
+  `runpod_flash` + keychain auth). Endpoint name `dnd-llm-vllm`, `workers=(0,3)` (scale-to-zero).
+- **Verified live** multiple times: real generated rooms ("The Whispering Crypt," "Tempest
+  Tunnels," "Vault of Shadows," etc.), fan-out prefetch generating background rooms, `kind`
+  field populated by the model.
 
-```python
-@Endpoint(name="dnd-llm", gpu=GpuGroup.AMPERE_24, workers=(1,1),
-          dependencies=["vllm==0.7.3", "transformers==4.48.2"])   # PINNED — see why below
-class DnDLLM:
-    def __init__(self):
-        import os; from vllm import LLM, SamplingParams
-        os.environ["VLLM_USE_V1"]="0"; os.environ["VLLM_WORKER_MULTIPROC_METHOD"]="spawn"
-        self.llm = LLM(model="Qwen/Qwen2.5-1.5B-Instruct", enforce_eager=True,
-                       gpu_memory_utilization=0.6, max_model_len=2048)
-    def chat(self, messages, ...): ...   # build im_start prompt, self.llm.generate(...)
-```
+## World-gen: facts, not pre-written prose
 
-**Errors cleared, in order (each was a real root cause):**
-1. Silent 500s (worker-v1-vllm IMAGE) — unreadable. The CLASS executor RETURNS exceptions → debuggable. Switch to the class.
-2. `libcudart.so.13: cannot open shared object` — latest `vllm` is built for CUDA 13; flash:latest container is CUDA 12 → **pin `vllm==0.7.3`** (CUDA-12, supports Qwen2.5).
-3. `Could not import ProcessorMixin` — vllm 0.7.3 ↔ transformers mismatch → **pin `transformers==4.48.2`**.
-4. (state at context-clear) Redeploying with BOTH pinned; was still in the big cold-start
-   (vllm+transformers install + model load, the longest yet), NO error yet — promising.
+Reframed per direct feedback: the Flash world-builder returns FACTS (`name, kind, atmosphere`
+[one sentence], `feature, has_monster, notable_item`), not a pre-composed scene description.
+The DM agent (whoever's running the actual session) narrates FROM those facts, same as a human
+DM works from notes — it does NOT just relay fields verbatim. `_compose_look()` (the old
+`ahead/left/right/center` directional-prose scheme) is gone. `dndmcp/server.py`'s `DM_PERSONA`
+says this explicitly now.
 
-**Stability env vars are mandatory** (from the tetra example): `VLLM_USE_V1=0`,
-`VLLM_WORKER_MULTIPROC_METHOD=spawn`, `enforce_eager=True`, `gpu_memory_utilization=0.6`.
+## Graph model: real edges table, not a JSON blob
 
-**RESUME STEP:** `RUNPOD_API_KEY=$(security find-generic-password -s runpod-api-key-prod -w) \
-.venv/bin/python -m scripts.deploy_vllm_class --keep` → if it returns the JSON room, **loop closed**:
-then point `dndmcp/worldgen.py` / `flash_llm.py` at this endpoint (the class is callable as
-`await DnDLLM().chat(messages)`). If another dep error, keep pinning (next likely: a tokenizers/
-torch pin) — the class executor will show the exact error in the job output.
+Replaced `rooms.exits` (a JSON column on the room row) with a **generic `edges` table**
+(`from_type, from_id, to_type, to_id, edge_type, metadata`) — same pattern as the Context DB's
+own `edges` table, and what `WORLD_SCHEMA.md` actually specified from the start ("a generic
+edges table for relationships"). Enables reverse lookups (`edges_to()`) that a JSON blob never
+could. `Room.exits` stays the same `dict[str,str]` shape at the model/API level — only the
+persistence changed (`state.py`: `set_edges()`, `edges_from()`, `edges_to()`, `room_exits()`).
+`SCHEMA_VERSION` bumped to 4 (dev-mode: version mismatch = wipe and recreate — see ⚠️ below).
 
-**Debugging tip (hard-won):** worker logs are NOT reachable from automation (job-logs API =
-empty/lifecycle only; pod-logs hapi.runpod.net = Cloudflare 403 even w/ JWT; Datadog = scheduler
-only). The CLASS pattern returning exceptions as job output is the ONLY agent-visible error channel.
-5 Flash gotchas recorded to Context DB (`find_learnings('flash')`).
+**Direction vocabulary is no longer cardinal-only.** `game.DIRECTIONS` now includes `up`/`down`
+with proper opposites, plus `game.opposite_of()` for a generic `"back"` fallback on any future
+free-form label (e.g. "through the broken wall") that has no natural single-word opposite.
+Vertical continuity: a `down`/`up` passage has a 50% chance of continuing the same way (the
+cellar keeps going down, not just dead-ending sideways).
 
-## 🔴 (historical) BLOCKED — the critical Flash anchor (LLM world-gen)
-**Goal:** a small LLM running on Flash generates structured world content (rooms/NPCs/lore) as you
-explore → written to DB. Code is DONE (`dndmcp/flash_llm.py`, `worldgen.py` wired, stub fallback).
-**Blocker:** the Flash worker (`runpod/flash:latest`, used by forge.mint decorator mode) requires
-**CUDA≥12.8**; workers landing on older-driver hosts crash at container-init
-(`nvidia-container-cli: unsatisfied condition: cuda>=12.8`) → crash-loop → job stuck inQueue.
-Intermittent (host-dependent) — that's why earlier raw-torch tests worked (good hosts).
+**Fixed a real bidirectional-linking bug**: the procedural generator computes its own back-exit
+id as `f"{new_room_id}:{opposite_direction}"`, which is NOT the actual origin room's id —
+walking back the way you came used to silently generate a *duplicate* room instead of
+returning you home. `server.py::_generate_and_link()` now force-corrects this.
 
-### Resolution paths (pick one next session)
-1. **Pin CUDA on the resource config (smallest change):** Endpoint ctor has no cuda kwarg, but
-   `endpoint._build_resource_config()` returns a `LiveServerless` with a settable `cudaVersions`
-   field (default `[]`). Set `cudaVersions=[CudaVersion.V12_8]` before deploy, or patch
-   `forge.minting.mint` to accept + apply it. Risk: shrinks host pool → possible allocation hangs.
-2. **Client-mode vLLM image (RECOMMENDED for LLM serving):** `Endpoint(image="<vllm-image>", ...)`
-   with an image built on a CUDA the hosts support (error says "use an earlier cuda container").
-   Solves BOTH the cuda mismatch AND avoids cloudpickle-handler model-load fragility. Standard way
-   to serve LLMs on Runpod serverless. Wire `flash_llm`/`inference` to call its /v1/chat/completions.
-3. **Retry/datacenter:** flaky, not recommended alone.
+**Speculative fan-out prefetch (R9) is built**: `_prefetch_frontier()` generates every
+still-unlinked exit of a room in parallel, fire-and-forget, the moment you enter it — verified
+generating 3 background rooms beyond what was actually visited in one rehearsal.
 
-NOTE: the defensive-handler diagnostic (return errors) does NOT help here — the crash is at
-CONTAINER INIT, before the handler runs. The fix is host/image cuda, not handler code.
+**Nearby-region context**: `_nearby_region()` (pure BFS over already-generated rooms, depth 2,
+no extra LLM calls) feeds a compact `(name, kind)` list into the next room's prompt for tonal
+continuity, so a "cellar" region doesn't randomly neighbor a "sunlit garden."
 
-## 🛠 Debugging Flash (hard-won — see Context DB learnings)
-- **Container-init/worker-crash errors are in POD logs, NOT job logs.** `/v2/{endpointId}/logs`
-  is empty for pre-handler crashes. Use `GET https://hapi.runpod.net/v1/pod/{podId}/logs` (console
-  Clerk JWT; pod id from getEndpointFull pods[].id). BUILD THIS INTO forge.diagnostics next.
-- Allocation hangs: job inQueue + 0 workers >2min = kill (use /v2/{id}/health). ADA_24 most reliable.
-- Teardown: server-truth + scoped (forge.undeploy); never `flash undeploy --all` (shared account).
-- We have **Datadog** (via mcp__context__exec ddLogs) — use it for Flash worker observability.
-- 4 Flash gotchas recorded to Context DB (find_learnings query 'flash').
+**Known-vs-unknown exits** are exposed to the DM agent (`_adjacent_rooms()`): an exit either
+names an already-generated room ("known, not yet visited" / "visited") or says "unexplored —
+do not invent what's there." Prevents the DM from hallucinating detail about unlinked exits.
 
-## Requirements & specs (consolidated)
-- **REQUIREMENTS.md** — full requirement table (R1-R12), Flash anchor priority, multiplayer tiers, vision.
-- **WORLD_SCHEMA.md** — the graph schema for "playing DM" (nodes/edges/state/read+write tools).
-- **MCP_SURFACE.md** — all tools + skills + resources, MVP-flagged.
-- **BUILD.md** — locked build plan + art/GPU strategy. **JUDGING.md** — 4 pillars + how we win.
-- **STRATEGY.md** — thesis. **ideas/** — dndmcp, gpu-tools, cross-silicon-oracle, models-reference.
+## Domain events + self-managed agent memory
 
-## Locked decisions
-- Project: DNDMCP solo RPG, install-from-any-harness, terminal-rendered, all through MCP tools.
-- Flash anchor priority: **world-builder LLM (primary)** > images (deprioritized) > ask_npc (deferred, built+stubbed).
-- SQLite + tool-mediated writes (NOT Dolt). Postgres/Dolt/Restate = scale/production path, pitch don't build.
-- Setting: The Sundered Weave (original; AI-magic-collapse; on-theme).
-- Model: Qwen2.5-1.5B generic baseline; D&D-tuned `chendren/dnd-unified-1.5b` is the swap candidate
-  (set DND_LLM_MODEL). Image gen: `0xJustin/Dungeons-and-Diffusion` (later).
+`log` table now has `player_id` + dotted-namespace `kind` (`adventure.started`, `player.moved`,
+`room.generated`, `combat.resolved`, `memory.noted`, `item.picked_up`). `recent_log()` filters
+by player and/or kind prefix. New tool **`remember(player_id, note)`** — the DM's own
+self-managed free-form continuity memory (an NPC's real motive, a lie told, anything not
+captured by the rigid mechanical schema) — separate on purpose from room/character state, which
+stays rigid because game mechanics need one source of truth.
 
-## NEXT (priority order, ~remaining time to Wed 12pm PST)
-1. **UNBLOCK FLASH** (critical): resolution path 2 (vLLM image) or 1 (pin cudaVersions). Verify with
-   `scripts/verify_flash_worldgen.py` (8-check plan: deploy/structured/multi-skill/scale/DB/latency/fallback/teardown).
-2. Wire `forge.diagnostics` to fetch POD logs (hapi.runpod.net) so Flash debugging is one call.
-3. Once Flash world-gen verified live → record video (the deliverable). README/install (task #4).
-4. Optional if time: ask_npc live (same endpoint), images, multiplayer messaging.
+## Web GUI (`dndmcp/web.py`) — rewritten, D3-based, several real bugs found & fixed
+
+- Old map used coordinate math from cardinal-direction deltas only — broke completely once
+  `up`/`down`/free-form exits existed (silently overlapped at the same coordinate). Replaced
+  with a real **D3.js force-directed graph** (matches the Context DB's own graph-viz approach).
+- **Perf bug, fixed:** the first hand-rolled version fully re-ran 120 iterations of O(n²)
+  physics on every 1.5s poll regardless of whether anything changed — permanent low-grade
+  jitter, never settled. Now only reheats (`alpha().restart()`) when the room/edge set actually
+  changes.
+- **Correctness bug, fixed:** d3-force only resolves link `source`/`target` strings into
+  positioned node objects when `.force('link').links(...)` is called, and only *paints* those
+  positions onto the SVG when `ticked()` fires — which only happens while the simulation is
+  actively running. Once it settles (alpha near zero, timer stopped), data was correctly
+  resolving but never getting painted, so every line went invisible ~1s after first render.
+  Fix: call `ticked()` manually once per render regardless of whether the sim is running.
+- Fixed inventory rendering (`[object Object]` — items are `{name, description}` dicts now, not
+  bare strings), a stuck "no adventure yet" placeholder overlapping the real graph, and added a
+  live "⚡ N Flash calls" header counter (counts `room.generated` log rows containing `(flash)`).
+- **Debugging gotcha, hard-won tonight:** `pkill -f "dndmcp.web.*8099"` does NOT match a
+  process started as `GUI_PORT=8099 python -m dndmcp.web` — env var prefixes aren't part of the
+  process's argv, so the pattern never matches. Every "restart and verify" using that pattern
+  was silently no-op'ing, leaving the OLD process bound to the port and invalidating the test.
+  **Always verify by PID** (`lsof -i :<port>` → `ps -p <pid> -o lstart`) that a process actually
+  restarted before trusting any "fix confirmed" result.
+
+## ⚠️ UNRESOLVED — your live game session is on stale code
+
+The actual long-running MCP server (Claude Desktop or similar, been running all session) and
+its web GUI (port 8001) were started **before** the edges-table migration and most of tonight's
+fixes. `~/.dndmcp/campaign.db` still has the OLD schema (no `edges` table, has the old `exits`
+JSON column) — confirmed by direct inspection. Restarting to pick up the fixes will trigger the
+dev-mode "schema version mismatch → wipe and recreate" behavior, **losing the current live
+campaign's progress**. Was mid-conversation on this when handoff happened — resolve with the
+user before restarting anything on port 8001 / the live server process.
+
+## Cleanup still pending
+- Two vLLM endpoints exist: `dnd-vllm4` (debug leftover from tonight, safe to delete) and
+  `dnd-llm-vllm` (the real one — leave it, scale-to-zero).
+- Procedural "texture" features repeat noticeably across rooms (small fixed pool of ~8 per
+  theme in `game.py::_THEMES`, sampled with replacement across many rooms) — flagged by
+  the user, not yet fixed. Straightforward fix: bigger pool, or sample-without-replacement
+  per campaign.
+- `game.ascii_map()`'s tiny terminal compass diagram still only understands cardinal
+  directions (cosmetic — the "Exits:" text list right below it is fully accurate regardless).
+  Low priority, deferred on purpose.
+
+## Still open from earlier in the session (never resolved)
+- **stdio-vs-pod-hosted architecture contradiction**: `BUILD.md` locks "stdio only, no pod for
+  MVP," but the actual pitch ("copy one line, add the MCP server, play from anywhere") needs
+  pod-hosted HTTP. `Dockerfile`/`dndmcp/app.py` already support pod-hosted; this is a decision
+  to lock, not a build task.
+- R11 (install instructions for Claude Desktop) — not written.
+- **R12 — the actual video. Not started. Due Wednesday 12pm PST.** This is the real deliverable;
+  everything else has been in service of having something real to show.
 
 ## How to resume
-- Venv `.venv` (pip install -e . done). Auth: keychain `runpod-api-key-prod`. `import forge; forge.load_env('prod')`.
-- Play locally: GUI `DNDMCP_STATE_DIR=~/.dndmcp_dev .venv/bin/python -m dndmcp.web` (:8001) +
-  Claude Desktop stdio config (dndmcp/SETUP.md). Reset: `start_adventure` or rm campaign.db.
-- Flash work: ALWAYS pre-check account clean (`forge.server_endpoints()`), tear down after, watch cost.
-- Tasks tracked in TaskList (#2 Flash anchor = the blocker; #4 README; #5 video; #6 container amd64 push needs `docker login`).
+- `.venv` is now Python 3.13 + `runpod-flash==1.18.0` (was 1.7.0/Python 3.14 — backed up at
+  `.venv-py314-old`). Auth: keychain `runpod-api-key-prod`.
+- Play locally: `DND_FLASH_LLM=1 DNDMCP_STATE_DIR=~/.dndmcp_dev .venv/bin/python -m dndmcp.web`
+  (GUI :8001) + Claude Desktop stdio config, OR drive `dndmcp.server`'s functions directly in a
+  script for fast iteration (that's how tonight's rehearsals worked, no MCP client needed).
+- `DND_FLASH_LLM=1` to enable live generation (off by default → procedural fallback, game
+  always works either way).
+- Before touching the live game process: resolve the "stale process / campaign wipe" question
+  above with the user first.

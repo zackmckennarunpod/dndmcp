@@ -1,7 +1,8 @@
 # DNDMCP — Requirements & Ideas Tracker
 
-Tracked like the Runpod Context DB pattern (the very pattern DNDMCP embodies): a single
-source of truth for what we're building, why, and what's done. Status: 🟢 done · 🟡 in progress · ⚪ planned · 💭 idea.
+**Beads is the source of truth for individual requirement status** — `bd list --all` / `bd show <id>`.
+This doc stays for the narrative that doesn't fit an issue tracker: the pitch, judging framing,
+priority reasoning, and the vision roadmap.
 
 ## The pitch (LOCKED)
 **The terminal IS the game.** DNDMCP turns your agent harness (Claude Code, Claude Desktop, any
@@ -19,22 +20,15 @@ it appears inline in any harness. Install once → the terminal becomes a dungeo
 - Presentation: live art + persistent state + dice in chat = a fun, visual video.
 
 ## Functional requirements
-| # | Requirement | Status |
-|---|---|---|
-| R1 | MCP server (stdio) installable into any harness | 🟢 server.py, 7 tools registered |
-| R2 | Persistent world state (campaign, character, rooms, log) survives the session | 🟢 state.py (SQLite) |
-| R3 | start_adventure → premise + rolled character + opening room | 🟢 works |
-| R4 | move(direction) → procedural rooms, world graph persists, ASCII map | 🟢 works |
-| R5 | roll_dice (1d20+3 etc.) — real mechanics | 🟢 works |
-| R6 | attack/combat — d20 vs AC, damage, HP tracking, monster retaliation | 🟢 works |
-| R7 | character_sheet / get_state — inspectable persistent state | 🟢 works |
-| R8 | GPU art per scene/portrait via Flash (text/ASCII default + image enhancement) | 🟡 stubbed (art.py); wire fast model |
-| R9 | Speculative prefetch — background-generate adjacent rooms' art (hide latency) | ⚪ planned (BUILD.md art strategy) |
-| R10 | First-gen warm-up at start_adventure; optional network-volume staged weights | ⚪ planned |
-| R11 | Install/run instructions for Claude Desktop (+ any harness) | ⚪ planned |
-| R12 | Recorded video demo (the deliverable) | ⚪ planned — DUE Wed 12pm PST |
+See `bd list --all` for current status (R1-R7, R9 closed as already-shipped; R8/R10/R11/R12
+still open, R12 is the DUE Wed 12pm PST demo-video deliverable). This table is retired —
+status drifted from beads once before, don't let it happen twice.
 
-## Multiplayer extension (vision; solo is MVP) — feasibility tiered
+## Multiplayer extension — SUPERSEDED, now core (see below)
+The feasibility table below was written when multiplayer was vision/pitch-only. It's been
+elevated to the core premise — see beads epic `flash-hackathon-cof` ("stigmergic multiplayer
+— players are ghosts who shape a shared world") and the MVP LINE update below. Table kept
+as feasibility reference, not as the current scope statement.
 | # | Idea | Feasibility |
 |---|---|---|
 | M1 | Shared world state on a long-running pod DB (players, presence, event log) | 🟢 EASY — just a shared DB |
@@ -59,11 +53,20 @@ The grand vision, coherent and pitch-worthy. NOT all buildable in 2 days — thi
 | V6 | Honest cost: always-on agents = continuous burn; scale-to-zero (NPCs only "think" when activity nearby) | real consideration |
 
 ## ⛔ MVP LINE (what we ACTUALLY build for the video) vs PITCH
+**UPDATE 2026-07-01: multiplayer is no longer pitch-only — elevated to CORE PREMISE** (beads
+epic `flash-hackathon-cof`, stigmergic multiplayer: players never see/talk to each other
+directly, only encounter the permanent traces of what earlier players did to the shared
+world). Shared-world DB and pod-hosted HTTP transport were already built as a byproduct of
+the solo-play architecture (verified against state.py/app.py, closed as done in beads); the
+one piece actually outstanding is surfacing those traces as narration to later players
+(`flash-hackathon-nva`).
+
 **BUILD (shippable in 2 days):** solo play · persistent graph world · dice/combat · GPU ASCII art w/ prefetch ·
-DM persona. Optional taste: ONE wandering NPC that moves on player action.
-**PITCH (vision/roadmap):** shared world + world-builder agent + NPC agents + multiplayer (async). Show the
+DM persona · stigmergic trace narration in `look()` (the CORE PREMISE payoff — see `nva`).
+**PITCH (vision/roadmap):** world-builder agent, NPC agents, anything beyond stigmergic traces
+(direct presence, chat, real-time push — explicit non-goals per the epic). Show the
 architecture, demo the slice. Working game NOW + jaw-dropping "where this goes."
-→ Do NOT try to build V2-V6 fully. Ship the MVP; narrate the vision.
+→ Do NOT try to build V2-V6 fully. Ship the MVP (now including stigmergic traces); narrate the rest.
 
 ## Pod brain + web map (BUILDING NOW — enabler for pod-hosted everything)
 - Containerize DNDMCP, run on a Runpod pod as the persistent "brain." Pod = always-warm (no
@@ -74,6 +77,10 @@ architecture, demo the slice. Working game NOW + jaw-dropping "where this goes."
 - Keep LOCAL stdio working as the zero-risk fallback for the video. Both paths supported.
 
 ## ⭐ FLASH ANCHOR (LOCKED — this is the hackathon requirement, central not afterthought)
+**UPDATE 2026-07-01: world-builder LLM (priority 1 below) is CONFIRMED WORKING, live, end to
+end.** See HANDOFF.md for the full working recipe (SDK version, image, CUDA pin, calling
+convention). This was the critical blocker all session — it's resolved.
+
 Frame (user's words): "an MCP that proxies requests to GPUs." DNDMCP's tools proxy GPU
 GENERATION to Runpod Flash (via our `forge` kit). Image/world/NPC are ONE proxy pattern, 3 uses.
 Priority:

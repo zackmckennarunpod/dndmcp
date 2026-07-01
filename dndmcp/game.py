@@ -10,8 +10,16 @@ import hashlib
 import random
 import re
 
-DIRECTIONS = ["north", "south", "east", "west"]
-OPPOSITE = {"north": "south", "south": "north", "east": "west", "west": "east"}
+DIRECTIONS = ["north", "south", "east", "west", "up", "down"]
+OPPOSITE = {"north": "south", "south": "north", "east": "west", "west": "east",
+            "up": "down", "down": "up"}
+
+
+def opposite_of(direction: str) -> str:
+    """Best-effort reverse of an exit label. Falls back to a generic 'back' for anything
+    outside the known set — e.g. a future free-form label like 'through the broken wall'
+    that has no natural single-word opposite."""
+    return OPPOSITE.get(direction, "back")
 
 _THEMES = {
     "gothic horror": {
@@ -64,8 +72,8 @@ _THEMES = {
 
 def ambient_event(theme: str, rng: random.Random | None = None) -> str:
     """An atmospheric thing the world does on its own (not player-triggered)."""
-    rng = rng or random
-    return rng.choice(_theme(theme)["ambient"])
+    choice = rng.choice if rng is not None else random.choice
+    return choice(_theme(theme)["ambient"])
 
 
 def _theme(theme: str) -> dict:
@@ -95,8 +103,13 @@ def new_character(name: str, klass: str) -> dict:
         return sum(sorted(random.randint(1, 6) for _ in range(4))[1:])
     stats = {s: stat() for s in ["STR", "DEX", "CON", "INT", "WIS", "CHA"]}
     hp = 8 + (stats["CON"] - 10) // 2
+    starting_kit = [
+        {"name": "a torch", "description": "casts a small circle of light; burns for hours yet."},
+        {"name": "a worn dagger", "description": "unremarkable, but sharp enough to matter."},
+        {"name": "rations", "description": "a few days' worth of dry, plain food."},
+    ]
     return {"name": name, "klass": klass, "hp": max(hp, 4), "ac": 12 + (stats["DEX"] - 10) // 2,
-            "stats": stats, "inventory": ["a torch", "a worn dagger", "rations"]}
+            "stats": stats, "inventory": starting_kit}
 
 
 def _seeded(room_id: str) -> random.Random:
@@ -112,7 +125,11 @@ def generate_room(room_id: str, theme: str, *, entry_from: str | None = None) ->
     n_exits = rng.randint(1, 3)
     exits = set(rng.sample(DIRECTIONS, k=min(n_exits, len(DIRECTIONS))))
     if entry_from:
-        exits.add(OPPOSITE.get(entry_from, "north"))
+        exits.add(opposite_of(entry_from))
+        # vertical continuity: a passage that's taking you down (or up) has a real chance of
+        # continuing the same way — the cellar keeps going down, not just dead-ending sideways.
+        if entry_from in ("up", "down") and rng.random() < 0.5:
+            exits.add(entry_from)
     exit_map = {d: f"{room_id}:{d}" for d in exits}
 
     contents = []
@@ -123,7 +140,7 @@ def generate_room(room_id: str, theme: str, *, entry_from: str | None = None) ->
     elif roll_kind < 0.75:
         contents.append({"type": "loot", "name": rng.choice(t["loot"])})
     return {"id": room_id, "name": name, "exits": exit_map, "contents": contents,
-            "description": f"You stand in {name_with_article(name)}."}
+            "description": f"You stand in {name_with_article(name)}.", "kind": ""}
 
 
 def name_with_article(name: str) -> str:
@@ -143,11 +160,8 @@ def resolve_attack(attacker_bonus: int, target_ac: int, damage_dice: str) -> dic
             "crit": crit, "damage": dmg, "target_ac": target_ac}
 
 
-def ascii_map(world) -> str:
-    """Tiny ASCII minimap of visited rooms around the current room (terminal render)."""
-    camp = world.campaign() or {}
-    cur = camp.get("current_room", "")
-    room = world.room(cur)
+def ascii_map(room: dict | None) -> str:
+    """Tiny ASCII minimap around the given room (terminal render)."""
     if not room:
         return "(no map yet)"
     cell = "[*]"  # current

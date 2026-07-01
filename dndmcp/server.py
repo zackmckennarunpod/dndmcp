@@ -10,9 +10,15 @@ Run / install (Claude Desktop config):
 
 from __future__ import annotations
 
+import asyncio
+import os
+import uuid
+
 from mcp.server.fastmcp import FastMCP
 
-from . import art, compendium, game, worldgen
+from . import art, compendium, game, linear_gen, worldgen
+from .linear_world import TicketWorld
+from .models import Campaign, Room
 from .state import World
 
 # Shipped WITH the server so connecting DNDMCP makes the agent assume the DM role.
@@ -22,18 +28,77 @@ terminal IS the game. When this server is connected, BECOME a vivid, fair Dungeo
 How to run the game:
 - Begin by greeting the player and offering to start an adventure (ask for a theme + character,
   or pick something evocative). Call start_adventure to begin.
-- Set each scene richly from the tool output, then ALWAYS end your turn with "What do you do?"
+- The tools hand you FACTS, not finished prose: a room's name, kind, one atmosphere note,
+  features, contents, and which exits are known vs unexplored. That's your notes, same as a
+  human DM's — YOU write the actual scene in your own voice, richly, from those facts. Don't
+  just relay the fields verbatim. Then ALWAYS end your turn with "What do you do?"
 - The player explores by telling you their intent. Translate intent into tool calls:
     move there        -> move(direction)
     any check/attack  -> roll_dice / attack  (NEVER invent dice — always call the tool)
     look around       -> look      check self -> character_sheet     recap -> get_state
 - Narrate results dramatically but keep mechanics HONEST: use the exact numbers the tools return.
 - The world is PERSISTENT — the tools remember. Refer back to what happened; the world is real.
+- Room/character state is rigid on purpose (mechanics need one source of truth). For anything
+  that ISN'T captured there but matters for continuity — an NPC's real motive, a lie you told,
+  something you decided in the moment — call remember(note) yourself. That's YOUR self-managed
+  memory, not predefined fields; write whatever's worth keeping, in whatever shape fits.
 - Keep it terminal-friendly: short paragraphs, show the ASCII map/art from tools, give clear choices.
 - Be a fair DM: let dice and rules decide; build tension; reward clever play."""
 
 mcp = FastMCP("dndmcp", instructions=DM_PERSONA)
 world = World()
+
+# A second, fully independent world proving the engine generalizes beyond D&D — own file,
+# own SQLite DB, zero shared state with `world` above. See linear_world.py/linear_gen.py.
+tickets = TicketWorld()
+
+
+def _nearby_region(from_room_id: str, *, depth: int = 2, exclude: str | None = None) -> list[tuple[str, str]]:
+    """BFS outward through already-generated (linked) rooms up to `depth` hops — a compact
+    (name, kind) summary fed to the next room's LLM prompt for tonal/architectural continuity.
+    Pure DB reads; no extra LLM calls."""
+    seen = {from_room_id} | ({exclude} if exclude else set())
+    frontier = [from_room_id]
+    out: list[tuple[str, str]] = []
+    for _ in range(depth):
+        next_frontier = []
+        for rid in frontier:
+            room = world.room(rid)
+            if not room:
+                continue
+            for dest_id in room.exits.values():
+                if dest_id in seen:
+                    continue
+                seen.add(dest_id)
+                dest = world.room(dest_id)
+                if dest:
+                    out.append((dest.name, dest.kind))
+                    next_frontier.append(dest_id)
+        frontier = next_frontier
+        if not frontier:
+            break
+    return out
+
+
+def _require_room(room_id: str) -> Room:
+    """A player's location_id / a room's exit target must always resolve — that's a game-logic
+    invariant, not something to silently tolerate. Fail loudly if it's ever violated."""
+    room = world.room(room_id)
+    assert room is not None, f"room {room_id!r} referenced but missing from the world"
+    return room
+
+
+def _require_campaign() -> Campaign:
+    camp = world.campaign()
+    assert camp is not None, "campaign referenced but none exists yet"
+    return camp
+
+
+def _gui_link() -> str:
+    pod_id = os.environ.get("RUNPOD_POD_ID")
+    if pod_id:
+        return f"https://{pod_id}-{os.environ.get('GUI_PORT', '8001')}.proxy.runpod.net"
+    return f"http://localhost:{os.environ.get('GUI_PORT', '8001')}"
 
 
 @mcp.prompt()
@@ -42,12 +107,29 @@ def be_the_dm() -> str:
     return DM_PERSONA + "\n\nGreet me and offer to begin an adventure."
 
 
-def _render_scene(room: dict, *, ambient: bool = True, with_art: bool = True) -> str:
+def _adjacent_rooms(room: Room) -> list[dict]:
+    """Per-exit info the agent needs to narrate/navigate honestly: does this exit lead
+    somewhere already generated (known — name it) or is it still unexplored (say so, don't
+    invent details)? This is what lets the DM distinguish "a passage fades into darkness"
+    from "the corridor back to the Iron-Barred Cell"."""
+    out = []
+    for direction, dest_id in room.exits.items():
+        dest = world.room(dest_id)
+        out.append({
+            "direction": direction,
+            "known": dest is not None,
+            "name": dest.name if dest else None,
+            "visited": dest.visited if dest else False,
+        })
+    return out
+
+
+def _render_scene(room: Room, *, ambient: bool = True, with_art: bool = True) -> str:
     """Text/ASCII render of a room — the universal (terminal) output."""
-    lines = [f"## {room['name'].title()}", "", room["description"]]
-    for f in room.get("features", []):
+    lines = [f"## {room.name.title()}", "", room.description]
+    for f in room.features:
         lines.append(f"  • {f}")
-    for c in room["contents"]:
+    for c in room.contents:
         if c["type"] == "monster":
             cr = f", CR {c.get('cr')}" if c.get("cr") is not None else ""
             traits = f" [{', '.join(c['traits'])}]" if c.get("traits") else ""
@@ -56,11 +138,18 @@ def _render_scene(room: dict, *, ambient: bool = True, with_art: bool = True) ->
             lines.append(f"\n✦  You notice {c['name']}.")
     if ambient:
         camp = world.campaign()
-        lines.append(f"\n_{game.ambient_event(camp['theme'] if camp else 'default')}_")
+        lines.append(f"\n_{game.ambient_event(camp.theme if camp else 'default')}_")
     lines.append("")
-    lines.append(game.ascii_map(world))
+    lines.append(game.ascii_map(room.model_dump()))
+    lines.append("\nExits:")
+    for adj in _adjacent_rooms(room):
+        if adj["known"]:
+            status = "visited" if adj["visited"] else "known, not yet visited"
+            lines.append(f"  {adj['direction']} → {adj['name'].title()} ({status})")
+        else:
+            lines.append(f"  {adj['direction']} → unexplored — do not invent what's there")
     if with_art:
-        a = art.generate(f"{room['name']}: {room['description']}", kind="scene")
+        a = art.generate(f"{room.name}: {room.description}", kind="scene")
         lines.append("\n" + a["ascii"])
         if not a["enabled"]:
             lines.append("(art: stubbed — GPU image gen not yet wired)")
@@ -70,55 +159,94 @@ def _render_scene(room: dict, *, ambient: bool = True, with_art: bool = True) ->
 @mcp.tool()
 async def start_adventure(theme: str = "gothic horror", character_name: str = "Wanderer",
                           character_class: str = "Fighter") -> str:
-    """Begin a new solo RPG. Generates a premise, your character, and the opening room
-    (world-builder: Flash-generated when enabled, else procedural). Wipes any previous campaign."""
+    """Begin your adventure in the shared world (joins the existing campaign if one is already
+    running, otherwise starts one). Returns your player_id — pass it as player_id to every
+    other tool call — and a link to watch your position live on the map."""
+    player_id = uuid.uuid4().hex[:12]
+    camp = world.campaign()
+    start_id = camp.start_room if camp else "r0"
+    if not camp:
+        gen = await worldgen.generate_room_content(start_id, theme)
+        premise = (f"A {theme} adventure. Something stirs in the dark, "
+                   f"seeking what others feared to find.")
+        world.new_campaign(theme=theme, premise=premise, start_room=start_id)
+        world.upsert_room(room_id=start_id, name=gen["name"], description=gen["description"],
+                          exits=gen["exits"], contents=gen["contents"], features=gen.get("features"),
+                          kind=gen.get("kind", ""))
+    camp = _require_campaign()
+    room = _require_room(start_id)
     ch = game.new_character(character_name, character_class)
-    start_id = "r0"
-    room = await worldgen.generate_room_content(start_id, theme)
-    premise = (f"A {theme} adventure. {ch['name']} the {ch['klass']} descends into the dark, "
-               f"seeking what others feared to find.")
-    world.new_campaign(theme=theme, premise=premise, start_room=start_id)
-    world.set_character(name=ch["name"], klass=ch["klass"], hp=ch["hp"], ac=ch["ac"],
-                        stats=ch["stats"], inventory=ch["inventory"])
-    world.upsert_room(room_id=start_id, name=room["name"], description=room["description"],
-                      exits=room["exits"], contents=room["contents"], features=room.get("features"))
+    char = world.new_character(player_id, name=ch["name"], klass=ch["klass"], hp=ch["hp"], ac=ch["ac"],
+                               stats=ch["stats"], inventory=ch["inventory"], location_id=start_id)
     world.mark_visited(start_id)
-    world.log("start", premise)
-    return (f"# {premise}\n\nYou are **{ch['name']}**, a level 1 {ch['klass']} "
-            f"(HP {ch['hp']}, AC {ch['ac']}).\n\n" + _render_scene(room))
+    world.log("adventure.started", f"{char.name} the {char.klass} joined the adventure.",
+              player_id=player_id)
+    asyncio.create_task(_prefetch_frontier(room, camp.theme))  # fire-and-forget
+    return (f"# {camp.premise}\n\nYou are **{char.name}**, a level 1 {char.klass} "
+            f"(HP {char.hp}, AC {char.ac}).\n\n**player_id: `{player_id}`** — pass this to every "
+            f"other tool call.\n\n🗺 Watch your adventure live: {_gui_link()}/?player={player_id}\n\n"
+            + _render_scene(room))
 
 
 @mcp.tool()
-def look() -> str:
+def look(player_id: str) -> str:
     """Describe the current room again (scene, exits, contents, map)."""
-    camp = world.campaign()
-    if not camp:
-        return "No active adventure. Call start_adventure first."
-    room = world.room(camp["current_room"])
-    return _render_scene(room)
+    ch = world.character(player_id)
+    if not ch:
+        return "Unknown player_id. Call start_adventure first."
+    return _render_scene(_require_room(ch.location_id))
+
+
+async def _generate_and_link(dest_id: str, theme: str, *, entry_from: str, back_to_id: str) -> None:
+    """Generate one room and apply the same bidirectional-link fix as the reactive path —
+    used by both move() (reactive) and the fan-out prefetch (speculative) below."""
+    nearby = _nearby_region(back_to_id, depth=2)
+    new_room = await worldgen.generate_room_content(
+        dest_id, theme, entry_from=entry_from, nearby=nearby)
+    new_room["exits"][game.opposite_of(entry_from)] = back_to_id
+    world.upsert_room(room_id=dest_id, name=new_room["name"], description=new_room["description"],
+                      exits=new_room["exits"], contents=new_room["contents"],
+                      features=new_room.get("features"), kind=new_room.get("kind", ""))
+    world.log("room.generated", f"{new_room['name']} generated ({new_room.get('via', 'procedural')})")
+
+
+async def _prefetch_frontier(room: Room, theme: str) -> None:
+    """Fan out generation for every exit of `room` that doesn't exist yet, in parallel, so
+    whichever way the player heads next it's already there — the Flash-burst story: the world
+    builds itself ahead of you. Fire-and-forget; never blocks the caller's move/look response."""
+    missing = [(d, dest_id) for d, dest_id in room.exits.items() if not world.room(dest_id)]
+    if not missing:
+        return
+    await asyncio.gather(*(
+        _generate_and_link(dest_id, theme, entry_from=d, back_to_id=room.id)
+        for d, dest_id in missing
+    ), return_exceptions=True)
 
 
 @mcp.tool()
-async def move(direction: str) -> str:
+async def move(player_id: str, direction: str) -> str:
     """Move north/south/east/west. World-builds the next room if unexplored. The world persists."""
-    camp = world.campaign()
-    if not camp:
-        return "No active adventure. Call start_adventure first."
+    ch = world.character(player_id)
+    if not ch:
+        return "Unknown player_id. Call start_adventure first."
+    camp = _require_campaign()
     direction = direction.strip().lower()
-    here = world.room(camp["current_room"])
-    if direction not in here["exits"]:
-        return f"There's no exit {direction}. Exits: {', '.join(here['exits']) or 'none'}."
-    dest_id = here["exits"][direction]
+    here = _require_room(ch.location_id)
+    if direction not in here.exits:
+        return f"There's no exit {direction}. Exits: {', '.join(here.exits) or 'none'}."
+    dest_id = here.exits[direction]
     if not world.room(dest_id):
-        new_room = await worldgen.generate_room_content(
-            dest_id, camp["theme"], entry_from=direction, neighbors=[here["name"]])
-        world.upsert_room(room_id=dest_id, name=new_room["name"], description=new_room["description"],
-                          exits=new_room["exits"], contents=new_room["contents"],
-                          features=new_room.get("features"))
-    world.set_room(dest_id)
+        # BIDIRECTIONAL LINK: the procedural generator computes its own back-exit id as
+        # f"{dest_id}:{opposite}", which is NOT here.id — that would silently create a
+        # duplicate room on backtrack instead of returning you home. _generate_and_link
+        # forces the real link.
+        await _generate_and_link(dest_id, camp.theme, entry_from=direction, back_to_id=here.id)
+    world.set_location(player_id, dest_id)
     world.mark_visited(dest_id)
-    world.log("move", f"moved {direction} into {world.room(dest_id)['name']}")
-    return _render_scene(world.room(dest_id))
+    dest = _require_room(dest_id)
+    world.log("player.moved", f"{ch.name} moved {direction} into {dest.name}", player_id=player_id)
+    asyncio.create_task(_prefetch_frontier(dest, camp.theme))  # fire-and-forget
+    return _render_scene(dest)
 
 
 @mcp.tool()
@@ -132,13 +260,27 @@ def roll_dice(expression: str = "1d20") -> str:
 
 
 @mcp.tool()
-def attack(weapon_bonus: int = 3, damage_dice: str = "1d8") -> str:
-    """Attack the monster in the current room. Resolves d20 vs AC + damage, updates HP."""
-    camp = world.campaign()
-    if not camp:
-        return "No active adventure."
-    room = world.room(camp["current_room"])
-    monster = next((c for c in room["contents"] if c["type"] == "monster"), None)
+def remember(player_id: str, note: str) -> str:
+    """Record a continuity note you (the DM) want to recall later — an NPC's true motive, a
+    lie you told, a promise made, a detail that should stay consistent. This is YOUR
+    self-managed memory: unlike room/character state (which is rigid on purpose, for game
+    mechanics), notes are free-form — write whatever's actually worth remembering, in
+    whatever shape fits. get_state surfaces recent notes back to you."""
+    ch = world.character(player_id)
+    if not ch:
+        return "Unknown player_id. Call start_adventure first."
+    world.log("memory.noted", note, player_id=player_id)
+    return "Noted."
+
+
+@mcp.tool()
+def attack(player_id: str, weapon_bonus: int = 3, damage_dice: str = "1d8") -> str:
+    """Attack the monster in your current room. Resolves d20 vs AC + damage, updates HP."""
+    ch = world.character(player_id)
+    if not ch:
+        return "Unknown player_id. Call start_adventure first."
+    room = _require_room(ch.location_id)
+    monster = next((c for c in room.contents if c["type"] == "monster"), None)
     if not monster:
         return "Nothing here to attack."
     # rules-accurate: attack vs the monster's REAL SRD armor class
@@ -150,45 +292,205 @@ def attack(weapon_bonus: int = 3, damage_dice: str = "1d8") -> str:
         crit = " **CRITICAL!**" if res["crit"] else ""
         out = [f"🎲 You strike the {monster['name']} for {res['damage']} damage!{crit}"]
         if monster["hp"] <= 0:
-            room["contents"] = [c for c in room["contents"] if c is not monster]
+            room.contents = [c for c in room.contents if c is not monster]
             out.append(f"💀 The {monster['name']} falls!")
         else:
             out.append(f"The {monster['name']} has {monster['hp']} HP left.")
     # monster strikes back with its REAL attack (bonus + damage dice from the SRD)
     if monster["hp"] > 0:
-        ch = world.character()
-        matk = game.resolve_attack(monster.get("attack_bonus", 3), ch["ac"],
+        matk = game.resolve_attack(monster.get("attack_bonus", 3), ch.ac,
                                    monster.get("damage_dice", "1d6"))
         atk_name = monster.get("attack_name", "attack")
         if matk["hit"]:
-            new_hp = world.damage(matk["damage"])
+            new_hp = world.damage(player_id, matk["damage"])
             out.append(f"⚔ The {monster['name']}'s {atk_name} hits you for {matk['damage']}. You have {new_hp} HP.")
             if new_hp <= 0:
                 out.append("☠ You have fallen. The dark claims another...")
         else:
-            out.append(f"⚔ The {monster['name']}'s {atk_name} misses you (rolled {matk['attack_roll']} vs AC {ch['ac']}).")
-    world.upsert_room(room_id=room["id"], name=room["name"], description=room["description"],
-                      exits=room["exits"], contents=room["contents"], features=room.get("features"))
-    world.log("combat", out[0])
+            out.append(f"⚔ The {monster['name']}'s {atk_name} misses you (rolled {matk['attack_roll']} vs AC {ch.ac}).")
+    world.upsert_room(room_id=room.id, name=room.name, description=room.description,
+                      exits=room.exits, contents=room.contents, features=room.features)
+    world.log("combat.resolved", out[0], player_id=player_id)
     return "\n".join(out)
 
 
 @mcp.tool()
-def character_sheet() -> str:
-    """Show your character: stats, HP, AC, inventory."""
-    ch = world.character()
+async def pick_up_item(player_id: str, item_name: str | None = None) -> str:
+    """Pick up something from your current room and add it to your inventory. Omit item_name
+    to grab whatever pre-seeded loot is here. Pass a description to disambiguate OR to try
+    picking up something that ISN'T pre-seeded loot (e.g. "the chair in the corner",
+    "the child's doll") — the world-builder adjudicates whether that's actually plausible to
+    carry (most furniture/fixtures aren't) and fleshes out what it is if so."""
+    ch = world.character(player_id)
     if not ch:
-        return "No character yet. Call start_adventure."
-    stats = "  ".join(f"{k} {v}" for k, v in ch["stats"].items())
-    return (f"**{ch['name']}** — level {ch['level']} {ch['klass']}\n"
-            f"HP {ch['hp']}/{ch['max_hp']}   AC {ch['ac']}\n{stats}\n"
-            f"Inventory: {', '.join(ch['inventory']) or 'empty'}")
+        return "Unknown player_id. Call start_adventure first."
+    room = _require_room(ch.location_id)
+    loot = [c for c in room.contents if c["type"] == "loot"]
+
+    match = None
+    if item_name:
+        match = next((c for c in loot if item_name.lower() in c["name"].lower()), None)
+    elif loot:
+        match = loot[0]
+
+    if match:
+        room.contents = [c for c in room.contents if c is not match]
+        world.upsert_room(room_id=room.id, name=room.name, description=room.description,
+                          exits=room.exits, contents=room.contents, features=room.features)
+        # Pre-seeded loot only ever carries a name (game.py/worldgen.py room-gen never fills
+        # in flavor text) — reuse the same Flash-backed adjudicator to get a description,
+        # keeping the pre-seeded name rather than whatever name it might also return.
+        camp = _require_campaign()
+        flavor = await worldgen.generate_item_content(match["name"], camp.theme,
+                                                       room_context=room.description)
+        desc = flavor.get("description", "")
+        world.add_item(player_id, {"name": match["name"], "description": desc})
+        world.log("item.picked_up", f"{ch.name} picked up {match['name']}.", player_id=player_id)
+        detail = f" {desc}" if desc else ""
+        return f"✦ You take {match['name']}.{detail} Added to your inventory."
+
+    if not item_name:
+        return "There's nothing here to pick up."
+
+    # Not pre-seeded loot — ask the world-builder (same procedural+Flash pattern as room-gen)
+    # to adjudicate plausibility and flesh out what it actually is.
+    camp = _require_campaign()
+    item = await worldgen.generate_item_content(item_name, camp.theme, room_context=room.description)
+    if not item["portable"]:
+        reason = f" ({item['reason']})" if item.get("reason") else ""
+        return f"You can't take that{reason}."
+    world.add_item(player_id, {"name": item["name"], "description": item["description"]})
+    world.log("item.picked_up", f"{ch.name} picked up {item['name']}.", player_id=player_id)
+    detail = f" {item['description']}" if item["description"] else ""
+    return f"✦ You take {item['name']}.{detail} Added to your inventory."
 
 
 @mcp.tool()
-def get_state() -> dict:
-    """Full inspectable campaign state — proves the world remembers across turns."""
-    return world.snapshot()
+async def talk_to(player_id: str, message: str, npc_name: str | None = None) -> str:
+    """Talk to a monster/NPC in your current room. Generates an in-character response.
+    Conversation history is stored on the NPC itself, not on you — since the world is shared,
+    a different player who talks to the same NPC later sees the same accumulated history."""
+    ch = world.character(player_id)
+    if not ch:
+        return "Unknown player_id. Call start_adventure first."
+    room = _require_room(ch.location_id)
+    npcs = [c for c in room.contents if c["type"] == "monster"]
+    if not npcs:
+        return "There's no one here to talk to."
+    npc = None
+    if npc_name:
+        npc = next((c for c in npcs if npc_name.lower() in c["name"].lower()), None)
+        if not npc:
+            return f"No {npc_name!r} here. You see: {', '.join(c['name'] for c in npcs)}."
+    else:
+        npc = npcs[0]
+
+    camp = _require_campaign()
+    npc.setdefault("conversation", [])
+    result = await worldgen.generate_npc_response(npc, camp.theme, room.description, message)
+    npc["conversation"].append({"role": "player", "content": message})
+    npc["conversation"].append({"role": "npc", "content": result["text"]})
+    world.upsert_room(room_id=room.id, name=room.name, description=room.description,
+                      exits=room.exits, contents=room.contents, features=room.features)
+    world.log("npc.talked", f"{ch.name} talked to {npc['name']}: {message!r}", player_id=player_id)
+    return f"💬 {npc['name']}: \"{result['text']}\""
+
+
+@mcp.tool()
+def character_sheet(player_id: str) -> str:
+    """Show your character: stats, HP, AC, inventory."""
+    ch = world.character(player_id)
+    if not ch:
+        return "Unknown player_id. Call start_adventure first."
+    stats = "  ".join(f"{k} {v}" for k, v in ch.stats.items())
+    items = ", ".join(i["name"] for i in ch.inventory) or "empty"
+    return (f"**{ch.name}** — level {ch.level} {ch.klass}\n"
+            f"HP {ch.hp}/{ch.max_hp}   AC {ch.ac}\n{stats}\n"
+            f"Inventory: {items}")
+
+
+@mcp.tool()
+def get_state(player_id: str) -> dict:
+    """Full inspectable state for your character — proves the world remembers across turns."""
+    return world.snapshot(player_id)
+
+
+# --- Second world: a task graph, proving the engine generalizes beyond D&D ------------------
+# Same shape as the D&D tools (look / traverse-by-relation / one action that mutates + links),
+# fully independent state (TicketWorld, its own SQLite file). No player_id/character concept
+# here — any agent can inspect or act on any ticket, there's no per-agent position to track.
+
+@mcp.tool()
+def seed_demo_tickets() -> str:
+    """Seed the ticket graph with a real example task set (tonight's actual DNDMCP work) for
+    demoing traversal + completion-triggered generation. Safe to call multiple times —
+    overwrites by id."""
+    t1 = tickets.new_ticket(ticket_id="t1", title="Wire flash_llm.py to confirmed vLLM endpoint",
+                            description="Point the game's LLM calls at the deployed, verified-working endpoint instead of an untested one.",
+                            status="done", priority="high")
+    t2 = tickets.new_ticket(ticket_id="t2", title="Add multiplayer support to DNDMCP",
+                            description="Shared world, per-player character and location, no wipe-on-join.",
+                            status="done", priority="high")
+    t3 = tickets.new_ticket(ticket_id="t3", title="Build NPC conversation system",
+                            description="Stable NPC identity + stored conversation history, generated dialogue via Flash.",
+                            status="done", priority="medium")
+    t4 = tickets.new_ticket(ticket_id="t4", title="Deploy DNDMCP pod for public demo",
+                            description="Stand up a Runpod pod running the MCP server + GUI so it's reachable outside localhost.",
+                            status="todo", priority="high")
+    t5 = tickets.new_ticket(ticket_id="t5", title="Record hackathon demo video",
+                            description="Script + record the submission video showing live play.",
+                            status="todo", priority="high")
+    t6 = tickets.new_ticket(ticket_id="t6", title="Add monster loot generation on defeat",
+                            description="Generate a loot drop when a monster's HP hits 0, instead of it just vanishing.",
+                            status="todo", priority="low")
+    tickets.link(t1.id, t4.id, "blocks")
+    tickets.link(t4.id, t5.id, "blocks")
+    tickets.link(t2.id, t3.id, "related_to")
+    tickets.link(t3.id, t6.id, "related_to")
+    return f"Seeded {len(tickets.all_tickets())} tickets."
+
+
+@mcp.tool()
+def list_tickets() -> str:
+    """List all tickets in the task graph with their status."""
+    ts = tickets.all_tickets()
+    if not ts:
+        return "No tickets yet — call seed_demo_tickets first."
+    return "\n".join(f"[{t.status:^11}] {t.id}  {t.title}  (priority: {t.priority})" for t in ts)
+
+
+@mcp.tool()
+def look_at_ticket(ticket_id: str) -> str:
+    """Describe one ticket: title, description, status, and its related tickets (the graph
+    edges) — traverse by calling this again with a neighbor's id."""
+    t = tickets.ticket(ticket_id)
+    if not t:
+        return f"No ticket {ticket_id!r}."
+    lines = [f"## {t.title}", f"[{t.status}] priority: {t.priority}", "", t.description, "", "Related:"]
+    neighbors = tickets.neighbors(ticket_id)
+    if not neighbors:
+        lines.append("  (none)")
+    for rel, n in neighbors:
+        lines.append(f"  {rel} → {n.id}: {n.title} [{n.status}]")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def complete_ticket(ticket_id: str) -> str:
+    """Mark a ticket done, then generate one plausible follow-up ticket informed by its graph
+    neighbors, and link it in — the task-graph equivalent of move() generating the next room."""
+    t = tickets.ticket(ticket_id)
+    if not t:
+        return f"No ticket {ticket_id!r}."
+    tickets.set_status(ticket_id, "done")
+    neighbors = tickets.neighbors(ticket_id)
+    gen = await linear_gen.generate_followup_ticket(t, neighbors)
+    follow_up = tickets.new_ticket(title=gen["title"], description=gen["description"],
+                                   priority=gen["priority"])
+    tickets.link(t.id, follow_up.id, "led_to")
+    return (f"✅ {t.title} marked done.\n\n"
+            f"→ Generated follow-up ({gen['via']}): **{follow_up.title}** ({follow_up.id})\n"
+            f"{follow_up.description}")
 
 
 def main() -> None:

@@ -32,8 +32,12 @@ PYTHONPATH=~/Developer/work/flash-hackathon DNDMCP_STATE_DIR=~/.dndmcp_dev \
 
 ## 4. Dev loop
 - Edit `dndmcp/*.py` → restart the harness's MCP connection (or Claude Desktop) to reload.
+  stdio MCP servers are long-running processes, not re-read per call — a code edit does
+  nothing until the client reconnects (Claude Code: `/mcp`; Claude Desktop: restart the app).
 - The GUI picks up DB changes live; no restart needed for play.
-- Reset a campaign: `rm ~/.dndmcp_dev/campaign.db` (or just `start_adventure` again — it wipes).
+- The world is shared/multiplayer: `start_adventure` joins the existing campaign if one is
+  already running (does NOT wipe it) — a new player just gets their own character in it.
+  To actually reset: `rm ~/.dndmcp_dev/campaign.db`.
 
 ## Pod / container (the "brain" for hosted play) — later
 Container runs MCP (HTTP, :8000) + GUI (:8001) together via `python -m dndmcp.app`.

@@ -32,57 +32,72 @@ def _creatures_for(theme: str) -> list[str]:
     return _THEME_CREATURES["default"]
 
 
-# SKILL: describe_room — directional/spatial room generation, STRUCTURED JSON out.
-_ROOM_JSON = ('{"name": short evocative room name, "kind": one or two words, '
-              '"look": {"ahead": "...", "left": "...", "right": "...", "center": "..."}, '
-              '"feature": one specific examinable detail, "has_monster": true or false}')
+# SKILL: describe_room — FACTS only, no pre-written narration. The Flash world-builder's job
+# is to invent what's true about the room; the DM AGENT (running the actual session) does the
+# narrating, in whatever voice fits the moment — not a canned ahead/left/right/center template.
+_ROOM_JSON = ('{"name": short evocative room name, "kind": one or two words (e.g. "cellar", '
+              '"great hall", "attic" — informs how it connects to the world), '
+              '"atmosphere": one factual sentence of raw sensory detail (smell/sound/light) — '
+              'NOT a full scene description, just the one true thing worth knowing, '
+              '"feature": one specific examinable detail, "has_monster": true or false, '
+              '"notable_item": short item description or null}')
 
 
-def _room_messages(theme: str, came_from: str | None, exits: list[str]) -> list[dict]:
+def _room_messages(theme: str, came_from: str | None, exits: list[str],
+                   nearby: list[tuple[str, str]] | None = None) -> list[dict]:
     system = (f"{setting.GEN_BRIEF}\n\n"
               f"You are the world-builder for a {theme} dungeon crawl in this setting. You invent "
-              f"vivid rooms described SPATIALLY (what is ahead, to the sides, in the center), on-setting, "
-              f"and you reply with STRICT JSON only — no text outside the JSON object.")
+              f"what is TRUE about each room — facts for a Dungeon Master to narrate from, not "
+              f"finished prose. You reply with STRICT JSON only — no text outside the JSON object.")
     enter = f" the player enters from the {came_from}" if came_from else " the player descends into"
-    user = (f"Generate the next room{enter}. Exits lead: {', '.join(exits) or 'none'}. "
-            f"Describe it directionally so the player knows what is where. "
+    context = ""
+    if nearby:
+        listed = ", ".join(f"{name} ({kind})" if kind else name for name, kind in nearby)
+        context = (f" Nearby, already-explored areas: {listed}. Keep this room's tone/architecture "
+                   f"consistent with them — same building, not a random mismatch of styles.")
+    user = (f"Generate the next room{enter}. Exits lead: {', '.join(exits) or 'none'}.{context} "
             f"Return JSON: {_ROOM_JSON}")
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
 
-def _compose_look(look: dict) -> str:
-    parts = []
-    for dir_, key in [("Ahead", "ahead"), ("To your left", "left"),
-                      ("To your right", "right"), ("At the center", "center")]:
-        v = (look or {}).get(key)
-        if v:
-            parts.append(f"{dir_}, {v.rstrip('.').lower() if dir_!='Ahead' else v.rstrip('.')}.")
-    return " ".join(parts)
-
-
 async def generate_room_content(room_id: str, theme: str, *, entry_from: str | None = None,
-                                neighbors: list[str] | None = None) -> dict:
+                                nearby: list[tuple[str, str]] | None = None) -> dict:
     """Generate a room's content for the graph. Tries Flash (structured JSON); falls back
-    to procedural. Returns game.generate_room's shape + `features` + a `via` marker."""
+    to procedural. Returns game.generate_room's shape + `features` + a `via` marker.
+
+    `nearby`: (name, kind) pairs of already-generated rooms within a couple hops, so the LLM
+    keeps tone/architecture consistent with the surrounding region instead of each room being
+    generated in isolation."""
     rng = game._seeded(room_id)  # deterministic per room id
     base = game.generate_room(room_id, theme, entry_from=entry_from)  # procedural skeleton (exits etc.)
 
     via = "procedural"
     want_monster = any(c.get("type") == "monster" for c in base["contents"])
-    messages = _room_messages(theme, entry_from, list(base["exits"].keys()))
+    messages = _room_messages(theme, entry_from, list(base["exits"].keys()), nearby)
     gen = await flash_llm.generate(messages, max_tokens=280, temperature=0.95)
     if gen:
         try:
             data = json.loads(gen[gen.find("{"): gen.rfind("}") + 1])
             if data.get("name"):
                 base["name"] = data["name"]
-            look = _compose_look(data.get("look", {}))
-            if look:
-                base["description"] = look
-            elif data.get("description"):
-                base["description"] = data["description"]
+            if data.get("kind"):
+                base["kind"] = data["kind"]
+            # `description` stays a raw FACT, not finished prose — the DM agent (whoever is
+            # running the session) narrates from this, same as it would from a human DM's notes.
+            if data.get("atmosphere"):
+                base["description"] = data["atmosphere"]
             if data.get("feature"):
                 base.setdefault("features", []).append(data["feature"])
+            item = data.get("notable_item")
+            if item:
+                # the model doesn't reliably return a plain string here despite the schema —
+                # sometimes a dict like {"item_name": ..., "description": ...} with varying
+                # key names. Normalize to a single display string either way.
+                if isinstance(item, dict):
+                    item = (item.get("description") or item.get("name") or item.get("item_name")
+                           or item.get("type") or item.get("item_type") or next(iter(item.values()), ""))
+                if item:
+                    base.setdefault("contents", []).append({"type": "loot", "name": str(item)})
             want_monster = bool(data.get("has_monster", want_monster))
             via = "flash"
         except Exception:
@@ -105,3 +120,72 @@ async def generate_room_content(room_id: str, theme: str, *, entry_from: str | N
             base["contents"].append(rm)
     base["via"] = via
     return base
+
+
+_ITEM_JSON = ('{"name": short display name, "description": one factual sentence about it '
+              '(material, condition, what it\'s for) — not flowery prose, '
+              '"portable": true or false — could a person plausibly carry this away?, '
+              '"reason": if not portable, one short in-world reason (e.g. "bolted to the floor"), else null}')
+
+
+def _item_messages(description: str, theme: str, room_context: str) -> list[dict]:
+    system = (f"{setting.GEN_BRIEF}\n\n"
+              f"You are adjudicating a player's attempt to pick up an object in a {theme} dungeon "
+              f"crawl in this setting. Decide what's TRUE about the object and whether it's actually "
+              f"portable — most furniture/fixtures/scenery are NOT, most small objects ARE. "
+              f"You reply with STRICT JSON only — no text outside the JSON object.")
+    user = (f"The player tries to pick up: {description!r}. Room context: {room_context}\n"
+            f"Return JSON: {_ITEM_JSON}")
+    return [{"role": "system", "content": system}, {"role": "user", "content": user}]
+
+
+async def generate_item_content(description: str, theme: str, room_context: str = "") -> dict:
+    """Adjudicate + flesh out a player-described pickup that isn't pre-seeded loot. Tries Flash
+    (structured JSON, decides portability); falls back to procedural (always portable — without
+    a model to judge plausibility, permissive keeps the game playable with Flash off).
+    Returns {"name", "description", "portable", "reason"}."""
+    base = {"name": description.strip().capitalize(), "description": "", "portable": True, "reason": None}
+    messages = _item_messages(description, theme, room_context)
+    gen = await flash_llm.generate(messages, max_tokens=120, temperature=0.8)
+    if gen:
+        try:
+            data = json.loads(gen[gen.find("{"): gen.rfind("}") + 1])
+            if data.get("name"):
+                base["name"] = data["name"]
+            if data.get("description"):
+                base["description"] = data["description"]
+            if "portable" in data:
+                base["portable"] = bool(data["portable"])
+            if data.get("reason"):
+                base["reason"] = data["reason"]
+        except Exception:
+            pass  # malformed JSON → keep the permissive procedural default
+    return base
+
+
+def _npc_messages(npc: dict, theme: str, room_context: str, message: str) -> list[dict]:
+    traits = ", ".join(npc.get("traits", [])) or "no notable traits"
+    system = (f"{setting.GEN_BRIEF}\n\n"
+              f"You are voicing {npc['name']} in a {theme} dungeon crawl in this setting. "
+              f"Traits: {traits}. Room: {room_context} "
+              f"Stay fully in character. Reply with ONLY the character's spoken words — "
+              f"no stage directions, no narration, no quotation marks. Keep it to 1-3 sentences.")
+    messages = [{"role": "system", "content": system}]
+    # prior turns ARE the conversation's memory — stored on the npc dict itself (see
+    # talk_to/GENERATION_FEATURES.md), not a separate entity/event system.
+    for turn in npc.get("conversation", []):
+        role = "assistant" if turn["role"] == "npc" else "user"
+        messages.append({"role": role, "content": turn["content"]})
+    messages.append({"role": "user", "content": message})
+    return messages
+
+
+async def generate_npc_response(npc: dict, theme: str, room_context: str, message: str) -> dict:
+    """Generate one line of in-character NPC dialogue, informed by the conversation history
+    already stored on `npc` (via talk_to). Tries Flash; falls back to a generic in-character
+    line with no real continuity — without a model, there's nothing to generate FROM."""
+    messages = _npc_messages(npc, theme, room_context, message)
+    gen = await flash_llm.generate(messages, max_tokens=120, temperature=0.9)
+    if gen:
+        return {"text": gen.strip().strip('"'), "via": "flash"}
+    return {"text": f"{npc['name']} regards you, giving nothing away.", "via": "procedural"}

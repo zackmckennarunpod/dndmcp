@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import random
+import uuid
 from functools import lru_cache
 from pathlib import Path
 
@@ -66,10 +67,10 @@ def combat_profile(m: dict) -> dict:
             atk_name = a["name"]
             break
     traits = [t["name"] for t in (m.get("special_abilities") or [])][:3]
-    return {"type": "monster", "name": m["name"], "hp": m.get("hit_points", 10),
-            "max_hp": m.get("hit_points", 10), "ac": _ac(m), "attack_bonus": atk_bonus,
-            "damage_dice": dmg_dice, "attack_name": atk_name,
-            "cr": m.get("challenge_rating"), "traits": traits}
+    return {"type": "monster", "id": uuid.uuid4().hex[:8], "name": m["name"],
+            "hp": m.get("hit_points", 10), "max_hp": m.get("hit_points", 10), "ac": _ac(m),
+            "attack_bonus": atk_bonus, "damage_dice": dmg_dice, "attack_name": atk_name,
+            "cr": m.get("challenge_rating"), "traits": traits, "conversation": []}
 
 
 def encounter_from_names(names: list[str], rng: random.Random) -> dict | None:

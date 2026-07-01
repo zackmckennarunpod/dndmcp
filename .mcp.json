@@ -9,7 +9,8 @@
       ],
       "env": {
         "PYTHONPATH": "/Users/zackmckenna/Developer/work/flash-hackathon",
-        "DNDMCP_STATE_DIR": "/Users/zackmckenna/.dndmcp_dev"
+        "DNDMCP_STATE_DIR": "/Users/zackmckenna/.dndmcp_dev",
+        "DND_FLASH_LLM": "1"
       }
     }
   }

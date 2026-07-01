@@ -22,9 +22,12 @@ MODEL = "Qwen/Qwen2.5-1.5B-Instruct"
 # PIN vLLM to a CUDA-12 build — the latest vllm needs libcudart.so.13 (CUDA 13) which the
 # runpod/flash:latest worker container does NOT have. 0.7.x is CUDA-12.1 + supports Qwen2.5.
 # vllm 0.7.3 = CUDA-12 (avoids libcudart.so.13) + needs transformers 4.48.2 (else
-# 'Could not import ProcessorMixin'). Pin both to a matched pair.
+# 'Could not import ProcessorMixin'). vllm 0.7.3 pulls torch==2.5.1; the container's existing
+# torchvision doesn't match that build ('operator torchvision::nms does not exist') unless
+# pinned to torchvision's matching release, 0.20.1. Pin all three to a matched set.
 @Endpoint(name="dnd-llm", gpu=GpuGroup.AMPERE_24, workers=(1, 1),
-          idle_timeout=300, dependencies=["vllm==0.7.3", "transformers==4.48.2"])
+          idle_timeout=300,
+          dependencies=["vllm==0.7.3", "transformers==4.48.2", "torchvision==0.20.1"])
 class DnDLLM:
     def __init__(self):
         import os
