@@ -3,7 +3,13 @@
 Verified live 2026-06-30: Endpoint(image="runpod/worker-v1-vllm:v2.22.4", ...) + the
 OpenAI-compatible chat-completions route. This replaced an earlier, never-actually-working
 dependencies=[] transformers approach (three-layer pip version conflicts) — the pre-built
-image sidesteps all of that. Scale-to-zero (workers=(0, N)) so it costs nothing idle.
+image sidesteps all of that.
+
+workers=(1, N), not scale-to-zero: a min of 0 repeatedly hit Runpod's THROTTLED worker
+state on every cold reallocation (a real prior incident had the exact same symptom — see
+context DB learning 1778708224168), stalling live gameplay for minutes. One warm worker
+costs ~$0.69/hr continuously instead of $0 idle, but guarantees a non-throttled worker is
+always actually serving.
 
 Off by default (DND_FLASH_LLM!=1) → callers fall back to procedural generation, so the
 game always works. Flip on to make world-gen run live through Flash.
@@ -69,7 +75,7 @@ async def ensure() -> str:
         # Flash can schedule the pod onto an older-driver host, which fails at container-init
         # ("nvidia-container-cli: unsatisfied condition: cuda>=13.0") before the app ever runs.
         ep = Endpoint(
-            name=ENDPOINT_NAME, image=IMAGE, gpu=GpuGroup.ADA_24, workers=(0, 3),
+            name=ENDPOINT_NAME, image=IMAGE, gpu=GpuGroup.ADA_24, workers=(1, 3),
             idle_timeout=300, template=PodTemplate(containerDiskInGb=50),
             min_cuda_version=CudaVersion.V13_0,
             env={"MODEL_NAME": MODEL, "MAX_MODEL_LEN": "32768", "GPU_MEMORY_UTILIZATION": "0.90",
