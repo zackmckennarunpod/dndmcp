@@ -29,37 +29,58 @@ def _db() -> sqlite3.Connection:
 
 
 PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</title>
+<link rel=preconnect href=https://fonts.googleapis.com>
+<link rel=preconnect href=https://fonts.gstatic.com crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel=stylesheet>
 <style>
- body{margin:0;background:#0b0e14;color:#e6edf3;font:13px ui-monospace,Menlo,monospace}
- header{padding:12px 18px;border-bottom:1px solid #222c3a;display:flex;gap:12px;align-items:baseline}
- h1{font-size:15px;margin:0}.sub{color:#7d8794;font-size:12px}
+/* The Sundered Weave: a dead civilization's arcane-tech collapse, now ruins and ghosts. Cool
+   violet-black instead of the generic dark-dev-tool blue, a ghostly teal for "you are here"
+   (you're a ghost too — see the "how this works" panel), and a stone-inscription serif for
+   the title only, so it reads like a marker cut into old rock rather than a devtool banner. */
+:root{
+  --bg:#0a0713; --panel:#150f24; --border:#2b2145; --border-soft:#221a38;
+  --text:#e7e1f5; --muted:#8d7fae; --dim:#5f5480;
+  --warm:#e8b339; --warm-bright:#f5cc66; /* embers/Flash calls — one warm accent in a cool world */
+  --ghost:#4fd8c4; --ghost-bright:#8ff0e0; /* current room / "you" */
+  --visited:#8072e0; --unvisited:#1c1630; /* explored vs fog-of-war */
+  --link:#3c3160;
+}
+ body{margin:0;background:var(--bg);color:var(--text);font:13px 'IBM Plex Mono',ui-monospace,Menlo,monospace}
+ header{padding:12px 18px;border-bottom:1px solid var(--border);display:flex;gap:12px;align-items:baseline;
+   background:linear-gradient(180deg,#120b21,transparent)}
+ h1{font:600 16px 'Cinzel',serif;letter-spacing:1.5px;margin:0;color:var(--ghost-bright);
+   text-shadow:0 0 12px rgba(79,216,196,.35)}
+ .sub{color:var(--muted);font-size:12px}
  main{display:grid;grid-template-columns:1fr 280px;gap:16px;padding:16px 18px}
- .panel{background:#141a24;border:1px solid #222c3a;border-radius:10px;padding:14px}
- .panel h2{font-size:11px;text-transform:uppercase;letter-spacing:1px;color:#7d8794;margin:0 0 10px}
- #map{width:100%;height:420px;overflow:hidden;position:relative}
- #nodeTooltip{position:absolute;pointer-events:none;background:#1c2532;border:1px solid #334155;
-   border-radius:6px;padding:4px 9px;font-size:12px;color:#e6edf3;display:none;z-index:10;
-   box-shadow:0 4px 12px rgba(0,0,0,.4)}
- .ch b{color:#e6edf3}.ch span{color:#7d8794}
- .ch span.item{cursor:help;border-bottom:1px dotted #475569}
- .log div{color:#9fb1c1;padding:2px 0;border-bottom:1px solid #1a2230;font-size:12px}
- .empty{color:#7d8794}
-#flashcount{color:#f5a524;font-weight:bold;margin-left:auto;transition:transform .15s}
-#flashcount.pulse{transform:scale(1.3);color:#fcd34d}
+ .panel{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:14px}
+ .panel h2{font-size:11px;text-transform:uppercase;letter-spacing:1.5px;color:var(--muted);margin:0 0 10px}
+ #map{width:100%;height:420px;overflow:hidden;position:relative;
+   background:radial-gradient(ellipse at 50% 40%,#1a1330 0%,var(--panel) 70%)}
+ #nodeTooltip{position:absolute;pointer-events:none;background:#1c1433;border:1px solid var(--link);
+   border-radius:6px;padding:4px 9px;font-size:12px;color:var(--text);display:none;z-index:10;
+   box-shadow:0 4px 16px rgba(0,0,0,.5)}
+ .ch b{color:var(--ghost-bright)}.ch span{color:var(--muted)}
+ .ch span.item{cursor:help;border-bottom:1px dotted var(--dim)}
+ .log div{color:var(--muted);padding:2px 0;border-bottom:1px solid var(--border-soft);font-size:12px}
+ .empty{color:var(--dim)}
+#flashcount{color:var(--warm);font-weight:600;margin-left:auto;transition:transform .15s}
+#flashcount.pulse{transform:scale(1.3);color:var(--warm-bright)}
  #stream{display:flex;flex-direction:column-reverse;gap:0;height:120px;overflow-y:auto}
- #stream div{color:#9fb1c1;padding:2px 0;border-bottom:1px solid #1a2230;font-size:12px}
+ #stream div{color:var(--muted);padding:2px 0;border-bottom:1px solid var(--border-soft);font-size:12px}
  #stream div.new{animation:flash .8s ease-out}
- #stream .who{color:#f5a524}
- @keyframes flash{from{background:#f5a52433}to{background:transparent}}
- #streamDot{width:8px;height:8px;border-radius:50%;background:#22c55e;display:inline-block;margin-right:6px}
+ #stream .who{color:var(--warm)}
+ @keyframes flash{from{background:#4fd8c433}to{background:transparent}}
+ #streamDot{width:8px;height:8px;border-radius:50%;background:var(--ghost);display:inline-block;
+   margin-right:6px;box-shadow:0 0 6px var(--ghost)}
  details.panel{margin:0 18px 16px;cursor:default}
- details.panel summary{cursor:pointer;font-size:11px;text-transform:uppercase;letter-spacing:1px;
-   color:#7d8794;list-style:none;display:flex;align-items:center;gap:6px}
+ details.panel summary{cursor:pointer;font-size:11px;text-transform:uppercase;letter-spacing:1.5px;
+   color:var(--muted);list-style:none;display:flex;align-items:center;gap:6px}
  details.panel summary::-webkit-details-marker{display:none}
  details.panel summary::before{content:'▸';transition:transform .15s}
  details.panel[open] summary::before{content:'▾'}
- details.panel .body{margin-top:10px;color:#9fb1c1;line-height:1.6;font-size:12.5px}
- details.panel .body b{color:#e6edf3}
+ details.panel .body{margin-top:10px;color:var(--muted);line-height:1.6;font-size:12.5px}
+ details.panel .body b{color:var(--ghost-bright)}
+ details.panel .body a{color:var(--ghost-bright);text-decoration:underline;text-decoration-color:var(--ghost)}
  details.panel .body p{margin:0 0 10px}
 </style></head><body>
 <header><h1>⚔ DNDMCP</h1><span class=sub id=where>—</span><span id=flashcount>⚡ 0 Flash calls</span></header>
@@ -82,9 +103,10 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
   nearby already-generated nodes a couple hops out, and recent events near this spot, so
   whatever it invents stays consistent with what's already real instead of contradicting it.
   That's the "world stream" below and the map itself: both are live views of that same graph.
-  It's a <b>stigmergic</b> system in the literal sense — coordination through traces left in
-  the shared graph, not direct messages between whoever's generating content — the same
-  mechanism ants use to build a colony without a blueprint or a foreman.</p>
+  It's a <a href="https://en.wikipedia.org/wiki/Stigmergy" target="_blank" rel="noopener"><b>stigmergic</b></a>
+  system in the literal sense — coordination through traces left in the shared graph, not
+  direct messages between whoever's generating content — the same mechanism ants use to
+  build a colony without a blueprint or a foreman.</p>
   <p>That's also the literal model for other players in this world: you never see or talk to
   them directly — they're <b>ghosts</b>, visible only as a dot moving across this same map in
   real time. The only way you affect each other is through the graph itself: drop something in
@@ -246,9 +268,9 @@ function renderGraph(rooms, players, you){
      g.append('circle').attr('r',0).attr('stroke-width',2)
        .transition().duration(650).ease(d3.easeBackOut.overshoot(1.8)).attr('r',16);
      g.append('text').attr('class','label').attr('y',30).attr('text-anchor','middle')
-       .attr('fill','#7d8794').attr('font-size',10);
+       .attr('fill','#8d7fae').attr('font-size',10);
      g.append('text').attr('class','count').attr('y',4).attr('text-anchor','middle')
-       .attr('fill','#0b0e14').attr('font-size',10).attr('font-weight','bold');
+       .attr('fill','#0a0713').attr('font-size',10).attr('font-weight','bold');
      // Custom hover tooltip, not a native SVG <title> — native SVG title tooltips are
      // unreliable across browsers (inconsistent/missing in Chrome in particular). A plain
      // positioned div driven by mouse events works everywhere.
@@ -268,8 +290,11 @@ function renderGraph(rooms, players, you){
      return g;
    });
  nodeSel.select('circle')
-   .attr('fill', d=> d.mine ? '#f5a524' : (d.visited ? '#3b82f6' : '#1f2937'))
-   .attr('stroke', d=> d.mine ? '#fcd34d' : '#475569');
+   .attr('fill', d=> d.mine ? '#4fd8c4' : (d.visited ? '#8072e0' : '#1c1630'))
+   .attr('stroke', d=> d.mine ? '#8ff0e0' : '#453a6b')
+   // A soft glow on your own current room only — you're a ghost too; this is the one node
+   // that's genuinely "alive" right now, everything else is just trace/memory.
+   .style('filter', d=> d.mine ? 'drop-shadow(0 0 7px #4fd8c4)' : null);
  nodeSel.select('text.label').text(d=> d.discovered ? '' : '???');
  nodeSel.select('text.count').text(d=> d.count ? d.count : '');
 
@@ -296,9 +321,9 @@ function renderGraph(rooms, players, you){
    }
  }
  linkLayer.selectAll('line').data(links, d=>[d.source,d.target].sort().join('|'))
-   .join('line').attr('stroke','#334155').attr('stroke-width',2);
+   .join('line').attr('stroke','#3c3160').attr('stroke-width',2);
  frontierLayer.selectAll('line').data(frontier, d=>d.from)
-   .join('line').attr('stroke','#334155').attr('stroke-width',2).attr('stroke-dasharray','3,4');
+   .join('line').attr('stroke','#3c3160').attr('stroke-width',2).attr('stroke-dasharray','3,4');
 
  simulation.nodes(nodes);
  simulation.force('link').links(links);
