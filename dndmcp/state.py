@@ -384,6 +384,14 @@ class World:
         self._c.execute("UPDATE rooms SET visited=1 WHERE id=?", (room_id,))
         self._c.commit()
 
+    def room_ids_in(self, campaign_id: str) -> list[tuple[str, str, str]]:
+        """(id, name, kind) for every room in one world — a cheap listing for dev tooling
+        (see server.py dev_list_rooms) without loading each room's full contents/exits."""
+        rows = self._c.execute(
+            "SELECT id, name, kind FROM rooms WHERE campaign_id=?", (campaign_id,)
+        ).fetchall()
+        return [(r["id"], r["name"], r["kind"] or "") for r in rows]
+
     def set_room_image(self, room_id: str, image_ref: str) -> None:
         self._c.execute("UPDATE rooms SET image_ref=? WHERE id=?", (image_ref, room_id))
         self._c.commit()
@@ -429,6 +437,13 @@ class World:
             return
         memory = ent.memory + [{"role": role, "content": content}]
         self._c.execute("UPDATE entity SET memory=? WHERE id=?", (json.dumps(memory), entity_id))
+        self._c.commit()
+
+    def kill_entity(self, entity_id: str) -> None:
+        """Mark an entity dead. No-ops safely if no entity row exists (e.g. a monster the
+        density gate never gave a persona to) — combat still works either way, this just
+        keeps the identity table in sync with room.contents when one does exist."""
+        self._c.execute("UPDATE entity SET alive=0 WHERE id=?", (entity_id,))
         self._c.commit()
 
     def count_alive_entities_in(self, location_ids: list[str]) -> int:

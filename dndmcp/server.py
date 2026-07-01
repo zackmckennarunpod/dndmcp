@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import random
 import secrets
 import uuid
 
@@ -511,13 +512,15 @@ def attack(player_id: str, weapon_bonus: int = 3, damage_dice: str = "1d8") -> s
         return "Nothing here to attack."
     # rules-accurate: attack vs the monster's REAL SRD armor class
     res = game.resolve_attack(weapon_bonus, monster.get("ac", 12), damage_dice)
+    died = False
     if not res["hit"]:
         out = [f"🎲 You swing at the {monster['name']} (rolled {res['attack_roll']} vs AC {monster.get('ac',12)}) — **miss**."]
     else:
         monster["hp"] -= res["damage"]
         crit = " **CRITICAL!**" if res["crit"] else ""
         out = [f"🎲 You strike the {monster['name']} for {res['damage']} damage!{crit}"]
-        if monster["hp"] <= 0:
+        died = monster["hp"] <= 0
+        if died:
             room.contents = [c for c in room.contents if c is not monster]
             out.append(f"💀 The {monster['name']} falls!")
         else:
@@ -537,6 +540,13 @@ def attack(player_id: str, weapon_bonus: int = 3, damage_dice: str = "1d8") -> s
     world.upsert_room(room_id=room.id, name=room.name, description=room.description,
                       exits=room.exits, contents=room.contents, features=room.features)
     world.log("combat.resolved", out[0], player_id=player_id, subject_type="room", subject_id=room.id)
+    if died:
+        # Keep the entity table in sync with room.contents (which just dropped the monster
+        # dict entirely) — a first-class death event, not folded into combat.resolved's
+        # single-line summary, so it survives even if that text only captures the swing.
+        world.kill_entity(monster["id"])
+        world.log("entity.died", f"{ch.name} slew {monster['name']}.", player_id=player_id,
+                 subject_type="entity", subject_id=monster["id"])
     return "\n".join(out)
 
 
@@ -700,6 +710,117 @@ def delete_world(player_id: str) -> str:
     world.delete_campaign(campaign_id)
     return (f"🗑 World {campaign_id!r} deleted. Call start_adventure(campaign_id=\"new\") to "
             f"begin a brand-new one.")
+
+
+# Dev-only tools for demo prep — pre-populate a world (spawn rooms/NPCs/items on demand)
+# without walking there as a player. Gated behind an env var, off by default: any random
+# player who installs via SETUP.md and connects to the shared "main" world must NOT get
+# tools that spawn things in everyone else's world. Flip on with DNDMCP_DEV_TOOLS=1 for a
+# demo-prep session, then redeploy without it for normal shared play.
+if os.environ.get("DNDMCP_DEV_TOOLS") == "1":
+
+    @mcp.tool()
+    def dev_list_rooms(campaign_id: str) -> str:
+        """[DEV TOOL] List every room in a world (id, name, kind) so you know what to target
+        with dev_spawn_room/dev_spawn_npc/dev_spawn_item."""
+        if not world.campaign_exists(campaign_id):
+            return f'No world with id "{campaign_id}" exists.'
+        rows = world.room_ids_in(campaign_id)
+        if not rows:
+            return f"World {campaign_id!r} has no rooms yet."
+        return "\n".join(f"{rid} — {name} ({kind or 'unspecified'})" for rid, name, kind in rows)
+
+    @mcp.tool()
+    async def dev_spawn_room(campaign_id: str, from_room_id: str, direction: str) -> str:
+        """[DEV TOOL] Force-generate a brand-new room reachable from `from_room_id` via
+        `direction` (north/south/east/west/up/down) — same Flash generation path a real
+        player's move() would trigger, without needing a player to actually walk there.
+        Fails if that direction is already an exit of from_room_id."""
+        camp = world.campaign(campaign_id)
+        if not camp:
+            return f'No world with id "{campaign_id}" exists.'
+        here = world.room(from_room_id)
+        if not here:
+            return f'No room {from_room_id!r} in world {campaign_id!r}.'
+        direction = direction.strip().lower()
+        if direction not in game.DIRECTIONS:
+            return f"Not a real direction: {direction!r}. Use one of {game.DIRECTIONS}."
+        if direction in here.exits:
+            return f"{from_room_id} already has an exit {direction} -> {here.exits[direction]}."
+        dest_id = f"{from_room_id}:{direction}"
+        await _generate_and_link(dest_id, camp.theme, campaign_id, camp.salt,
+                                 entry_from=direction, back_to_id=from_room_id)
+        # _generate_and_link only wires the NEW room's own back-link — from_room_id didn't
+        # have this direction before (that's the point), so add the forward edge ourselves,
+        # preserving its existing exit descriptions (set_edges replaces the FULL set).
+        world.set_edges("room", from_room_id, "room", {**here.exits, direction: dest_id},
+                        metadata=world.room_exit_descriptions(from_room_id))
+        dest = _require_room(dest_id)
+        return f"✓ Spawned {dest_id} ({dest.name}) — {direction} of {from_room_id} ({here.name})."
+
+    @mcp.tool()
+    async def dev_spawn_npc(campaign_id: str, room_id: str, monster_name: str | None = None) -> str:
+        """[DEV TOOL] Spawn a fully-generated NPC (real SRD stats + an LLM persona, same
+        pipeline as a real encounter) directly into a room. `monster_name` must be an exact
+        SRD name (e.g. "Goblin", "Skeleton") — omit for a random on-theme pick."""
+        camp = world.campaign(campaign_id)
+        if not camp:
+            return f'No world with id "{campaign_id}" exists.'
+        room = world.room(room_id)
+        if not room:
+            return f'No room {room_id!r} in world {campaign_id!r}.'
+        if monster_name:
+            m = compendium.get_monster(monster_name)
+            if not m:
+                hits = compendium.search_monsters(monster_name)
+                return (f'No SRD monster named {monster_name!r}.'
+                       + (f' Did you mean: {", ".join(hits)}?' if hits else ''))
+            mon = compendium.combat_profile(m)
+        else:
+            # Real (unseeded) randomness on purpose, not game._seeded's deterministic hash —
+            # a dev tool for spawning VARIED demo content should give a different pick each
+            # call, not the same reproducible monster every time for a given room_id.
+            mon = compendium.random_encounter(3.0, random.Random())
+            if not mon:
+                return "No matching monster found for a random pick."
+        kind = mon["name"]  # SRD species name, captured before persona overwrites it
+        persona = await worldgen.generate_npc_persona(mon, camp.theme, room.name, room.kind,
+                                                      room.description)
+        mon["name"] = persona["name"]
+        world.upsert_entity(entity_id=mon["id"], campaign_id=campaign_id, kind=kind,
+                            name=persona["name"], location_id=room_id,
+                            disposition=persona["disposition"], persona=persona["persona"],
+                            goal=persona["goal"])
+        room.contents.append(mon)
+        world.upsert_room(room_id=room_id, campaign_id=campaign_id, name=room.name,
+                          description=room.description, exits=room.exits, contents=room.contents,
+                          features=room.features, kind=room.kind)
+        world.log("entity.spawned",
+                 f"{persona['name']} the {kind} appeared in {room.name} (dev-spawned).",
+                 campaign_id=campaign_id, subject_type="entity", subject_id=mon["id"])
+        return (f"✓ Spawned {persona['name']} the {kind} in {room_id} ({room.name}). "
+                f"Disposition: {persona['disposition']}.")
+
+    @mcp.tool()
+    async def dev_spawn_item(campaign_id: str, room_id: str, item_name: str) -> str:
+        """[DEV TOOL] Spawn a loose, pickup-able item directly into a room (same content-
+        generation pipeline as pick_up_item's adjudication, run in reverse — you name it,
+        Flash describes it)."""
+        camp = world.campaign(campaign_id)
+        if not camp:
+            return f'No world with id "{campaign_id}" exists.'
+        room = world.room(room_id)
+        if not room:
+            return f'No room {room_id!r} in world {campaign_id!r}.'
+        item = await worldgen.generate_item_content(item_name, camp.theme, room_context=room.description)
+        loot = {"type": "loot", "id": item.get("id") or uuid.uuid4().hex[:8], "name": item["name"]}
+        room.contents.append(loot)
+        world.upsert_room(room_id=room_id, campaign_id=campaign_id, name=room.name,
+                          description=room.description, exits=room.exits, contents=room.contents,
+                          features=room.features, kind=room.kind)
+        world.log("item.spawned", f"{item['name']} appeared in {room.name} (dev-spawned).",
+                 campaign_id=campaign_id, subject_type="room", subject_id=room_id)
+        return f"✓ Spawned {item['name']} in {room_id} ({room.name})."
 
 
 @mcp.tool()
