@@ -407,6 +407,7 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
       <div class=sub>tell your agent: "start an adventure, pairing code <code id=wizPairCodeInline>—</code>"</div>
       <div id=wizPairStatus class=sub style="margin-top:4px">watching for your agent to connect...</div>
       <a id=wizPairMapLink class=choiceBtn style="display:none;text-decoration:none;margin-top:6px" href="#">🗺 See my character on the map</a>
+      <button id=wizPairAdoptBtn class=choiceBtn style="display:none;margin-top:6px" title="Bind this character to this browser too — game state carries over; your agent's chat history stays in your agent. One narrator at a time.">💬 Also play them here in the browser</button>
      </div>
     </div>
     <div class=sub style="margin-top:12px">📡 or watch for new adventurers:</div>
@@ -449,6 +450,8 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
     <span id=chatWorldLabel>Playing in: —</span>
     <a href="#" id=chatResetBtn title="Start over with a brand-new character — your current one stays in the world"
       style="color:var(--muted);text-decoration:underline dotted;white-space:nowrap;margin-left:8px">↺ new character</a>
+    <a href="#" id=chatHandoffBtn title="Reveal this character's player_id so your own agent (Claude Code/Desktop) can take over playing them"
+      style="color:var(--muted);text-decoration:underline dotted;white-space:nowrap;margin-left:8px">🖥 use my agent</a>
    </div>
    <div id=chatLog><div class=empty>say "start an adventure" to begin</div></div>
    <form id=chatForm>
@@ -1334,6 +1337,27 @@ function startPairPoll(code){
         const linkBtn = document.getElementById('wizPairMapLink');
         linkBtn.href = d.map_link;
         linkBtn.style.display = '';
+        // Adoption (agent -> browser transfer): bind the paired character to this browser's
+        // chat session too, so "Play here" can continue the SAME character later. Offered,
+        // never automatic — some players want the agent to stay the only narrator.
+        const adoptBtn = document.getElementById('wizPairAdoptBtn');
+        adoptBtn.style.display = '';
+        adoptBtn.onclick = async () => {
+          try{
+            const ar = await fetch('/pair/adopt?code=' + encodeURIComponent(code), {method: 'POST', credentials: 'same-origin'});
+            const ad = await ar.json().catch(() => ({}));
+            if (!ar.ok) { document.getElementById('wizPairStatus').textContent = ad.error || ('error ' + ar.status); return; }
+            if (ad.campaign_id && ad.campaign_id !== campaignId) {
+              location.href = '/?campaign=' + encodeURIComponent(ad.campaign_id);
+              return;
+            }
+            closeWizard();
+            showMidTab('chat');
+            chatWelcomedBack = false;  // let tick() greet the adopted character
+            const input = document.getElementById('chatInput');
+            if (input) input.focus();
+          }catch(e){ /* leave the wizard open; user can retry */ }
+        };
       }
     }catch(e){ /* network hiccup — next 3s tick tries again */ }
   }, 3000);
@@ -1405,6 +1429,21 @@ function addChatBreadcrumb(name, summary){
 // HttpOnly cookie + deletes the durable mapping) and reset the pane. The old character stays
 // in the world as a ghost — the confirm() says so explicitly, since "reset" could otherwise
 // read as "delete my character."
+// Browser -> agent handoff: reveal this browser's OWN player_id (cookie-authenticated,
+// owner-only — see /chat/handoff) with copy-paste instructions for their agent. The mirror
+// of the wizard's adopt button.
+document.getElementById('chatHandoffBtn').addEventListener('click', async (e) => {
+  e.preventDefault();
+  try{
+    const r = await fetch('/chat/handoff?campaign=' + encodeURIComponent(campaignId), {credentials: 'same-origin'});
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) { addChatMessage('system', d.error === 'no character in this world' ? 'no character to hand off yet — start an adventure first.' : (d.error || ('error ' + r.status))); return; }
+    addChatMessage('system', d.instructions);
+  }catch(err){
+    addChatMessage('error', 'connection trouble — try again?');
+  }
+});
+
 document.getElementById('chatResetBtn').addEventListener('click', async (e) => {
   e.preventDefault();
   if (chatTurnInFlight) { addChatMessage('system', 'wait for the current turn to finish first.'); return; }
@@ -1664,6 +1703,59 @@ def pair_status(request: Request) -> JSONResponse:
     if result["claimed"]:
         map_link = f"/?player={quote(result['player_id'])}&campaign={quote(result['campaign_id'])}"
     return JSONResponse({"claimed": result["claimed"], "name": result["name"], "map_link": map_link})
+
+
+@app.post("/pair/adopt")
+def pair_adopt(request: Request) -> JSONResponse:
+    """Agent -> browser character transfer: bind a PAIRED character to THIS browser's chat
+    session, so the Play-here pane on that world's page resumes it (the exact resume path a
+    redeploy already exercises — game state carries over fully; conversation history stays
+    in the agent's own context, and the browser DM re-orients via look/character_sheet).
+    Authorization is the pairing code itself: single-use to CLAIM, but readable within its
+    TTL by the browser that minted it — the same capability boundary /pair/status's map_link
+    already stands on. The dm_session cookie is created here if the browser has none yet."""
+    code = request.query_params.get("code") or ""
+    result = pairing.status(code)
+    if result is None:
+        return JSONResponse({"error": "unknown or expired code"}, status_code=404)
+    if not result["claimed"]:
+        return JSONResponse({"error": "code not claimed yet — connect your agent first"},
+                            status_code=409)
+    session_id = request.cookies.get(chat_sessions.COOKIE_NAME) or chat_sessions.new_session_id()
+    server.world.save_web_session_world(
+        session_id, result["campaign_id"], player_id=result["player_id"])
+    # Drop any in-memory session for this (browser, world) so the next chat turn resumes the
+    # adopted character from the durable row instead of continuing an older one.
+    chat_sessions.drop(session_id, result["campaign_id"])
+    resp = JSONResponse({"ok": True, "name": result["name"],
+                         "campaign_id": result["campaign_id"]})
+    resp.set_cookie(chat_sessions.COOKIE_NAME, session_id, httponly=True, samesite="lax",
+                    max_age=60 * 60 * 24 * 30)
+    return resp
+
+
+@app.get("/chat/handoff")
+def chat_handoff(request: Request) -> JSONResponse:
+    """Browser -> agent character transfer: reveal THIS browser's own player_id for one world
+    so its owner can hand it to their own agent ("resume playing player_id X" — every MCP
+    tool already takes player_id; that's how agent play works). Cookie-authenticated: only
+    the session that owns the character can see it, which makes this the mirror image of
+    /pair/status's map_link — an owner learning their own bearer token, never anyone else's."""
+    campaign_id = request.query_params.get("campaign") or "main"
+    session_id = request.cookies.get(chat_sessions.COOKIE_NAME)
+    if not session_id:
+        return JSONResponse({"error": "no session"}, status_code=404)
+    ws = server.world.get_web_session_world(session_id, campaign_id)
+    if not ws or not ws.player_id or not server.world.character(ws.player_id):
+        return JSONResponse({"error": "no character in this world"}, status_code=404)
+    ch = server.world.character(ws.player_id)
+    return JSONResponse({
+        "player_id": ws.player_id, "name": ch.name, "campaign_id": campaign_id,
+        "instructions": (f'Connect your agent to this MCP server (▶ Play → "Through your own '
+                         f'agent"), then tell it: resume playing player_id {ws.player_id}'
+                         + (f' in world {campaign_id}' if campaign_id != 'main' else '')
+                         + f" — you are {ch.name}. Heads up: don't drive {ch.name} from here "
+                         f"and your agent at the same time; one narrator per body.")})
 
 
 @app.post("/chat")

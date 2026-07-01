@@ -398,7 +398,9 @@ async def start_adventure(theme: str = "gothic horror", character_name: str = "W
         map_link += f"&campaign={camp.id}"
     return (f"# {camp.premise}\n\nYou are **{char.name}**, a level 1 {char.klass} "
             f"(HP {char.hp}, AC {char.ac}).\n\n**player_id: `{player_id}`** — pass this to every "
-            f"other tool call.{share_note}\n\n🗺 Watch your adventure live: {map_link}\n\n"
+            f"other tool call.{share_note}\n\n🗺 Watch your adventure live: {map_link} — tell "
+            f"the player to keep that page open BESIDE this chat (split screen works great): "
+            f"it's their live map, character sheet, and inventory while they play here.\n\n"
             + _render_scene(room, player_id=player_id))
 
 
