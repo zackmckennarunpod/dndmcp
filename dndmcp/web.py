@@ -134,6 +134,7 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
  h1{font:600 16px 'Cinzel',serif;letter-spacing:1.5px;margin:0;color:var(--ghost-bright);
    text-shadow:0 0 12px rgba(79,216,196,.35)}
  .sub{color:var(--muted);font-size:12px}
+ #tagline{padding:0 18px 10px;color:var(--muted);font-size:12px;max-width:760px}
  /* 3 columns: map (flexible width) | live stream (own space, not buried below the fold) | the
     existing character/room/recent sidebar. */
  main{display:grid;grid-template-columns:1fr 340px 280px;gap:16px;padding:16px 18px}
@@ -364,6 +365,7 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
  <span id=flashcount>⚡ 0 Flash calls</span>
  <span id=metricsLink title="Click to see system-wide metrics for this world">📊 Metrics</span>
  <button id=shareBtn title="Copies instructions to paste into your agent (Claude Code/Desktop) running dndmcp">🔗 Share</button></header>
+<div id=tagline>A world that doesn't exist until you step into it — Flash generates every room, item, NPC, and image in real time as you explore.</div>
 <!-- Onboarding wizard (e0b.12) — a modal stepper that owns ALL onboarding now: replaces the
      old always-open connect <details> panel (content absorbed into step 2B below) AND the
      inline choice card that used to sit above the chat input (see midTab-chat, which no
