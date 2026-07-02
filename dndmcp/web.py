@@ -1233,7 +1233,9 @@ function renderSpectateBar(players, rooms){
   document.getElementById('spectateNames').innerHTML = active.map(p =>
     `<a href="#" class="spectateNameLink" data-pid="${esc(p.player_id)}" `
     + `style="color:${p.player_id===spectateId ? 'var(--warm-bright)' : 'var(--ghost-bright)'};`
-    + `text-decoration:none;margin-right:8px">${p.is_bot ? '🤖 ' : ''}${esc(p.name || '?')} `
+    // No separate badge here either — same reasoning as /metrics' player_rows: bot names
+    // already carry 🤖 themselves (state.py's mark_bot), doubling it here would duplicate it.
+    + `text-decoration:none;margin-right:8px">${esc(p.name || '?')} `
     + `<span style="color:var(--muted)">(${esc(p.klass || '?')})</span></a>`
   ).join('');
   document.querySelectorAll('.spectateNameLink').forEach(el => {
@@ -2697,7 +2699,11 @@ def metrics_page(request: Request) -> str:
     player_rows = "".join(
         f'<div class=row><span class=who>{html.escape(p["player_id"][:8])}</span>'
         f'<span class=pname><a href="/story?campaign={html.escape(quote(p["campaign_id"]))}&player={html.escape(quote(p["player_id"]))}" '
-        f'title="Read/print this character\'s story">📜 {"🤖 " if p["is_bot"] else ""}{html.escape(p["name"] or "?")}</a> '
+        # No separate "🤖 " badge here — bot characters already carry it in their own `name`
+        # (see state.py's mark_bot), so adding one here too would double it up for any bot
+        # marked after that fix shipped. Older bots marked before the fix (name never
+        # rewritten) just show without the badge here — cosmetic only.
+        f'title="Read/print this character\'s story">📜 {html.escape(p["name"] or "?")}</a> '
         f'<span class=muted>({html.escape(p["klass"] or "?")})</span></span>'
         + (f'<span class=world><a href="/?campaign={html.escape(p["campaign_id"])}">{html.escape(p["campaign_id"])}</a></span>' if all_worlds else "")
         + f'<span class=status>{status_html(p)}</span>'
