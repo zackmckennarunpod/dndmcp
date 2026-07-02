@@ -468,7 +468,7 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
   </div>
  </div>
 </div>
-<div id=spectateBar style="display:none;max-width:1100px;margin:16px auto 0;padding:10px 14px;background:var(--panel);border:1px solid var(--border);border-radius:8px;font-size:12px">
+<div id=spectateBar style="display:none;margin:16px 18px 0;padding:10px 14px;background:var(--panel);border:1px solid var(--border);border-radius:8px;font-size:12px">
   <div style="color:var(--warm-bright);text-transform:uppercase;letter-spacing:.04em;font-size:10.5px;margin-bottom:6px">👀 Active now</div>
   <div id=spectateChips style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:6px"></div>
   <div id=spectateCard style="display:none;padding:8px 10px;background:var(--link);border-radius:6px">
@@ -1982,7 +1982,7 @@ async def art_regen(request: Request) -> JSONResponse:
         return JSONResponse({"error": "unknown room"}, status_code=404)
     if room.image_ref:
         return JSONResponse({"image_ref": room.image_ref})
-    await server._prefetch_room_art(room_id, room.name, room.description, campaign_id)  # noqa: SLF001
+    await server._prefetch_room_art(room_id, room.name, room.description, room.features, campaign_id)  # noqa: SLF001
     updated = server.world.room(room_id)
     return JSONResponse({"image_ref": updated.image_ref if updated else None})
 
