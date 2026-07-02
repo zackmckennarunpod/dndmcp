@@ -12,5 +12,4 @@ __pycache__/
 *.db
 .beads-credential-key
 h4y5/
-# bd worktree
 pillowfix/
