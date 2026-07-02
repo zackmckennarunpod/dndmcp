@@ -111,6 +111,7 @@ def _client_ip(request: Request) -> str | None:
 
 
 PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</title>
+<link rel=icon href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>⚔</text></svg>">
 <link rel=preconnect href=https://fonts.googleapis.com>
 <link rel=preconnect href=https://fonts.gstatic.com crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel=stylesheet>
@@ -2260,15 +2261,37 @@ async def export_story(request: Request):
         # etc.) that happened in this campaign — not other players' actions, this is THEIR
         # story, not the whole world's. Chronological via seq (monotonic insert order).
         events = c.execute(
-            "SELECT ts, kind, text FROM log WHERE campaign_id=? AND (player_id=? OR player_id IS NULL)"
-            " ORDER BY seq ASC", (campaign_id, player_id),
+            "SELECT ts, kind, text, player_id, subject_type, subject_id FROM log"
+            " WHERE campaign_id=? AND (player_id=? OR player_id IS NULL) ORDER BY seq ASC",
+            (campaign_id, player_id),
         ).fetchall()
+        # A null-player_id event (room.generated, entity.spawned, art.generated — the
+        # background-prefetch/system events) is about the WHOLE campaign, not this player —
+        # _prefetch_frontier speculatively generates every exit's destination ahead of time,
+        # so most rooms/NPCs that ever exist at any moment are ones THIS player never actually
+        # entered. Confirmed live: an unvisited room + its NPC (generated via prefetch, never
+        # discovered) leaked wholesale into a different player's own story. Filter null-
+        # player_id events down to rooms this player has actually discovered.
+        discovered = {r["to_id"] for r in c.execute(
+            "SELECT to_id FROM edges WHERE from_type='character' AND from_id=?"
+            " AND to_type='room' AND edge_type='discovered'", (player_id,)).fetchall()}
+        entity_room = {r["id"]: r["location_id"] for r in c.execute(
+            "SELECT id, location_id FROM entity WHERE campaign_id=?", (campaign_id,)).fetchall()}
     finally:
         c.close()
 
+    def relevant(e) -> bool:
+        if e["player_id"]:
+            return True  # this player's own action — always theirs to tell
+        if e["subject_type"] == "room":
+            return e["subject_id"] in discovered
+        if e["subject_type"] == "entity":
+            return entity_room.get(e["subject_id"]) in discovered
+        return False  # no subject to check against — safer to omit than leak another area
+
     theme = camp["theme"] if camp else "adventure"
     premise = camp["premise"] if camp else ""
-    timeline_lines = [f"- {e['text']}" for e in events] or ["- (nothing has happened yet)"]
+    timeline_lines = [f"- {e['text']}" for e in events if relevant(e)] or ["- (nothing has happened yet)"]
     timeline_text = "\n".join(timeline_lines)
 
     markdown = await worldgen.generate_story(char["name"], char["klass"], theme, premise, timeline_text,
@@ -2336,6 +2359,7 @@ def flash_calls_page(request: Request) -> str:
     body = "".join(row_html(r) for r in rows) or '<div class=empty>No Flash calls yet.</div>'
     title = "all worlds" if all_worlds else html.escape(campaign_id)
     return f"""<!doctype html><html><head><meta charset=utf-8><title>Flash calls — {title}</title>
+<link rel=icon href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>⚔</text></svg>">
 <style>
 :root{{--bg:#0a0713;--panel:#150f24;--border:#2b2145;--border-soft:#221a38;--text:#e7e1f5;
   --muted:#8d7fae;--warm:#e8b339;--warm-bright:#f5cc66;--ghost:#4fd8c4;--ghost-bright:#8ff0e0}}
@@ -2469,6 +2493,7 @@ def metrics_page(request: Request) -> str:
     )
 
     return f"""<!doctype html><html><head><meta charset=utf-8><title>Metrics — {html.escape(title)}</title>
+<link rel=icon href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>⚔</text></svg>">
 <style>
 :root{{--bg:#0a0713;--panel:#150f24;--border:#2b2145;--border-soft:#221a38;--text:#e7e1f5;
   --muted:#8d7fae;--warm:#e8b339;--warm-bright:#f5cc66;--ghost:#4fd8c4;--ghost-bright:#8ff0e0;

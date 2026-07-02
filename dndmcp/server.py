@@ -596,8 +596,14 @@ async def _generate_and_link(dest_id: str, theme: str, campaign_id: str, salt: s
                       contents=new_room["contents"], features=new_room.get("features"),
                       kind=new_room.get("kind", ""),
                       exit_descriptions=new_room.get("exit_descriptions"))
+    # subject_type="room"/subject_id=dest_id — the one obviously-correct tag this was
+    # missing (art.generated a few lines below already tags itself this way for the SAME
+    # room). Without it, nothing can ever answer "which rooms has player X actually
+    # discovered" for this event kind — confirmed live: /export_story's per-player timeline
+    # had no way to exclude a background-prefetched room the player never entered, so
+    # another player's entire unvisited neighborhood leaked into their personal story.
     world.log("room.generated", f"{new_room['name']} generated ({new_room.get('via', 'procedural')})",
-             campaign_id=campaign_id)
+             campaign_id=campaign_id, subject_type="room", subject_id=dest_id)
     # GPU room art, same fire-and-forget speculative pattern as _prefetch_frontier below (and
     # tracked the same way — see _track): art.prefetch is a true no-op (returns False
     # immediately) when DND_FLASH_ART isn't set, so this whole branch costs nothing by default.
@@ -925,7 +931,13 @@ async def attack(player_id: str, weapon_bonus: int = 3, damage_dice: str = "1d8"
             out.append(f"⚔ The {monster['name']}'s {atk_name} misses you (rolled {matk['attack_roll']} vs AC {ch.ac}).")
     world.upsert_room(room_id=room.id, name=room.name, description=room.description,
                       exits=room.exits, contents=room.contents, features=room.features)
-    world.log("combat.resolved", out[0], player_id=player_id, subject_type="room", subject_id=room.id)
+    # The FULL exchange, not just out[0] — logging only the player's own swing silently
+    # dropped the monster's counter-attack AND the player's own death from the persistent
+    # record (confirmed live: a real death read back later as just "you struck the
+    # Mirewhisper for 6 damage," with no trace it struck back and killed you). Anything that
+    # reads this log afterward — /export_story, look()'s traces, the live stream — needs the
+    # whole thing, not half of it.
+    world.log("combat.resolved", " ".join(out), player_id=player_id, subject_type="room", subject_id=room.id)
     if died:
         # Keep the entity table in sync with room.contents (which just dropped the monster
         # dict entirely) — a first-class death event, not folded into combat.resolved's
