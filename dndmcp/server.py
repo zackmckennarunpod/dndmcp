@@ -879,10 +879,14 @@ async def attack(player_id: str, weapon_bonus: int = 3, damage_dice: str = "1d8"
                  subject_type="entity", subject_id=monster["id"])
         world.upsert_item(item_id=loot_item["id"], campaign_id=ch.campaign_id, name=loot_name,
                           description=loot_desc, owner_type="room", owner_id=room.id)
+        # ONE log call, not two — an earlier version of this also logged a second, TEXT-
+        # IDENTICAL copy tagged subject_type="item" for future per-item history queries, but
+        # nothing reads that yet and the live event stream shows every row unfiltered (by
+        # design — see /stream/events's own docstring), so it just showed as a duplicated
+        # line (confirmed live). Re-add a distinctly-worded item-scoped log if/when something
+        # actually needs to query an item's own history.
         world.log("item.spawned", f"{loot_name} dropped by {monster['name']} in {room.name}.",
                  player_id=player_id, subject_type="room", subject_id=room.id)
-        world.log("item.spawned", f"{loot_name} dropped by {monster['name']} in {room.name}.",
-                 player_id=player_id, subject_type="item", subject_id=loot_item["id"])
     return "\n".join(out)
 
 
@@ -935,8 +939,6 @@ async def pick_up_item(player_id: str, item_id: str | None = None,
                           acquired_at=time.time())
         world.log("item.picked_up", f"{ch.name} picked up {match['name']} ({flavor['via']}).",
                   player_id=player_id, subject_type="room", subject_id=room.id)
-        world.log("item.picked_up", f"{ch.name} picked up {match['name']} ({flavor['via']}).",
-                  player_id=player_id, subject_type="item", subject_id=item_id_final)
         detail = f" {desc}" if desc else ""
         return f"✦ You take {match['name']}.{detail} Added to your inventory."
 
@@ -963,8 +965,6 @@ async def pick_up_item(player_id: str, item_id: str | None = None,
                       owner_id=player_id, acquired_at=time.time())
     world.log("item.picked_up", f"{ch.name} picked up {item['name']} ({item['via']}).",
               player_id=player_id, subject_type="room", subject_id=room.id)
-    world.log("item.picked_up", f"{ch.name} picked up {item['name']} ({item['via']}).",
-              player_id=player_id, subject_type="item", subject_id=item_id_final)
     detail = f" {item['description']}" if item["description"] else ""
     return f"✦ You take {item['name']}.{detail} Added to your inventory."
 
@@ -1001,8 +1001,6 @@ def drop_item(player_id: str, item_id: str | None = None, item_name: str | None 
                       description=match.get("description", ""), owner_type="room", owner_id=room.id)
     world.log("item.dropped", f"{ch.name} left {match['name']} here.", player_id=player_id,
              subject_type="room", subject_id=room.id)
-    world.log("item.dropped", f"{ch.name} left {match['name']} here.", player_id=player_id,
-             subject_type="item", subject_id=item_id_final)
     return f"You set {match['name']} down."
 
 
@@ -1057,8 +1055,6 @@ def give_item(player_id: str, item_id: str | None = None, item_name: str | None 
                       owner_id=owner_id, acquired_at=time.time())
     world.log(f"item.given_to_{owner_type}", f"{ch.name} gave {match['name']} to {recipient_label}.",
              player_id=player_id, subject_type="room", subject_id=room.id)
-    world.log(f"item.given_to_{owner_type}", f"{ch.name} gave {match['name']} to {recipient_label}.",
-             player_id=player_id, subject_type="item", subject_id=item_id_final)
     return f"✦ You give {match['name']} to {recipient_label}."
 
 
@@ -1269,8 +1265,6 @@ if os.environ.get("DNDMCP_DEV_TOOLS") == "1":
                           owner_id=room_id)
         world.log("item.spawned", f"{item['name']} appeared in {room.name} (dev-spawned).",
                  campaign_id=campaign_id, subject_type="room", subject_id=room_id)
-        world.log("item.spawned", f"{item['name']} appeared in {room.name} (dev-spawned).",
-                 campaign_id=campaign_id, subject_type="item", subject_id=item_id_final)
         return f"✓ Spawned {item['name']} in {room_id} ({room.name})."
 
     @mcp.tool()
