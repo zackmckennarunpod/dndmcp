@@ -518,7 +518,8 @@ def _loot_messages(monster_name: str, theme: str, room_context: str, premise: st
 
 
 async def generate_loot_drop(monster_name: str, theme: str, room_context: str = "",
-                             premise: str = "", *, is_main: bool) -> dict:
+                             premise: str = "", *, is_main: bool,
+                             deadline_s: float | None = None) -> dict:
     """Themed loot dropped by a defeated monster — replaces game.loot_drop's PURELY
     procedural pick (no LLM call at all; its own theme pool only really covers "gothic
     horror"/default, the same thematic-mismatch gap generate_room_content's own comment
@@ -526,11 +527,25 @@ async def generate_loot_drop(monster_name: str, theme: str, room_context: str = 
     premise. Falls back to game.loot_drop unchanged if Flash is off/errors — same
     reliability-first pattern as every other generator here; `via` distinguishes which one
     actually produced the result, same as everywhere else. `is_main`: see
-    generate_room_content's docstring — same GEN_BRIEF/NEUTRAL_BRIEF gate."""
+    generate_room_content's docstring — same GEN_BRIEF/NEUTRAL_BRIEF gate. `deadline_s`: same
+    budget contract as generate_npc_persona's — this call sits inside attack(), a reactive
+    path with a player synchronously waiting mid-combat; without a bound here a cold/slow
+    Flash endpoint (observed elsewhere: up to ~150s) would stall their whole turn instead of
+    just falling back to the procedural pick, same risk generate_room_content's own deadline
+    already guards against for move()."""
     base = {"name": game.loot_drop(theme, monster_name), "description": "", "via": "procedural"}
-    gen = await flash_llm.generate(
-        _loot_messages(monster_name, theme, room_context, premise, is_main=is_main),
-        max_tokens=100, temperature=0.9)
+    messages = _loot_messages(monster_name, theme, room_context, premise, is_main=is_main)
+    gen = None
+    try:
+        if deadline_s is not None:
+            if deadline_s <= 0:
+                raise asyncio.TimeoutError
+            gen = await asyncio.wait_for(
+                flash_llm.generate(messages, max_tokens=100, temperature=0.9), timeout=deadline_s)
+        else:
+            gen = await flash_llm.generate(messages, max_tokens=100, temperature=0.9)
+    except asyncio.TimeoutError:
+        logger.warning("generate_loot_drop: deadline (%.1fs) exhausted, keeping procedural", deadline_s)
     if gen:
         try:
             data = json.loads(gen[gen.find("{"): gen.rfind("}") + 1])

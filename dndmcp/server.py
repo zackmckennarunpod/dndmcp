@@ -492,6 +492,11 @@ _NPC_DENSITY_LIMIT = 2
 # NOT pass this — it's not blocking a player, so it keeps the existing patient behavior.
 _MOVE_GEN_DEADLINE_S = 25.0
 
+# Loot flavor is much lower-stakes than room content — a plain procedural drop is a fine
+# outcome, so this stays short rather than matching _MOVE_GEN_DEADLINE_S's 25s; combat
+# shouldn't feel sluggish waiting on flavor text for something that already has a name.
+_ATTACK_LOOT_DEADLINE_S = 12.0
+
 
 def _spawn_phrase(name: str, kind: str) -> str:
     """"<name> the <kind> appeared" reads fine when a persona was actually invented (a real
@@ -842,7 +847,8 @@ async def attack(player_id: str, weapon_bonus: int = 3, damage_dice: str = "1d8"
             loot = await worldgen.generate_loot_drop(monster["name"], camp.theme,
                                                       room_context=room.description,
                                                       premise=camp.premise,
-                                                      is_main=camp.id == MAIN_CAMPAIGN_ID)
+                                                      is_main=camp.id == MAIN_CAMPAIGN_ID,
+                                                      deadline_s=_ATTACK_LOOT_DEADLINE_S)
             loot_name, loot_desc = loot["name"], loot["description"]
             loot_item = {"type": "loot", "id": uuid.uuid4().hex[:8], "name": loot_name}
             room.contents.append(loot_item)
