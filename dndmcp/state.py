@@ -484,6 +484,16 @@ class World:
         self._c.commit()
         return new_hp
 
+    def heal(self, player_id: str, amount: int) -> int:
+        """Symmetric to damage() — floors at 0 there, ceilings at max_hp here. Same reason
+        take_damage() exists as its own tool alongside attack(): resting, a potion, an NPC's
+        aid all need a REAL way to restore HP, not just narration (see server.py's heal())."""
+        cur = self.character(player_id)
+        new_hp = min(cur.max_hp if cur else 0, (cur.hp if cur else 0) + amount)
+        self._c.execute("UPDATE character SET hp=? WHERE player_id=?", (new_hp, player_id))
+        self._c.commit()
+        return new_hp
+
     def add_item(self, player_id: str, item: dict) -> None:
         """`item`: {"name": ..., "description": ...} — see pick_up_item/generate_item_content."""
         cur = self.character(player_id)

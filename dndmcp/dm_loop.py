@@ -264,10 +264,32 @@ TOOLS: list[dict] = [
         "parameters": {"type": "object", "properties": {}, "required": []}}},
     {"type": "function", "function": {
         "name": "roll_dice",
-        "description": "Roll dice for any check not already covered by attack, e.g. '1d20+3', '2d6'. Never invent a roll yourself.",
+        "description": ("Roll dice for any check not already covered by attack, e.g. "
+                        "'1d20+3', '2d6'. Never invent a roll yourself. Rolling dice for an "
+                        "ambush/trap/hazard does NOT apply real damage on its own — call "
+                        "take_damage too, or the player's actual HP never changes."),
         "parameters": {"type": "object", "properties": {
             "expression": {"type": "string", "description": "Dice expression, e.g. '1d20+2'."},
         }, "required": ["expression"]}}},
+    {"type": "function", "function": {
+        "name": "take_damage",
+        "description": ("Apply REAL damage to the player from anything other than attack()'s "
+                        "own monster-retaliation step — an ambush, a trap, a fall, a surprise "
+                        "strike before the player can act. Narrating damage without calling "
+                        "this leaves the player's actual HP unchanged."),
+        "parameters": {"type": "object", "properties": {
+            "amount": {"type": "integer"},
+            "source": {"type": "string", "description": "What caused it, e.g. \"the ambush\"."},
+        }, "required": ["amount"]}}},
+    {"type": "function", "function": {
+        "name": "heal",
+        "description": ("Restore REAL HP — resting, a potion, an NPC's aid. Narrating a "
+                        "rest/heal without calling this leaves the player's actual HP "
+                        "unchanged (same trap as take_damage, in reverse)."),
+        "parameters": {"type": "object", "properties": {
+            "amount": {"type": "integer"},
+            "source": {"type": "string", "description": "What caused it, e.g. \"a night's rest\"."},
+        }, "required": ["amount"]}}},
     {"type": "function", "function": {
         "name": "pick_up_item",
         "description": "Pick up something in the current room and add it to the player's inventory. Name it in plain words.",
@@ -544,6 +566,20 @@ async def _tool_roll_dice(session: DMSession, expression: str = "1d20") -> str:
     return _sanitize(server.roll_dice(expression))
 
 
+async def _tool_take_damage(session: DMSession, amount: int, source: str = "") -> str:
+    err = _require_started(session)
+    if err:
+        return err
+    return _sanitize(server.take_damage(session.player_id, amount, source=source))
+
+
+async def _tool_heal(session: DMSession, amount: int, source: str = "") -> str:
+    err = _require_started(session)
+    if err:
+        return err
+    return _sanitize(server.heal(session.player_id, amount, source=source))
+
+
 async def _tool_pick_up_item(session: DMSession, item_name: str) -> str:
     err = _require_started(session)
     if err:
@@ -621,6 +657,8 @@ TOOL_HANDLERS: dict[str, Callable[..., Any]] = {
     "sense_surroundings": _tool_sense_surroundings,
     "character_sheet": _tool_character_sheet,
     "roll_dice": _tool_roll_dice,
+    "take_damage": _tool_take_damage,
+    "heal": _tool_heal,
     "pick_up_item": _tool_pick_up_item,
     "drop_item": _tool_drop_item,
     "give_item": _tool_give_item,

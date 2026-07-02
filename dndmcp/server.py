@@ -713,13 +713,63 @@ def log_event(player_id: str, text: str, subject_type: str | None = None,
     noteworthy happens that move/attack/pick_up_item/talk_to don't already cover — it's what
     makes an ad-hoc moment durable and visible to others, not just narrated and forgotten.
     subject_type/subject_id default to the player's CURRENT ROOM if omitted (the common
-    case — most ad-hoc moments are about where the player currently is)."""
+    case — most ad-hoc moments are about where the player currently is).
+
+    NOT for anything that should actually change the player's HP — this has ZERO mechanical
+    effect, purely narrative. An ambush, a trap, a fall, any damage the player takes WITHOUT
+    initiating combat via attack() (which already handles monster retaliation when the
+    player swings first) needs take_damage(), or the narration and the real game state
+    silently disagree — the player reads "dropped to the brink of unconsciousness" while
+    their actual HP never moves (observed live)."""
     ch = world.character(player_id)
     if not ch:
         return "Unknown player_id. Call start_adventure first."
     st, sid = (subject_type, subject_id) if subject_type else ("room", ch.location_id)
     world.log("world.event", text, player_id=player_id, subject_type=st, subject_id=sid)
     return "Recorded."
+
+
+@mcp.tool()
+def take_damage(player_id: str, amount: int, source: str = "") -> str:
+    """Apply real damage to the player from anything OTHER than attack()'s own monster-
+    retaliation step — an ambush, a trap, a fall, an environmental hazard, a surprise strike
+    before the player gets to act. attack() already handles "player swings, monster swings
+    back if it survives"; this is for every other way a player can get hurt, so narration and
+    the real game state never silently disagree (log_event has zero mechanical effect on
+    HP — see its own docstring). `source`: a short description of what caused it, folded into
+    the log line (e.g. "Clankerton's ambush", "a collapsing floor"). Returns the resulting HP
+    and flags death, same as attack()'s own damage branch."""
+    ch = world.character(player_id)
+    if not ch:
+        return "Unknown player_id. Call start_adventure first."
+    if dead := _dead_gate(ch):
+        return dead
+    new_hp = world.damage(player_id, amount)
+    cause = f" ({source})" if source else ""
+    world.log("combat.resolved", f"{ch.name} took {amount} damage{cause}. {new_hp} HP left.",
+             player_id=player_id, subject_type="room", subject_id=ch.location_id)
+    out = f"{ch.name} takes {amount} damage{cause}. {new_hp} HP left."
+    if new_hp <= 0:
+        out += " ☠ You have fallen. The dark claims another..."
+    return out
+
+
+@mcp.tool()
+def heal(player_id: str, amount: int, source: str = "") -> str:
+    """Restore real HP — resting, a potion, an NPC's aid, anything that should actually undo
+    damage. Symmetric to take_damage(): without this, narrating a rest/potion/heal has zero
+    mechanical effect (same trap as narrating damage via log_event — see its docstring),
+    leaving HP silently out of sync with the story. Caps at max HP; a no-op-but-not-an-error
+    if already at full. `source`: short description folded into the log line (e.g.
+    "a night's rest", "a healing draught")."""
+    ch = world.character(player_id)
+    if not ch:
+        return "Unknown player_id. Call start_adventure first."
+    new_hp = world.heal(player_id, amount)
+    cause = f" ({source})" if source else ""
+    world.log("character.healed", f"{ch.name} healed {amount}{cause}. {new_hp} HP.",
+             player_id=player_id, subject_type="room", subject_id=ch.location_id)
+    return f"{ch.name} recovers, healing for {amount}{cause}. {new_hp}/{ch.max_hp} HP."
 
 
 def _format_quest(q) -> str:
