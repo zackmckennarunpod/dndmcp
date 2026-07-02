@@ -677,11 +677,16 @@ def _chat_sync(messages: list[dict], tools: list[dict]) -> dict:
     flash_llm._chat_sync's proven shape (no new deps: no `openai`/`requests` package), which
     is what makes this loop work against ANY OpenAI-compatible host by just changing
     DND_DM_BASE_URL. Returns the raw `message` dict (content + tool_calls) — the loop needs
-    tool_calls verbatim to drive itself, not just the text half flash_llm.generate() returns."""
-    body = json.dumps({
-        "model": DND_DM_MODEL, "messages": messages, "tools": tools, "tool_choice": "auto",
-        "max_tokens": MAX_TOKENS, "temperature": TEMPERATURE,
-    }).encode()
+    tool_calls verbatim to drive itself, not just the text half flash_llm.generate() returns.
+    An empty `tools` list (bot_player.py's plain-text "what does the character do next" call,
+    which never needs tool-calling) omits tools/tool_choice entirely rather than sending an
+    empty array — some OpenAI-compatible servers reject tool_choice="auto" with no tools."""
+    body = {"model": DND_DM_MODEL, "messages": messages,
+            "max_tokens": MAX_TOKENS, "temperature": TEMPERATURE}
+    if tools:
+        body["tools"] = tools
+        body["tool_choice"] = "auto"
+    body = json.dumps(body).encode()
     url = f"{DND_DM_BASE_URL.rstrip('/')}/chat/completions"
     req = urllib.request.Request(url, data=body, method="POST", headers={
         "Authorization": f"Bearer {_api_key()}", "Content-Type": "application/json"})

@@ -48,6 +48,7 @@ class Character(BaseModel):
     # across the item's move from room.contents to here (same id, new owner) — see
     # pick_up_item/generate_item_content and log.subject_type="item".
     location_id: str
+    is_bot: bool = False
 
 
 class Room(BaseModel):

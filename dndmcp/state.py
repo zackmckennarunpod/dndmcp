@@ -248,6 +248,11 @@ class World:
         # of "Scimitar") — the SRD is fantasy-only, so a sci-fi/steampunk/etc world's monster
         # keeps rules-accurate mechanics but shouldn't narrate a medieval weapon mid-combat.
         self._add_column_if_missing("entity", "attack_flavor", "TEXT DEFAULT ''")
+        # Marks a character as an autonomous bot player (see the pod's bot-loop supervisor) so
+        # /metrics and the world page's spectate strip can badge it — everything else about a
+        # bot character is a completely normal row, created through the same start_adventure
+        # path any real player uses.
+        self._add_column_if_missing("character", "is_bot", "INTEGER DEFAULT 0")
         # Migrate the old singleton `campaign` row (id=1) into campaigns/"main", once — INSERT
         # OR IGNORE makes re-running this on every startup a no-op after the first time.
         self._c.execute(
@@ -467,6 +472,13 @@ class World:
         d["stats"] = json.loads(d["stats"] or "{}")
         d["inventory"] = json.loads(d["inventory"] or "[]")
         return Character.model_validate(d)
+
+    def mark_bot(self, player_id: str) -> None:
+        """Flag a character as an autonomous bot player — called once, right after
+        start_adventure mints it, by whatever creates a bot session (see the pod's bot-loop
+        supervisor). Everything else about the character is completely normal."""
+        self._c.execute("UPDATE character SET is_bot=1 WHERE player_id=?", (player_id,))
+        self._c.commit()
 
     def set_location(self, player_id: str, room_id: str) -> None:
         self._c.execute("UPDATE character SET location_id=? WHERE player_id=?", (room_id, player_id))

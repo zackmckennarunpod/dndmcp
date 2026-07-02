@@ -23,12 +23,26 @@ def _flags_path() -> Path:
     return state_dir / "admin_flags.json"
 
 
+def _read() -> dict:
+    try:
+        return json.loads(_flags_path().read_text())
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+
+
 def enabled(name: str, *, default: bool) -> bool:
     """Read fresh every call (no caching) so a toggle takes effect immediately. Never
     raises: a missing file, corrupt JSON, or a name it doesn't mention all just mean
     "no override, use the env-var default" — same as not having a flags file at all."""
+    return bool(_read().get(name, default))
+
+
+def get_int(name: str, *, default: int) -> int:
+    """Same contract as enabled(), for small numeric config (e.g. bots_count) that doesn't fit
+    a plain on/off flag. A non-numeric override is treated the same as a missing one — a typo
+    in scripts/pod_set_flag.sh's value must not crash a live poll loop."""
+    value = _read().get(name, default)
     try:
-        data = json.loads(_flags_path().read_text())
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return int(value)
+    except (TypeError, ValueError):
         return default
-    return bool(data.get(name, default))

@@ -26,11 +26,19 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from sse_starlette.sse import EventSourceResponse
 
-from . import chat_sessions, dm_loop, pairing, server, worldgen
+from . import bot_player, chat_sessions, dm_loop, pairing, server, worldgen
 from .state import MAIN_CAMPAIGN_ID
 
 app = FastAPI(title="DNDMCP map")
 logger = logging.getLogger(__name__)
+
+
+@app.on_event("startup")
+async def _start_bot_supervisor() -> None:
+    # Fire-and-forget: bot_player.start_supervisor() runs forever, polling admin_flags so
+    # bots can be turned on/off/scaled via scripts/pod_set_flag.sh with no redeploy. A crash
+    # here must never take the whole GUI/MCP process down with it.
+    asyncio.create_task(bot_player.start_supervisor())
 
 # Kill switch for the whole browser-DM chat pane (e0b.3) — default ON. Flip to "0" to pull it
 # without a redeploy of the surrounding map/GUI: POST /chat 503s and GET /chat/enabled tells
@@ -454,7 +462,17 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
  </div>
 </div>
 <main style="margin-top:16px">
- <div class=panel><h2 id=mapTitle>World map (shared, live)</h2><div class=sub id=mapExplainer style="display:none;margin-bottom:2px">one persistent world everyone shares — other players' ghosts have already passed through it</div><div class=sub id=whereInMap style="margin-bottom:2px">—</div><div class=sub style="margin-bottom:4px;opacity:.85">
+ <div class=panel><h2 id=mapTitle>World map (shared, live)</h2><div class=sub id=mapExplainer style="display:none;margin-bottom:2px">one persistent world everyone shares — other players' ghosts have already passed through it</div><div class=sub id=whereInMap style="margin-bottom:2px">—</div>
+<div id=spectateBar style="display:none;margin-bottom:6px;padding:6px 8px;background:var(--panel);border:1px solid var(--border);border-radius:6px;font-size:12px">
+  <span style="color:var(--warm-bright)">👀 Active now:</span>
+  <span id=spectateNames style="margin-left:4px"></span>
+  <span id=spectateNow style="margin-left:8px;display:none">
+    — <span style="color:var(--warm-bright)">Spectating:</span> <span id=spectateLabel></span>
+    <a href="#" id=spectateNextBtn style="margin-left:6px;color:var(--muted);text-decoration:underline dotted">⏭ next</a>
+    <a href="#" id=spectateStopBtn style="margin-left:6px;color:var(--muted);text-decoration:underline dotted">✕ stop</a>
+  </span>
+</div>
+<div class=sub style="margin-bottom:4px;opacity:.85">
   <span style="color:var(--ghost)">●</span> your room &nbsp;
   <span style="color:var(--visited)">●</span> places you've been &nbsp;
   <span style="color:var(--dim)">●</span>&thinsp;??? not yet discovered &nbsp;
@@ -934,6 +952,11 @@ let userInteracted = false;
 let selectedRoomId = null;  // last-clicked node -- gets its name drawn on the map itself so
                              // the link between "what I clicked" and the sidebar panel that
                              // just changed is obvious, not just implied
+let spectateId = null;      // truncated (6-char) player_id of whoever the "Active now" strip
+                             // has selected to watch -- purely a client-side view overlay
+                             // (highlights their current room), never touches ?player= or any
+                             // tool call. Cleared if they drop out of s.players entirely.
+const SPECTATE_ACTIVE_WINDOW_S = 600;  // "active now" = acted in the last 10 minutes
 const zoomBehavior = d3.zoom().scaleExtent([0.25, 4])
   // Plain mouse-wheel over the SVG used to always zoom, which d3 implements by calling
   // preventDefault() on the wheel event — that's what trapped page scroll the instant the
@@ -1073,12 +1096,17 @@ function renderGraph(rooms, players, you){
    for(const r of rooms){ if(!nodesById[r.id]) nodesById[r.id] = {id: r.id, x: W/2+(Math.random()-.5)*100, y: H/2+(Math.random()-.5)*100}; }
    for(const id of Object.keys(nodesById)) if(!byId[id]) delete nodesById[id];
  }
+ // Whoever the "Active now" strip currently has selected (see renderSpectateBar) -- looked
+ // up fresh from THIS poll's players list every render, so the highlight tracks them live as
+ // they actually move, the same way "mine" tracks your own character.
+ const spectateTarget = spectateId ? players.find(p=>p.player_id===spectateId) : null;
  for(const r of rooms){
    const n = nodesById[r.id];
    n.name = r.name; n.visited = r.visited; n.discovered = r.discovered;
    n.description = r.description; n.features = r.features; n.contents = r.contents;
    n.image_ref = r.image_ref;
    n.mine = you && r.id===you.location_id;
+   n.spectating = !!(spectateTarget && r.id===spectateTarget.location_id);
    n.count = (occupants[r.id]||[]).length;
  }
  const nodes = rooms.map(r => nodesById[r.id]);
@@ -1124,11 +1152,12 @@ function renderGraph(rooms, players, you){
      return g;
    });
  nodeSel.select('circle')
-   .attr('fill', d=> d.mine ? '#4fd8c4' : (d.visited ? '#8072e0' : '#1c1630'))
-   .attr('stroke', d=> d.mine ? '#8ff0e0' : '#453a6b')
-   // A soft glow on your own current room only — you're a ghost too; this is the one node
-   // that's genuinely "alive" right now, everything else is just trace/memory.
-   .style('filter', d=> d.mine ? 'drop-shadow(0 0 7px #4fd8c4)' : null);
+   .attr('fill', d=> d.mine ? '#4fd8c4' : (d.spectating ? '#e8b339' : (d.visited ? '#8072e0' : '#1c1630')))
+   .attr('stroke', d=> d.mine ? '#8ff0e0' : (d.spectating ? '#f5cc66' : '#453a6b'))
+   // A soft glow on your own current room (teal) or whoever you're spectating (amber) — you're
+   // a ghost too; these are the only nodes genuinely "alive" right now, everything else is
+   // just trace/memory. `mine` wins if somehow both are true (you spectating yourself).
+   .style('filter', d=> d.mine ? 'drop-shadow(0 0 7px #4fd8c4)' : (d.spectating ? 'drop-shadow(0 0 7px #e8b339)' : null));
  updateLabels();
  nodeSel.select('text.count').text(d=> d.count ? d.count : '');
 
@@ -1177,6 +1206,67 @@ function renderGraph(rooms, players, you){
  }
 }
 
+// "Active now" spectate strip -- lets a visitor watch a SPECIFIC character move around live,
+// separate from their own ?player= (if any). Purely a view overlay: it never calls a game
+// tool, just highlights spectateTarget's current room on the map (see renderGraph's
+// n.spectating) and re-derives its label from the latest poll every tick, same as any other
+// on-screen state here. Hidden entirely when nobody's acted recently -- an empty "Active now"
+// strip would just be noise on a quiet world. players/rooms are cached module-level (not just
+// passed as args) so the Next/Stop button handlers below -- which fire from a click, not a
+// poll -- can re-render against the latest known state without waiting for the next tick().
+let lastPlayers = [], lastRooms = [];
+function renderSpectateBar(players, rooms){
+  lastPlayers = players; lastRooms = rooms;
+  const now = Date.now() / 1000;
+  const active = players.filter(p => p.last_seen && (now - p.last_seen) < SPECTATE_ACTIVE_WINDOW_S);
+  const bar = document.getElementById('spectateBar');
+  if(!active.length){
+    bar.style.display = 'none';
+    spectateId = null;
+    return;
+  }
+  bar.style.display = '';
+  // Dropped out of the active window (or the world reset) since last poll -- fall back to
+  // just showing the strip with nothing selected, rather than pointing at stale data.
+  if(spectateId && !active.some(p => p.player_id === spectateId)) spectateId = null;
+
+  document.getElementById('spectateNames').innerHTML = active.map(p =>
+    `<a href="#" class="spectateNameLink" data-pid="${esc(p.player_id)}" `
+    + `style="color:${p.player_id===spectateId ? 'var(--warm-bright)' : 'var(--ghost-bright)'};`
+    + `text-decoration:none;margin-right:8px">${p.is_bot ? '🤖 ' : ''}${esc(p.name || '?')} `
+    + `<span style="color:var(--muted)">(${esc(p.klass || '?')})</span></a>`
+  ).join('');
+  document.querySelectorAll('.spectateNameLink').forEach(el => {
+    el.addEventListener('click', ev => { ev.preventDefault(); spectateId = el.dataset.pid; renderSpectateBar(players, rooms); });
+  });
+
+  const nowSpan = document.getElementById('spectateNow');
+  if(spectateId){
+    const target = active.find(p => p.player_id === spectateId);
+    const room = rooms.find(r => r.id === target.location_id);
+    nowSpan.style.display = '';
+    document.getElementById('spectateLabel').textContent =
+      (target.name || '?') + ' — ' + (room ? (room.discovered ? room.name : '???') : 'somewhere unknown');
+  } else {
+    nowSpan.style.display = 'none';
+  }
+}
+document.getElementById('spectateNextBtn').addEventListener('click', ev => {
+  ev.preventDefault();
+  const ids = lastPlayers
+    .filter(p => p.last_seen && (Date.now()/1000 - p.last_seen) < SPECTATE_ACTIVE_WINDOW_S)
+    .map(p => p.player_id);
+  if(!ids.length) return;
+  const i = ids.indexOf(spectateId);
+  spectateId = ids[(i + 1) % ids.length];
+  renderSpectateBar(lastPlayers, lastRooms);
+});
+document.getElementById('spectateStopBtn').addEventListener('click', ev => {
+  ev.preventDefault();
+  spectateId = null;
+  renderSpectateBar(lastPlayers, lastRooms);
+});
+
 async function tick(){
  try{
   const url = '/state?campaign='+encodeURIComponent(campaignId)
@@ -1219,6 +1309,7 @@ async function tick(){
     }
   }
   renderGraph(s.rooms||[], s.players||[], s.you||null);
+  renderSpectateBar(s.players||[], s.rooms||[]);
   rebuildHighlightIndex(s);
   const camp = s.campaign;
   lastCampaignTheme = camp && camp.theme;
@@ -2194,9 +2285,17 @@ def state(request: Request) -> JSONResponse:
         # below, and highlightKnown -- neither ever needs more than that to render). The
         # viewer's OWN identity is unaffected: that still flows through the full, caller-
         # supplied ?player= query param handled separately below, never through this list.
-        players = [{"player_id": p["player_id"][:6], "name": p["name"], "location_id": p["location_id"]}
+        # last_seen backs the world page's "active now" spectate strip (client-side filters to
+        # the last 10 minutes) — same per-row MAX(ts) subquery /metrics already uses for its
+        # own Characters table, just scoped down to one campaign here.
+        players = [{"player_id": p["player_id"][:6], "name": p["name"], "klass": p["klass"],
+                    "location_id": p["location_id"], "last_seen": p["last_seen"],
+                    "is_bot": bool(p["is_bot"])}
                    for p in c.execute(
-                       "SELECT player_id, name, location_id FROM character WHERE campaign_id=?",
+                       "SELECT ch.player_id AS player_id, ch.name AS name, ch.klass AS klass,"
+                       " ch.location_id AS location_id, ch.is_bot AS is_bot,"
+                       " (SELECT MAX(ts) FROM log WHERE player_id=ch.player_id AND campaign_id=ch.campaign_id) AS last_seen"
+                       " FROM character ch WHERE campaign_id=?",
                        (campaign_id,)).fetchall()]
         # The world's founding hook — theme + premise, seeded once at create_campaign and
         # never touched again. Currently only ever shown once, in start_adventure's own reply
@@ -2259,21 +2358,29 @@ def state(request: Request) -> JSONResponse:
         c.close()
 
 
-@app.get("/export_story")
-async def export_story(request: Request):
+class _StoryError(Exception):
+    """Raised by _build_character_story for a missing/bad player id — carries the HTTP status
+    each caller (JSON download vs HTML page) renders in its own shape."""
+    def __init__(self, message: str, status_code: int):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+async def _build_character_story(campaign_id: str, player_id: str | None,
+                                 ip: str | None) -> tuple[sqlite3.Row, str, str]:
     """One player's real event timeline, synthesized into a markdown story via Flash
     (worldgen.generate_story) — falls back to a plain chronological listing of the same
-    timeline if Flash is off/errors, same reliability-first pattern as everything else
-    (this always produces SOMETHING downloadable, just less polished without a model)."""
-    campaign_id = request.query_params.get("campaign") or "main"
-    player_id = request.query_params.get("player")
+    timeline if Flash is off/errors, same reliability-first pattern as everything else (this
+    always produces SOMETHING, just less polished without a model). Shared by /export_story
+    (raw .md download) and /story (printable HTML page) so both stay byte-for-byte the same
+    logic. Returns (char row, markdown, via)."""
     if not player_id:
-        return JSONResponse({"error": "?player=<id> is required to export a story"}, status_code=400)
+        raise _StoryError("?player=<id> is required to view a story", 400)
     c = _db()
     try:
         char = c.execute("SELECT * FROM character WHERE player_id=?", (player_id,)).fetchone()
         if not char:
-            return JSONResponse({"error": "unknown player"}, status_code=404)
+            raise _StoryError("unknown player", 404)
         camp = c.execute("SELECT * FROM campaigns WHERE id=?", (campaign_id,)).fetchone()
         # This player's own actions, PLUS world-level events with no player_id (room.generated
         # etc.) that happened in this campaign — not other players' actions, this is THEIR
@@ -2329,16 +2436,121 @@ async def export_story(request: Request):
             "INSERT INTO log (ts,kind,text,player_id,subject_type,subject_id,campaign_id,ip)"
             " VALUES (?,?,?,?,?,?,?,?)",
             (time.time(), "story.exported", f"{char['name']} exported their story ({via}).",
-             player_id, "character", player_id, campaign_id, _client_ip(request)),
+             player_id, "character", player_id, campaign_id, ip),
         )
         c.commit()
     finally:
         c.close()
 
+    return char, markdown, via
+
+
+@app.get("/export_story")
+async def export_story(request: Request):
+    campaign_id = request.query_params.get("campaign") or "main"
+    player_id = request.query_params.get("player")
+    try:
+        char, markdown, via = await _build_character_story(campaign_id, player_id, _client_ip(request))
+    except _StoryError as e:
+        return JSONResponse({"error": str(e)}, status_code=e.status_code)
+
     safe_name = "".join(ch for ch in char["name"] if ch.isalnum() or ch in " -_").strip() or "story"
     return Response(content=markdown, media_type="text/markdown; charset=utf-8",
                     headers={"Content-Disposition": f'attachment; filename="{safe_name}.md"',
                              "X-Story-Via": via})
+
+
+@app.get("/story", response_class=HTMLResponse)
+async def story_page(request: Request) -> str:
+    """A character's story as a readable, printable page — what /metrics' character rows link
+    to (see player_rows below), so you can revisit ANY past or present character (not just
+    your own live one) and print/read their story. Same underlying data as /export_story
+    (via _build_character_story), just rendered for a browser instead of downloaded."""
+    campaign_id = request.query_params.get("campaign") or "main"
+    player_id = request.query_params.get("player")
+    try:
+        char, markdown, via = await _build_character_story(campaign_id, player_id, _client_ip(request))
+    except _StoryError as e:
+        return HTMLResponse(
+            f"<!doctype html><html><body style='background:#0a0713;color:#e7e1f5;"
+            f"font:14px monospace;padding:40px'><p>{html.escape(str(e))}</p></body></html>",
+            status_code=e.status_code)
+
+    # Minimal markdown->HTML: this app doesn't otherwise depend on a markdown library, and
+    # worldgen.generate_story's output is simple (headings, paragraphs, occasional bullets) —
+    # a full parser would be a new dependency for a handful of tag types.
+    def md_to_html(md: str) -> str:
+        out = []
+        in_list = False
+        for line in md.split("\n"):
+            stripped = line.strip()
+            is_item = stripped.startswith("- ")
+            if in_list and not is_item:
+                out.append("</ul>")
+                in_list = False
+            if stripped.startswith("# "):
+                out.append(f"<h1>{html.escape(stripped[2:])}</h1>")
+            elif stripped.startswith("## "):
+                out.append(f"<h2>{html.escape(stripped[3:])}</h2>")
+            elif is_item:
+                if not in_list:
+                    out.append("<ul>")
+                    in_list = True
+                out.append(f"<li>{html.escape(stripped[2:])}</li>")
+            elif stripped.startswith("*") and stripped.endswith("*") and len(stripped) > 1:
+                out.append(f"<p><em>{html.escape(stripped.strip('*'))}</em></p>")
+            elif stripped:
+                out.append(f"<p>{html.escape(stripped)}</p>")
+        if in_list:
+            out.append("</ul>")
+        return "\n".join(out)
+
+    dead = (char["hp"] or 0) <= 0
+    status = "💀 Dead" if dead else "🟢 Alive"
+    export_url = f"/export_story?campaign={quote(campaign_id)}&player={quote(player_id)}"
+    return f"""<!doctype html><html><head><meta charset=utf-8>
+<title>{html.escape(char["name"])}'s Story</title>
+<link rel=icon href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>📜</text></svg>">
+<style>
+:root{{--bg:#0a0713;--panel:#150f24;--border:#2b2145;--text:#e7e1f5;--muted:#8d7fae;
+  --ghost:#4fd8c4;--ghost-bright:#8ff0e0;--link:#241a3c}}
+body{{margin:0;background:var(--bg);color:var(--text);font:15px/1.6 'IBM Plex Mono',ui-monospace,Menlo,monospace}}
+header{{padding:16px 22px;border-bottom:1px solid var(--border);display:flex;gap:14px;
+  align-items:baseline;flex-wrap:wrap}}
+header h1{{font-size:15px;margin:0;color:var(--muted);text-transform:uppercase;letter-spacing:.05em}}
+.status{{color:var(--ghost-bright)}}
+.actions{{margin-left:auto;display:flex;gap:8px}}
+button, a.btn{{background:var(--link);color:var(--ghost-bright);border:1px solid var(--border);
+  border-radius:6px;padding:6px 12px;font:12px 'IBM Plex Mono',monospace;cursor:pointer;
+  text-decoration:none}}
+button:hover, a.btn:hover{{background:var(--ghost);color:var(--bg)}}
+main{{max-width:720px;margin:0 auto;padding:30px 24px 60px}}
+main h1{{font:600 26px 'Cinzel',serif;color:var(--ghost-bright);margin:0 0 4px}}
+main h2{{font-size:14px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;
+  margin:26px 0 8px}}
+main p{{margin:0 0 10px}}
+main li{{margin:0 0 6px 18px}}
+@media print {{
+  header{{display:none}}
+  main{{max-width:none;padding:0}}
+  body{{background:#fff;color:#111}}
+  main h1{{color:#111}} main h2{{color:#444}}
+}}
+</style></head><body>
+<header>
+ <h1>Character story</h1>
+ <span class=status>{status}</span>
+ <div class=actions>
+  <button onclick="window.print()">🖨 Print</button>
+  <a class=btn href="{export_url}">⬇ Download .md</a>
+  <a class=btn href="/?campaign={quote(campaign_id)}&player={quote(player_id)}" title="See the rooms this character actually discovered, and where they left off">🗺 View on map</a>
+  <a class=btn href="/metrics?campaign={quote(campaign_id)}">← metrics</a>
+ </div>
+</header>
+<main>
+{md_to_html(markdown)}
+</main>
+</body></html>"""
 
 
 @app.get("/flash-calls", response_class=HTMLResponse)
@@ -2442,7 +2654,7 @@ def metrics_page(request: Request) -> str:
         # there's no separate is_dead flag, damage() just clamps hp at 0 and narrates it).
         players = c.execute(
             "SELECT ch.player_id AS player_id, ch.campaign_id AS campaign_id, ch.name AS name,"
-            " ch.klass AS klass, ch.hp AS hp, ch.max_hp AS max_hp,"
+            " ch.klass AS klass, ch.hp AS hp, ch.max_hp AS max_hp, ch.is_bot AS is_bot,"
             " (SELECT COUNT(*) FROM log WHERE player_id=ch.player_id AND campaign_id=ch.campaign_id) AS events,"
             " (SELECT MAX(ts) FROM log WHERE player_id=ch.player_id AND campaign_id=ch.campaign_id) AS last_seen"
             f" FROM character ch {where_camp} ORDER BY last_seen DESC", camp_args).fetchall()
@@ -2484,7 +2696,9 @@ def metrics_page(request: Request) -> str:
 
     player_rows = "".join(
         f'<div class=row><span class=who>{html.escape(p["player_id"][:8])}</span>'
-        f'<span class=pname>{html.escape(p["name"] or "?")} <span class=muted>({html.escape(p["klass"] or "?")})</span></span>'
+        f'<span class=pname><a href="/story?campaign={html.escape(quote(p["campaign_id"]))}&player={html.escape(quote(p["player_id"]))}" '
+        f'title="Read/print this character\'s story">📜 {"🤖 " if p["is_bot"] else ""}{html.escape(p["name"] or "?")}</a> '
+        f'<span class=muted>({html.escape(p["klass"] or "?")})</span></span>'
         + (f'<span class=world><a href="/?campaign={html.escape(p["campaign_id"])}">{html.escape(p["campaign_id"])}</a></span>' if all_worlds else "")
         + f'<span class=status>{status_html(p)}</span>'
         f'<span class=n>{p["events"]} events</span>'
@@ -2535,6 +2749,8 @@ h2{{font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.0
 .ts{{color:var(--muted);flex-shrink:0;width:150px}}
 .who{{color:var(--ghost);flex-shrink:0;width:80px}}
 .pname{{flex:1}}
+.pname a{{color:var(--ghost-bright);text-decoration:none}}
+.pname a:hover{{text-decoration:underline}}
 .muted{{color:var(--muted)}}
 .world{{flex-shrink:0;width:110px}}
 .world a{{color:var(--ghost-bright)}}
