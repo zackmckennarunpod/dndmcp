@@ -312,6 +312,17 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
    color:var(--ghost-bright);font:600 13px 'IBM Plex Mono',monospace;cursor:pointer}
  .wizBigBtn:hover{border-color:var(--ghost)}
  .wizBigBtn .wizSub{display:block;color:var(--muted);font-weight:400;font-size:11px;margin-top:3px}
+ .wizRecommended{display:inline-block;margin-left:8px;padding:1px 7px;border-radius:10px;
+   background:var(--warm);color:#1a1206;font:700 9.5px 'IBM Plex Mono',monospace;
+   letter-spacing:.03em;vertical-align:middle}
+ /* Deliberately a much quieter style than .wizBigBtn — the browser-play option is the
+    fallback for "no agent set up", not a coequal choice, so it shouldn't visually compete
+    with the recommended agent path above it (user request: deprioritize it). */
+ .wizMinorBtn{display:block;width:100%;box-sizing:border-box;text-align:left;background:none;
+   border:1px solid transparent;border-radius:8px;padding:7px 14px;margin-top:2px;
+   color:var(--muted);font:600 11.5px 'IBM Plex Mono',monospace;cursor:pointer}
+ .wizMinorBtn:hover{color:var(--text);border-color:var(--border-soft)}
+ .wizMinorBtn .wizSub{display:block;color:var(--muted);font-weight:400;font-size:10.5px;margin-top:2px}
  .wizFriendRow{background:var(--bg);border:1px solid var(--border-soft);border-radius:8px;
    padding:11px 14px;color:var(--ghost-bright);font:600 13px 'IBM Plex Mono',monospace}
  .wizFriendRow .wizJoinInputRow{display:flex;gap:6px;margin-top:8px}
@@ -364,14 +375,14 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
   <button id=wizardCloseBtn type=button title="Close (Esc)">✕</button>
   <div id=wizStep1 class=wizStep>
    <h2>How do you want to play?</h2>
-   <div class=sub style="margin:0 0 10px">Through your own agent is the better experience — it
-    runs on your agent's own model over the real MCP server, with full tool access. Right here
-    in the browser is the convenience option: zero setup, but a smaller built-in model narrates,
-    so it's simpler and less capable.</div>
-   <button id=wizBrowseBtn class=wizBigBtn type=button style="display:none" title="Zero setup — but the built-in narrator runs on a small model, so the storytelling is simpler">💬 Right here in the browser
-    <span class=wizSub>easiest — play instantly in this tab, less capable narration</span></button>
-   <button id=wizAgentBtn class=wizBigBtn type=button title="Best experience — your agent's model (e.g. Claude) is far stronger than the built-in narrator, so you get a much better Dungeon Master">🖥 Through your own agent
+   <div class=sub style="margin:0 0 10px">We recommend playing through your own agent — it
+    talks to the real MCP server with full tool access, and a stronger model makes a much
+    better Dungeon Master. Don't have an agent set up, or not sure how? Play right here in
+    the browser instead — zero setup, just simpler storytelling from a smaller built-in model.</div>
+   <button id=wizAgentBtn class=wizBigBtn type=button title="Recommended — your agent's model (e.g. Claude) is far stronger than the built-in narrator, so you get a much better Dungeon Master">🖥 Through your own agent <span class=wizRecommended>★ Recommended</span>
     <span class=wizSub>Claude Code / Claude Desktop — the full MCP server, a stronger model runs your game</span></button>
+   <button id=wizBrowseBtn class=wizMinorBtn type=button style="display:none" title="No agent set up? This works instantly with zero setup — but the built-in narrator runs on a small model, so the storytelling is simpler">💬 Right here in the browser instead
+    <span class=wizSub>no agent, or don't know how to set one up? play instantly in this tab</span></button>
   </div>
   <div id=wizStep2a class=wizStep>
    <button class=wizBackBtn type=button data-wizback>← back</button>
