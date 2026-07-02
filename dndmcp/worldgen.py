@@ -46,11 +46,17 @@ _MAX_MATCHED_MONSTER_CR = 2.0
 # SKILL: describe_room — FACTS only, no pre-written narration. The Flash world-builder's job
 # is to invent what's true about the room; the DM AGENT (running the actual session) does the
 # narrating, in whatever voice fits the moment — not a canned ahead/left/right/center template.
-_ROOM_JSON = ('{"name": short evocative room name — grounded in THIS world\'s own distinctive '
-              'vocabulary (a specific noun/image from its premise), not a generic dungeon word '
-              '(echo, whisper, ancient, shadow, forgotten) unless the premise itself is built '
-              'from that word; must not repeat a name already used in this world (listed '
-              'below, if any), "kind": one or two words (e.g. "cellar", '
+_ROOM_JSON = ('{"name": a PROPER NAME for this specific room, capitalized like a place on a '
+              'map — "the Cinder Vault", "Ashwright Hall", "the Sump Beneath the Forge" — '
+              'grounded in THIS world\'s own distinctive vocabulary (a specific noun/image '
+              'from its premise). Two things it must NOT be: (1) a bare abstract noun pair '
+              'that names a CONCEPT, not a room ("Anvil Residue", "Rust Echo"); (2) a generic '
+              'lowercase type-description with an article ("a small broom closet", "a forest '
+              'clearing") — that is what the SEPARATE "kind" field below is for, never repeat '
+              'it as the name. A generic dungeon word (echo, whisper, ancient, shadow, '
+              'forgotten) only belongs here if the premise itself is built from that word. '
+              'Must not repeat a name already used in this world (listed below, if any). '
+              '"kind": one or two words (e.g. "cellar", '
               '"great hall", "attic" — informs how it connects to the world), '
               '"atmosphere": 2-4 sentences of vivid, SPECIFIC sensory detail (sight, smell, '
               'sound, light, texture) — substantial enough to actually paint the room, not a '

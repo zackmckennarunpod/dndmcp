@@ -49,6 +49,9 @@ class Character(BaseModel):
     # pick_up_item/generate_item_content and log.subject_type="item".
     location_id: str
     is_bot: bool = False
+    story_cache: str | None = None
+    story_cache_seq: int = 0
+    story_cache_via: str | None = None
 
 
 class Room(BaseModel):

@@ -253,6 +253,15 @@ class World:
         # bot character is a completely normal row, created through the same start_adventure
         # path any real player uses.
         self._add_column_if_missing("character", "is_bot", "INTEGER DEFAULT 0")
+        # Cache for /story|/export_story's Flash-synthesized narrative -- confirmed live: with
+        # no caching, every view/reload/repeated-click re-ran a real Flash generation call for
+        # the SAME character (12+ identical calls in a burst, one hackathon-demo character
+        # got hit repeatedly). story_cache_seq is the highest log.seq the cached text already
+        # accounts for; web.py regenerates only when a NEWER relevant event exists, so a
+        # character nobody's touched since their last view costs nothing to re-open.
+        self._add_column_if_missing("character", "story_cache", "TEXT")
+        self._add_column_if_missing("character", "story_cache_seq", "INTEGER DEFAULT 0")
+        self._add_column_if_missing("character", "story_cache_via", "TEXT")
         # Migrate the old singleton `campaign` row (id=1) into campaigns/"main", once — INSERT
         # OR IGNORE makes re-running this on every startup a no-op after the first time.
         self._c.execute(

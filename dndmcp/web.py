@@ -144,16 +144,23 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
  .sub{color:var(--muted);font-size:12px}
  #tagline{padding:6px 18px 10px;color:var(--muted);font-size:12px;max-width:760px}
  /* 3 columns: map (flexible width) | live stream (own space, not buried below the fold) | the
-    existing character/room/recent sidebar. */
- main{display:grid;grid-template-columns:1fr 340px 280px;gap:16px;padding:16px 18px}
+    existing character/room/recent sidebar. align-items:start is load-bearing: CSS grid's
+    default (stretch) makes every column match the ROW's tallest cell -- the sidebar's Recent
+    panel grows unbounded with activity, and without this the map+stream columns silently
+    stretched to match it, leaving a huge dead area below their own fixed-height content
+    (confirmed live: looked "messy", a big empty block under the map). start lets each column
+    size to its own content instead. */
+ main{display:grid;grid-template-columns:1fr 340px 280px;gap:16px;padding:16px 18px;align-items:start}
  .panel{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:14px}
  .panel h2{font-size:11px;text-transform:uppercase;letter-spacing:1.5px;color:var(--muted);margin:0 0 10px}
  /* Fixed (not %/flex-stretched) heights on purpose: a height that depends on the grid row,
     which depends on the SVG's own intrinsic ratio (see #map), is a circular layout — the
     browser "resolves" it by growing #map without bound every time the ResizeObserver below
     reacts to its own previous resize. Width is still fully responsive (that was the actual
-    "map doesn't fit the box" bug); only height is pinned to a plain number now. */
- #map{width:100%;height:560px;overflow:hidden;position:relative;
+    "map doesn't fit the box" bug); only height is pinned to a plain number now. Bumped from
+    560 -> 640: with align-items:start no longer stretching these panels to match the
+    sidebar, 560 started feeling cramped/cut-off for how much is usually happening at once. */
+ #map{width:100%;height:640px;overflow:hidden;position:relative;
    background:radial-gradient(ellipse at 50% 40%,#1a1330 0%,var(--panel) 70%)}
  #nodeTooltip{position:absolute;pointer-events:none;background:#1c1433;border:1px solid var(--link);
    border-radius:6px;padding:4px 9px;font-size:12px;color:var(--text);display:none;z-index:10;
@@ -200,7 +207,7 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
     column next to the map, sized to match (see #map's height). Plain column (not reversed):
     newest event lands at the TOP via prepend() below, so the feed reads top-down in the
     order things actually happened, with the newest visible without any scrolling. */
- #stream{display:flex;flex-direction:column;gap:0;height:560px;overflow-y:auto}
+ #stream{display:flex;flex-direction:column;gap:0;height:640px;overflow-y:auto}
  /* Roomier rows (was padding:2px, which crammed wrapped two-line events against their
     neighbors' border lines) — 6px breathing room + a line-height that keeps a wrapped
     entity-highlighted line readable. */
@@ -971,6 +978,8 @@ let spectateId = null;      // truncated (6-char) player_id of whoever the "Acti
                              // has selected to watch -- purely a client-side view overlay
                              // (highlights their current room), never touches ?player= or any
                              // tool call. Cleared if they drop out of s.players entirely.
+let lastSpectateCenterKey = null;  // spectateId+location_id already auto-centered on -- see
+                                    // renderSpectateBar's "Auto-follow" block
 const SPECTATE_ACTIVE_WINDOW_S = 600;  // "active now" = acted in the last 10 minutes
 
 // Stream filter presets -- declared early (not down near the rest of the stream-panel wiring)
@@ -1253,21 +1262,31 @@ function renderGraph(rooms, players, you){
 // fire from a click rather than a poll, can re-render against the latest known state without
 // waiting for the next tick().
 let lastPlayers = [], lastRooms = [];
+let lastSpectateName = null;  // whoever we last actually rendered a card for -- lets a
+                               // vanished target ("dropped below the active window", most
+                               // often because they died and the bot loop moved on to a new
+                               // character) show a "gone quiet" message instead of the card
+                               // just silently disappearing (confirmed live: read as "what
+                               // happened to them?" with no explanation).
 function renderSpectateBar(players, rooms){
   lastPlayers = players; lastRooms = rooms;
   const now = Date.now() / 1000;
   const active = players.filter(p => p.last_seen && (now - p.last_seen) < SPECTATE_ACTIVE_WINDOW_S);
   const bar = document.getElementById('spectateBar');
-  if(!active.length){
+  const card = document.getElementById('spectateCard');
+  const vanishedName = spectateId && !active.some(p => p.player_id === spectateId) ? lastSpectateName : null;
+
+  if(!active.length && !vanishedName){
     bar.style.display = 'none';
     spectateId = null;
     syncStreamFilterToSpectate();
     return;
   }
   bar.style.display = '';
-  // Dropped out of the active window (or the world reset) since last poll -- fall back to
-  // just showing the chips with nothing selected, rather than pointing at stale data.
-  if(spectateId && !active.some(p => p.player_id === spectateId)) spectateId = null;
+  // Dropped out of the active window (or the world reset) since last poll -- clear the
+  // selection itself (so re-selecting works normally), but keep vanishedName around for the
+  // message below rather than losing who it was.
+  if(vanishedName) spectateId = null;
   syncStreamFilterToSpectate();
 
   document.getElementById('spectateChips').innerHTML = active.map(p =>
@@ -1276,24 +1295,58 @@ function renderSpectateBar(players, rooms){
     `background:${p.player_id===spectateId ? 'var(--warm)' : 'var(--link)'};` +
     `color:${p.player_id===spectateId ? 'var(--bg)' : 'var(--ghost-bright)'}">` +
     `${esc(p.name || '?')} <span style="opacity:.75">(${esc(p.klass || '?')})</span></a>`
-  ).join('');
+  ).join('') || (vanishedName ? '' : '<span style="color:var(--muted)">no one active right now</span>');
+
+  if(!active.length && !vanishedName){ bar.style.display = 'none'; return; }
   document.querySelectorAll('.spectateChip').forEach(el => {
-    el.addEventListener('click', ev => { ev.preventDefault(); spectateId = el.dataset.pid; renderSpectateBar(players, rooms); });
+    el.addEventListener('click', ev => { ev.preventDefault(); lastSpectateName = null; selectSpectate(el.dataset.pid); renderSpectateBar(players, rooms); });
   });
 
-  const card = document.getElementById('spectateCard');
   if(spectateId){
     const target = active.find(p => p.player_id === spectateId);
     const room = rooms.find(r => r.id === target.location_id);
+    lastSpectateName = target.name || '?';
     card.style.display = '';
-    document.getElementById('spectateCardName').textContent = target.name || '?';
+    document.getElementById('spectateCardName').textContent = lastSpectateName;
     document.getElementById('spectateCardRoom').textContent =
       room ? (room.discovered ? room.name : '???') : 'somewhere unknown';
     document.getElementById('spectateCardNarration').textContent =
       target.last_narration || target.last_action || '(nothing to report yet)';
+    // Auto-follow: the amber highlight (renderGraph's n.spectating) is easy to miss if
+    // that room isn't currently in view -- confirmed live feedback: "can't tell where the
+    // character is". Re-center whenever the SELECTION changes or the spectated character
+    // actually moves, not on every poll tick, so it doesn't fight a manual pan/zoom between
+    // their moves. nodesById holds live simulation positions from the most recent
+    // renderGraph call, which tick() always runs immediately before this.
+    const centerKey = spectateId + ':' + target.location_id;
+    if(lastSpectateCenterKey !== centerKey){
+      lastSpectateCenterKey = centerKey;
+      const node = nodesById[target.location_id];
+      if(node) centerOn(node);
+    }
+  } else if(vanishedName){
+    lastSpectateCenterKey = null;
+    card.style.display = '';
+    document.getElementById('spectateCardName').textContent = vanishedName;
+    document.getElementById('spectateCardRoom').textContent = '';
+    document.getElementById('spectateCardNarration').textContent =
+      `💀 ${vanishedName} has gone quiet — may have died and started over as someone new. Pick another character above.`;
   } else {
+    lastSpectateCenterKey = null;
+    lastSpectateName = null;
     card.style.display = 'none';
   }
+}
+// Central place to change WHO is being spectated -- reconnects the stream when the
+// 'spectate' filter is active, so the panel re-filters to the new selection instead of
+// leaving the previous character's rows on screen (confirmed live: swapping spectate target
+// didn't swap the filtered stream). Safe to call connectStream() here unconditionally --
+// every caller of selectSpectate is a user-triggered click, always after the script's own
+// first synchronous pass has finished (unlike renderSpectateBar's own auto-render path,
+// which can run before connectStream's consts exist -- see syncStreamFilterToSpectate).
+function selectSpectate(pid){
+  spectateId = pid;
+  if (streamFilterMode === 'spectate') connectStream();
 }
 document.getElementById('spectateNextBtn').addEventListener('click', ev => {
   ev.preventDefault();
@@ -1302,12 +1355,12 @@ document.getElementById('spectateNextBtn').addEventListener('click', ev => {
     .map(p => p.player_id);
   if(!ids.length) return;
   const i = ids.indexOf(spectateId);
-  spectateId = ids[(i + 1) % ids.length];
+  selectSpectate(ids[(i + 1) % ids.length]);
   renderSpectateBar(lastPlayers, lastRooms);
 });
 document.getElementById('spectateStopBtn').addEventListener('click', ev => {
   ev.preventDefault();
-  spectateId = null;
+  selectSpectate(null);
   renderSpectateBar(lastPlayers, lastRooms);
 });
 
@@ -1511,6 +1564,9 @@ function syncStreamFilterToSpectate(){
     const t = document.getElementById('streamTitle'), s = document.getElementById('streamSub');
     if (t) t.textContent = STREAM_FILTER_MODES.all.title;
     if (s) s.textContent = STREAM_FILTER_MODES.all.sub;
+    // Only reachable once spectating was already active (a user must have selected someone
+    // first), i.e. always after the script's own first synchronous pass -- safe to call.
+    if (typeof connectStream === 'function') connectStream();
   }
 }
 
@@ -2498,7 +2554,7 @@ async def _build_character_story(campaign_id: str, player_id: str | None,
         # etc.) that happened in this campaign — not other players' actions, this is THEIR
         # story, not the whole world's. Chronological via seq (monotonic insert order).
         events = c.execute(
-            "SELECT ts, kind, text, player_id, subject_type, subject_id FROM log"
+            "SELECT seq, ts, kind, text, player_id, subject_type, subject_id FROM log"
             " WHERE campaign_id=? AND (player_id=? OR player_id IS NULL) ORDER BY seq ASC",
             (campaign_id, player_id),
         ).fetchall()
@@ -2518,6 +2574,13 @@ async def _build_character_story(campaign_id: str, player_id: str | None,
         c.close()
 
     def relevant(e) -> bool:
+        # story.exported is bookkeeping about VIEWING the story, not something that happened
+        # in the world — including it here would make every view invalidate its own cache
+        # (confirmed live: this exact bug made the cache never actually hit, since generating
+        # a story always immediately logs the story.exported event that "proves" the cache is
+        # now stale on the very next call).
+        if e["kind"] == "story.exported":
+            return False
         if e["player_id"]:
             return True  # this player's own action — always theirs to tell
         if e["subject_type"] == "room":
@@ -2526,9 +2589,20 @@ async def _build_character_story(campaign_id: str, player_id: str | None,
             return entity_room.get(e["subject_id"]) in discovered
         return False  # no subject to check against — safer to omit than leak another area
 
+    relevant_events = [e for e in events if relevant(e)]
+    max_seq = relevant_events[-1]["seq"] if relevant_events else 0
+
+    # Cache check: nothing relevant has happened since the cached version was built, so
+    # regenerating would produce the same story for real GPU cost. Confirmed live: with no
+    # caching, a single character's story got regenerated 12+ times in a burst (repeated
+    # views/clicks), each one a full Flash call. A character nobody's touched since their
+    # last view now costs nothing to re-open.
+    if char["story_cache"] and (char["story_cache_seq"] or 0) >= max_seq:
+        return char, char["story_cache"], char["story_cache_via"] or "flash"
+
     theme = camp["theme"] if camp else "adventure"
     premise = camp["premise"] if camp else ""
-    timeline_lines = [f"- {e['text']}" for e in events if relevant(e)] or ["- (nothing has happened yet)"]
+    timeline_lines = [f"- {e['text']}" for e in relevant_events] or ["- (nothing has happened yet)"]
     timeline_text = "\n".join(timeline_lines)
 
     markdown = await worldgen.generate_story(char["name"], char["klass"], theme, premise, timeline_text,
@@ -2549,6 +2623,11 @@ async def _build_character_story(campaign_id: str, player_id: str | None,
             " VALUES (?,?,?,?,?,?,?,?)",
             (time.time(), "story.exported", f"{char['name']} exported their story ({via}).",
              player_id, "character", player_id, campaign_id, ip),
+        )
+        c.execute(
+            "UPDATE character SET story_cache=?, story_cache_seq=?, story_cache_via=?"
+            " WHERE player_id=?",
+            (markdown, max_seq, via, player_id),
         )
         c.commit()
     finally:
