@@ -18,12 +18,24 @@ bots_count (int) — see scripts/pod_set_flag.sh. A background supervisor task
 (start_supervisor, called once from web.py's startup) polls these every SUPERVISOR_POLL_S and
 starts/stops individual bot loops to match, live. Bots only ever play in MAIN_CAMPAIGN_ID for
 now — spawning them into an arbitrary world is a plausible follow-up, not needed yet.
+
+Self-healing by design: every turn is bounded by TURN_TIMEOUT_S (asyncio.wait_for) — a
+genuinely hung network call gets forcibly cancelled and the loop just tries again next
+interval, rather than wedging that bot slot forever with no recovery. Confirmed live
+(2026-07-02): a bot that died in combat sat idle for 150s+ with no crash logged anywhere —
+this is the fix for exactly that failure mode. Live status is written to
+bot_status.json (see _status_path) on every state transition, readable via
+scripts/pod_bot_status.sh without needing to inspect the running process directly.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
+import time
+from pathlib import Path
 
 from . import admin_flags, dm_loop
 from .state import MAIN_CAMPAIGN_ID
@@ -33,6 +45,9 @@ logger = logging.getLogger(__name__)
 SUPERVISOR_POLL_S = 15    # how often the supervisor reconciles desired vs running bots
 BOT_TURN_INTERVAL_S = 20  # pacing between one bot's actions — real GPU work each turn, and
                           # shouldn't drown a small world in activity
+TURN_TIMEOUT_S = 240      # generous enough for a cold-started Flash endpoint plus dm_loop's
+                          # own up-to-6-tool-call turn (each individually bounded by
+                          # dm_loop._CHAT_TIMEOUT_S=120s) — but no turn waits forever
 MAX_PLAYER_HISTORY = 16   # a plain chat history (no tool_calls to keep paired, unlike
                           # dm_loop's own _truncate_history), so a trailing slice is safe
 
@@ -59,45 +74,106 @@ async def _decide_action(history: list[dict]) -> str:
     return (message.get("content") or "").strip() or "I press onward."
 
 
-async def run_bot(stop_event: asyncio.Event) -> None:
+# --- live status, for debugging without inspecting the running process directly ------------
+def _status_path() -> Path:
+    state_dir = Path(os.environ.get("DNDMCP_STATE_DIR", os.path.expanduser("~/.dndmcp")))
+    return state_dir / "bot_status.json"
+
+
+def _write_status(slot: str, **fields) -> None:
+    """Best-effort — a status-file write must never be the thing that breaks a bot turn."""
+    try:
+        p = _status_path()
+        data = json.loads(p.read_text()) if p.exists() else {}
+        data.setdefault(slot, {}).update(fields, updated_at=time.time())
+        p.write_text(json.dumps(data, indent=2))
+    except Exception:
+        logger.exception("bot_player._write_status: failed to write %s", slot)
+
+
+def _clear_status(slot: str) -> None:
+    try:
+        p = _status_path()
+        if not p.exists():
+            return
+        data = json.loads(p.read_text())
+        data.pop(slot, None)
+        p.write_text(json.dumps(data, indent=2))
+    except Exception:
+        logger.exception("bot_player._clear_status: failed to clear %s", slot)
+
+
+async def _run_one_turn(slot: str, session: dm_loop.DMSession, history: list[dict],
+                        marked_bot: bool) -> tuple[str, bool]:
+    """The actual work of one turn, split out from run_bot so it can be wrapped in
+    asyncio.wait_for below — a hung call here gets forcibly cancelled at TURN_TIMEOUT_S
+    instead of wedging the whole bot slot forever. Returns (narration, marked_bot)."""
+    _write_status(slot, state="deciding", player_id=session.player_id)
+    action = await _decide_action(history)
+    history.append({"role": "assistant", "content": action})
+
+    _write_status(slot, state="resolving", player_id=session.player_id, last_action=action)
+    narration = ""
+    async for event in dm_loop.handle_message(session, action):
+        if event["type"] == "text":
+            narration = event["text"]
+
+    if session.player_id:
+        from . import server  # deferred: avoids a module-load cycle with dm_loop
+        if not marked_bot:
+            server.world.mark_bot(session.player_id)
+            marked_bot = True
+        # The tool calls inside dm_loop.handle_message already log their own mechanical side
+        # effects (item.picked_up, player.moved, ...) — but the actual "chat" (what the bot
+        # decided to do, and how the DM narrated it) was only ever visible in this process's
+        # own memory. Log it too, so it shows up everywhere any other player's activity does:
+        # the world map's live stream, /metrics, and this character's own /story export.
+        ch = server.world.character(session.player_id)
+        name = ch.name if ch else "The bot"
+        if narration:
+            server.world.log("bot.narrated", f'{name}: "{action}" — {narration}',
+                             player_id=session.player_id)
+        _write_status(slot, state="sleeping", player_id=session.player_id,
+                     character_name=name, last_narration=narration[:200])
+
+    history.append({"role": "user", "content": narration or "(nothing seems to happen)"})
+    if len(history) > MAX_PLAYER_HISTORY:
+        history[:] = history[-MAX_PLAYER_HISTORY:]
+    return narration, marked_bot
+
+
+async def run_bot(slot: str, stop_event: asyncio.Event) -> None:
     """One bot character's whole lifetime loop — runs until stop_event is set (the
-    supervisor shrank bots_count) or the app exits. Bootstraps its own character on the
-    first turn, then alternates: the player decides an action -> dm_loop resolves/narrates
-    it -> the narration feeds back into the player's own history as what it just observed."""
+    supervisor shrank bots_count) or the task is cancelled (a forced teardown, e.g. after a
+    watchdog timeout or a manual bots_count toggle meant to unstick a hung bot). Bootstraps
+    its own character on the first turn, then alternates: the player decides an action ->
+    dm_loop resolves/narrates it -> the narration feeds back into the player's own history
+    as what it just observed."""
     session = dm_loop.create_session(MAIN_CAMPAIGN_ID)
     history: list[dict] = [{"role": "user", "content": "begin"}]
     marked_bot = False
-    while not stop_event.is_set():
-        try:
-            action = await _decide_action(history)
-            history.append({"role": "assistant", "content": action})
+    try:
+        while not stop_event.is_set():
+            try:
+                _, marked_bot = await asyncio.wait_for(
+                    _run_one_turn(slot, session, history, marked_bot), timeout=TURN_TIMEOUT_S)
+            except asyncio.TimeoutError:
+                logger.warning("bot_player.run_bot[%s]: turn exceeded %ds, abandoning it",
+                               slot, TURN_TIMEOUT_S)
+                _write_status(slot, state="timed_out", player_id=session.player_id)
+            except Exception:
+                # A bad turn must never silently kill the whole bot — same reliability-first
+                # posture as every other tool call in this codebase. Back off a full interval
+                # so a persistently broken turn doesn't spin-loop against the Flash endpoint.
+                logger.exception("bot_player.run_bot[%s]: turn failed, will retry next interval", slot)
+                _write_status(slot, state="error", player_id=session.player_id)
 
-            narration = ""
-            async for event in dm_loop.handle_message(session, action):
-                if event["type"] == "text":
-                    narration = event["text"]
-
-            # Only needs to happen once, right after start_adventure mints the real
-            # player_id — everything else about this character is completely normal from
-            # here on.
-            if not marked_bot and session.player_id:
-                from . import server  # deferred: avoids a module-load cycle with dm_loop
-                server.world.mark_bot(session.player_id)
-                marked_bot = True
-
-            history.append({"role": "user", "content": narration or "(nothing seems to happen)"})
-            if len(history) > MAX_PLAYER_HISTORY:
-                history = history[-MAX_PLAYER_HISTORY:]
-        except Exception:
-            # A bad turn must never silently kill the whole bot — same reliability-first
-            # posture as every other tool call in this codebase. Back off a full interval so
-            # a persistently broken turn doesn't spin-loop against the Flash endpoint.
-            logger.exception("bot_player.run_bot: turn failed, will retry next interval")
-
-        for _ in range(BOT_TURN_INTERVAL_S):
-            if stop_event.is_set():
-                return
-            await asyncio.sleep(1)
+            for _ in range(BOT_TURN_INTERVAL_S):
+                if stop_event.is_set():
+                    return
+                await asyncio.sleep(1)
+    finally:
+        _clear_status(slot)
 
 
 # {slot_key: (task, stop_event)} — module-level since start_supervisor is a singleton, one
@@ -114,11 +190,17 @@ async def _reconcile() -> None:
         if key not in desired:
             task, stop_event = _running.pop(key)
             stop_event.set()
+            # stop_event alone is cooperative — it's only ever checked BETWEEN turns, so a
+            # bot genuinely hung inside a turn (a network call that never returns) would
+            # never see it. cancel() is what actually makes "shrink bots_count to kill a
+            # stuck bot" work, by raising CancelledError at the task's next suspension point
+            # even mid-await.
+            task.cancel()
 
     for key in desired:
         if key not in _running:
             stop_event = asyncio.Event()
-            task = asyncio.create_task(run_bot(stop_event))
+            task = asyncio.create_task(run_bot(key, stop_event))
             _running[key] = (task, stop_event)
 
 
@@ -127,6 +209,9 @@ async def start_supervisor() -> None:
     be turned on/off/scaled live via scripts/pod_set_flag.sh — no redeploy needed:
         scripts/pod_set_flag.sh bots_enabled 1
         scripts/pod_set_flag.sh bots_count 2
+    Toggling bots_count down and back up again also serves as the "unstick a hung bot" lever
+    (see _reconcile's task.cancel() above) — check scripts/pod_bot_status.sh first to see
+    which slot actually needs it.
     """
     while True:
         try:

@@ -476,8 +476,16 @@ class World:
     def mark_bot(self, player_id: str) -> None:
         """Flag a character as an autonomous bot player — called once, right after
         start_adventure mints it, by whatever creates a bot session (see the pod's bot-loop
-        supervisor). Everything else about the character is completely normal."""
-        self._c.execute("UPDATE character SET is_bot=1 WHERE player_id=?", (player_id,))
+        supervisor). Also prefixes the character's name with 🤖 — /metrics already badges
+        is_bot separately, but the world map's live stream and Recent panel only ever show
+        raw log text (no is_bot column in that query), and every log line already embeds the
+        character's own name by convention — so this is what makes a bot's activity
+        recognizable there too, for free, with no per-event-kind changes. CASE guards against
+        double-prefixing if this is ever called twice for the same character."""
+        self._c.execute(
+            "UPDATE character SET is_bot=1,"
+            " name=CASE WHEN name LIKE '🤖%' THEN name ELSE '🤖 ' || name END"
+            " WHERE player_id=?", (player_id,))
         self._c.commit()
 
     def set_location(self, player_id: str, room_id: str) -> None:
