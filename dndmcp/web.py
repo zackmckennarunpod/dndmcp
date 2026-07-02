@@ -386,6 +386,24 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
     </div>
    </div>
   </div>
+  <div id=wizStep2c class=wizStep>
+   <button id=wizStep2cBackBtn class=wizBackBtn type=button>← back</button>
+   <h2>Build your world</h2>
+   <div class=body>
+    <p class=sub style="margin:0 0 8px">Describe a theme or premise — or leave it blank and
+     we'll surprise you.</p>
+    <textarea id=wizCreateThemeInput class=choiceInput style="width:100%;min-height:60px;resize:vertical;box-sizing:border-box"
+     placeholder="e.g. a fishing village that made a pact with something in the tide..."></textarea>
+    <div class=wizJoinInputRow style="margin-top:8px">
+     <input id=wizCreateNameInput class=choiceInput placeholder="character name (optional)">
+     <input id=wizCreateClassInput class=choiceInput placeholder="class (optional)">
+    </div>
+    <button id=wizCreateGoBtn class=choiceBtn type=button style="margin-top:10px;width:100%">🌱 Create this world</button>
+    <div id=wizCreateStatus class=sub style="margin-top:8px;display:none">Building your world —
+     this can take up to a minute (the world, your character, and the first room are all
+     generated fresh) — you'll land in the live chat once it's ready.</div>
+   </div>
+  </div>
   <div id=wizStep2b class=wizStep>
    <button class=wizBackBtn type=button data-wizback>← back</button>
    <h2>Connect your agent</h2>
@@ -591,7 +609,7 @@ let lastCampaignTheme = null; // updated every tick() from /state's campaign.the
 // maybeAutoOpenWizard). ESC / click-outside / the ✕ button all dismiss it back to spectating,
 // same "the game stays visible behind it" idea the task describes.
 let wizardOpen = false;
-const WIZ_STEPS = ['wizStep1', 'wizStep2a', 'wizStep2b'];
+const WIZ_STEPS = ['wizStep1', 'wizStep2a', 'wizStep2b', 'wizStep2c'];
 const WIZARD_DISMISSED_KEY = 'dndmcp_wizard_dismissed';
 
 function showWizStep(id){
@@ -618,7 +636,12 @@ document.getElementById('wizardOverlay').addEventListener('click', (e) => {
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && wizardOpen) closeWizard();
 });
-document.querySelectorAll('.wizBackBtn').forEach(b => b.addEventListener('click', () => showWizStep('wizStep1')));
+// wizStep2c is excluded here (own listener below) -- it's TWO hops from wizStep1
+// (wizStep1 -> wizStep2a -> wizStep2c), so the generic "back always means wizStep1" behavior
+// every OTHER step relies on would wrongly skip past "Which world?" for this one.
+document.querySelectorAll('.wizBackBtn:not(#wizStep2cBackBtn)').forEach(
+  b => b.addEventListener('click', () => showWizStep('wizStep1')));
+document.getElementById('wizStep2cBackBtn').addEventListener('click', () => showWizStep('wizStep2a'));
 
 document.getElementById('wizAgentBtn').addEventListener('click', () => showWizStep('wizStep2b'));
 document.getElementById('wizBrowseBtn').addEventListener('click', () => {
@@ -634,18 +657,32 @@ document.getElementById('wizSharedBtn').addEventListener('click', () => {
   const input = document.getElementById('chatInput');
   if (input) input.focus();
 });
-document.getElementById('wizCreateBtn').addEventListener('click', () => {
+document.getElementById('wizCreateBtn').addEventListener('click', () => showWizStep('wizStep2c'));
+document.getElementById('wizCreateGoBtn').addEventListener('click', () => {
+  const theme = (document.getElementById('wizCreateThemeInput').value || '').trim();
+  const name = (document.getElementById('wizCreateNameInput').value || '').trim();
+  const klass = (document.getElementById('wizCreateClassInput').value || '').trim();
+  let msg = theme || 'surprise me — invent an evocative theme and premise';
+  if (name || klass) {
+    msg += ` My character: ${name || 'invent a name'}${klass ? ', a ' + klass : ''}.`;
+  }
+  // Reuses the EXACT same /chat + new_world:true contract the free-text flow already used
+  // (see chatForm's submit handler below) — requestSubmit() fires that handler's real
+  // NDJSON/redirect-on-world-event logic verbatim, so this form is just a structured front
+  // end for it, not a second implementation to keep in sync.
+  newWorldPending = true;
   closeWizard();
   chatStarted = true;
-  newWorldPending = true;
   showMidTab('chat');
-  // addChatMessage is a hoisted function declaration (defined further down, alongside the
-  // rest of the chat-pane wiring) — safe to call here even though this listener can fire
-  // before that point in the script textually runs, since function declarations (unlike
-  // const/let) are fully hoisted with their body intact.
-  addChatMessage('system', "let's build your world — describe a theme, or say \\"surprise me\\"");
+  // addChatMessage/chatForm/chatInput are hoisted/const-declared further down in the script
+  // but already initialized by the time ANY click handler can fire (the whole script has
+  // finished its top-level run before a user can click anything) — same safe pattern
+  // wizSharedBtn's own handler above already relies on.
+  addChatMessage('system', 'Building your world — this can take up to a minute (the world, '
+    + 'your character, and the first room are all generated fresh)...');
   const input = document.getElementById('chatInput');
-  if (input) input.focus();
+  input.value = msg;
+  chatForm.requestSubmit();
 });
 function goToFriendWorld(){
   const id = (document.getElementById('wizFriendInput').value || '').trim();
