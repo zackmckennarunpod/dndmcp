@@ -64,6 +64,44 @@ don't add code that does.
   own Claude Code to the shared world (`claude mcp add --transport http`). This is also the
   install path documented in `dndmcp/SETUP.md`.
 
+## Admin flags — live kill switches, no redeploy
+
+`dndmcp/admin_flags.py` reads `/data/admin_flags.json` fresh on every call — flipping a value
+takes effect on the pod's very next request/poll, no restart needed. Controlled entirely over
+SSH (no HTTP auth surface for this — deliberately kept simple; see the bot-player section
+below for why that tradeoff was made on purpose, not by default):
+
+```bash
+scripts/pod_get_flags.sh              # read the current overrides
+scripts/pod_set_flag.sh <name> <0|1>       # boolean flags, e.g. flash_art
+scripts/pod_set_flag.sh <name> <integer>   # numeric flags, e.g. bots_count
+```
+
+### Self-playing bot character (`dndmcp/bot_player.py`)
+
+An autonomous character that plays itself against your own hosted Flash LLM — a small
+"player" persona decides an action each turn, `dm_loop.py` resolves/narrates it exactly like
+a real browser player's turn (same tool surface, same sanitization). Off by default.
+
+```bash
+scripts/pod_set_flag.sh bots_enabled 1   # turn bots on
+scripts/pod_set_flag.sh bots_count 2     # how many bot characters (default 0 = none)
+scripts/pod_set_flag.sh bots_enabled 0   # turn them all off
+scripts/pod_get_flags.sh                 # check current bots_enabled/bots_count
+```
+
+A background supervisor (started once in `web.py`'s FastAPI startup hook) polls these every
+15s and starts/stops individual bot loops to match — no restart required either direction.
+Status doesn't need SSH at all: `/metrics` badges every bot character with 🤖, and the world
+map's "Active now" spectate strip shows them live while they're playing.
+
+Deliberately NOT behind an authenticated HTTP endpoint: that was considered (using
+`RUNPOD_API_KEY` as the bearer token) and rejected — that key is full Runpod-account-scoped,
+so a leak from a public-facing admin endpoint would expose far more than "someone can toggle
+this hackathon demo's bot flag." SSH-only keeps the blast radius of any leak limited to what
+SSH access already implies. If this ever needs remote (non-SSH) control, mint a separate,
+narrowly-scoped token for it rather than reusing the account key.
+
 ## Known gotchas (see the `bd remember` entry `dndmcp-live-pod-ops-...` for the full list)
 
 - FastMCP's DNS-rebinding protection 421s any request whose Host header isn't
