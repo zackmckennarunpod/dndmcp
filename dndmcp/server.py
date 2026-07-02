@@ -394,11 +394,12 @@ async def start_adventure(theme: str = "gothic horror", character_name: str = "W
                                location_id=camp.start_room)
     world.log("character.generated",
              f"{char.name}'s identity and kit took shape ({kit['via']}).",
-             player_id=player_id, campaign_id=camp.id)
+             player_id=player_id, campaign_id=camp.id,
+             subject_type="character", subject_id=player_id)
     world.mark_visited(camp.start_room)
     world.discover(player_id, camp.start_room)
     world.log("adventure.started", f"{char.name} the {char.klass} joined the adventure.",
-              player_id=player_id)
+              player_id=player_id, subject_type="character", subject_id=player_id)
     _track(asyncio.create_task(_prefetch_frontier(room, camp.theme, camp.id, camp.salt, camp.premise)))  # fire-and-forget, tracked (see _track)
     share_note = (f'\n\n🔗 **World id: `{camp.id}`** — share this so others can join THIS '
                  f'exact world (start_adventure with campaign_id="{camp.id}").'
@@ -752,11 +753,15 @@ def take_damage(player_id: str, amount: int, source: str = "") -> str:
         return dead
     new_hp = world.damage(player_id, amount)
     cause = f" ({source})" if source else ""
-    world.log("combat.resolved", f"{ch.name} took {amount} damage{cause}. {new_hp} HP left.",
-             player_id=player_id, subject_type="room", subject_id=ch.location_id)
     out = f"{ch.name} takes {amount} damage{cause}. {new_hp} HP left."
     if new_hp <= 0:
         out += " ☠ You have fallen. The dark claims another..."
+    # Log the FULL text, including death if it happened — same combat.resolved-truncation
+    # bug attack() had (fixed earlier tonight), just in this sibling tool: logging before
+    # the death check meant a death from an ambush/trap read back later as an ordinary
+    # damage tick with no death, exactly the kind of story-generation inaccuracy already
+    # found and fixed once tonight.
+    world.log("combat.resolved", out, player_id=player_id, subject_type="room", subject_id=ch.location_id)
     return out
 
 
@@ -771,11 +776,15 @@ def heal(player_id: str, amount: int, source: str = "") -> str:
     ch = world.character(player_id)
     if not ch:
         return "Unknown player_id. Call start_adventure first."
+    old_hp = ch.hp
     new_hp = world.heal(player_id, amount)
+    healed = new_hp - old_hp  # NOT the same as `amount` once capped at max_hp -- logging/
+    # narrating the raw requested amount claimed "healed 10" for a character that only had
+    # 2 HP of room to recover, wrong data reaching the same log a story gets generated from.
     cause = f" ({source})" if source else ""
-    world.log("character.healed", f"{ch.name} healed {amount}{cause}. {new_hp} HP.",
+    world.log("character.healed", f"{ch.name} healed {healed}{cause}. {new_hp} HP.",
              player_id=player_id, subject_type="room", subject_id=ch.location_id)
-    return f"{ch.name} recovers, healing for {amount}{cause}. {new_hp}/{ch.max_hp} HP."
+    return f"{ch.name} recovers, healing for {healed}{cause}. {new_hp}/{ch.max_hp} HP."
 
 
 def _format_quest(q) -> str:
@@ -1167,7 +1176,13 @@ async def talk_to(player_id: str, message: str, npc_name: str | None = None) -> 
                                                   recent_events=recent_events,
                                                   existing_names=world.entity_names_in(ch.campaign_id),
                                                   premise=camp.premise,
-                                                  is_main=camp.id == MAIN_CAMPAIGN_ID)
+                                                  is_main=camp.id == MAIN_CAMPAIGN_ID,
+                                                  # A reactive path with a player synchronously
+                                                  # waiting, same as move()'s room-gen — but
+                                                  # this one had no deadline at all, unlike
+                                                  # every other reactive Flash call in the game
+                                                  # (move's room/persona gen, attack's loot).
+                                                  deadline_s=_MOVE_GEN_DEADLINE_S)
         npc["name"] = gen["name"]
         ent = world.upsert_entity(entity_id=npc["id"], campaign_id=ch.campaign_id, kind=kind,
                                   name=gen["name"], location_id=room.id,
