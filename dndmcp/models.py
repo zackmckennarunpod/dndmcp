@@ -84,6 +84,32 @@ class Entity(BaseModel):
     attack_flavor: str = ""  # themed replacement for the raw SRD attack name in combat text
 
 
+class Item(BaseModel):
+    """A first-class, ownable object — the identity/ownership/effects layer for anything a
+    player can pick up, drop, or give. Mirrors Entity's own split exactly: the lightweight
+    loot dict still living in room.contents/character.inventory (see Room/Character
+    docstrings above) is UNCHANGED — that's the mechanical/rendering layer every existing
+    read site already uses; this table is the PARALLEL identity/ownership layer, joined by
+    the same `id`. `owner_type`/`owner_id` is the same generic (aggregate_type, aggregate_id)
+    shape LogEntry.subject_type/subject_id and the `edges` table already use elsewhere in
+    this file — a room, a character, or an entity (NPC) can each hold an item, so a single
+    fixed foreign key would be wrong."""
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    campaign_id: str = "main"
+    name: str
+    description: str = ""
+    owner_type: Literal["room", "character", "entity"]
+    owner_id: str
+    portable: bool = True
+    identified: bool = True
+    properties: dict = {}
+    effects: list[dict] = []  # [{"trigger": ..., "narration": ...}, ...] — see WORLD_SCHEMA.md
+    created_at: float = 0.0
+    acquired_at: float | None = None  # when it first left a room for someone's hands, if ever
+
+
 class Quest(BaseModel):
     """A trackable objective — an NPC's job, a party goal, a plot thread. Shared world state
     like rooms/entities: any player in the campaign can see and progress one another player

@@ -281,6 +281,16 @@ TOOLS: list[dict] = [
             "item_name": {"type": "string"},
         }, "required": ["item_name"]}}},
     {"type": "function", "function": {
+        "name": "give_item",
+        "description": ("Hand something from the player's inventory to an NPC or another "
+                        "player standing in the current room. Pass exactly one of npc_name "
+                        "or to_player_name."),
+        "parameters": {"type": "object", "properties": {
+            "item_name": {"type": "string"},
+            "npc_name": {"type": "string"},
+            "to_player_name": {"type": "string"},
+        }, "required": ["item_name"]}}},
+    {"type": "function", "function": {
         "name": "talk_to",
         "description": "Talk to an NPC/monster in the current room. Generates their in-character reply.",
         "parameters": {"type": "object", "properties": {
@@ -299,6 +309,19 @@ TOOLS: list[dict] = [
         "name": "active_quests",
         "description": "List the player's currently active quests.",
         "parameters": {"type": "object", "properties": {}, "required": []}}},
+    {"type": "function", "function": {
+        "name": "update_quest",
+        "description": ("Update a quest already in progress — mark a step done "
+                        "(complete_step, 0-indexed, see active_quests for indices), add a "
+                        "newly-discovered objective (add_step), or resolve it "
+                        "(state='done'|'failed'). quest_id comes from active_quests' own "
+                        "[quest_id: ...] tag."),
+        "parameters": {"type": "object", "properties": {
+            "quest_id": {"type": "string"},
+            "complete_step": {"type": "integer"},
+            "add_step": {"type": "string"},
+            "state": {"type": "string", "enum": ["active", "done", "failed"]},
+        }, "required": ["quest_id"]}}},
     {"type": "function", "function": {
         "name": "log_event",
         "description": ("Record something noteworthy the player did that no other tool "
@@ -486,7 +509,7 @@ async def _tool_attack(session: DMSession) -> str:
     err = _require_started(session)
     if err:
         return err
-    return _sanitize(server.attack(session.player_id))
+    return _sanitize(await server.attack(session.player_id))
 
 
 async def _tool_look(session: DMSession) -> str:
@@ -536,6 +559,15 @@ async def _tool_drop_item(session: DMSession, item_name: str) -> str:
     return _sanitize(server.drop_item(session.player_id, item_name=item_name))
 
 
+async def _tool_give_item(session: DMSession, item_name: str, npc_name: str | None = None,
+                          to_player_name: str | None = None) -> str:
+    err = _require_started(session)
+    if err:
+        return err
+    return _sanitize(server.give_item(session.player_id, item_name=item_name,
+                                      npc_name=npc_name, to_player_name=to_player_name))
+
+
 async def _tool_talk_to(session: DMSession, message: str, npc_name: str | None = None) -> str:
     err = _require_started(session)
     if err:
@@ -556,6 +588,15 @@ async def _tool_active_quests(session: DMSession) -> str:
     if err:
         return err
     return _sanitize(server.active_quests(session.player_id))
+
+
+async def _tool_update_quest(session: DMSession, quest_id: str, complete_step: int | None = None,
+                             add_step: str | None = None, state: str | None = None) -> str:
+    err = _require_started(session)
+    if err:
+        return err
+    return _sanitize(server.update_quest(session.player_id, quest_id, complete_step=complete_step,
+                                         add_step=add_step, state=state))
 
 
 async def _tool_log_event(session: DMSession, text: str) -> str:
@@ -582,9 +623,11 @@ TOOL_HANDLERS: dict[str, Callable[..., Any]] = {
     "roll_dice": _tool_roll_dice,
     "pick_up_item": _tool_pick_up_item,
     "drop_item": _tool_drop_item,
+    "give_item": _tool_give_item,
     "talk_to": _tool_talk_to,
     "start_quest": _tool_start_quest,
     "active_quests": _tool_active_quests,
+    "update_quest": _tool_update_quest,
     "log_event": _tool_log_event,
     "remember": _tool_remember,
 }

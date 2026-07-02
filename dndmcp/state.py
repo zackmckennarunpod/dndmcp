@@ -20,7 +20,7 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-from .models import Campaign, Character, Entity, LogEntry, Quest, Room, WebSession
+from .models import Campaign, Character, Entity, Item, LogEntry, Quest, Room, WebSession
 
 # Set by the transport layer (server.py's ASGI middleware, web.py's request handlers) for the
 # duration of one inbound request, read by World.log() as its default for ip/session_id — a
@@ -57,7 +57,7 @@ def _state_dir() -> Path:
 # be additive (CREATE TABLE IF NOT EXISTS / ALTER TABLE ADD COLUMN), never a blanket drop.
 # If a genuinely breaking change is ever needed, write an explicit versioned migration step
 # instead of wiping; do not restore the old "wipe on any mismatch" behavior.
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 MAIN_CAMPAIGN_ID = "main"
 
@@ -155,6 +155,22 @@ class World:
                 memory TEXT DEFAULT '[]'
             );
             CREATE INDEX IF NOT EXISTS idx_entity_location ON entity(location_id);
+            -- First-class item identity/ownership (see models.Item docstring for the full
+            -- rationale — same split as `entity`: the loot dict in room.contents/
+            -- character.inventory stays exactly as-is for every existing render site, this
+            -- table is the parallel identity/ownership/effects layer, joined by `id`.
+            -- owner_type/owner_id is polymorphic (room | character | entity) — an item can
+            -- sit in a room, a player's inventory, or an NPC's hands (give_item).
+            CREATE TABLE IF NOT EXISTS item (
+                id TEXT PRIMARY KEY, campaign_id TEXT NOT NULL DEFAULT 'main',
+                name TEXT, description TEXT DEFAULT '',
+                owner_type TEXT NOT NULL, owner_id TEXT NOT NULL,
+                portable INTEGER DEFAULT 1, identified INTEGER DEFAULT 1,
+                properties TEXT DEFAULT '{}', effects TEXT DEFAULT '[]',
+                created_at REAL, acquired_at REAL
+            );
+            CREATE INDEX IF NOT EXISTS idx_item_owner ON item(owner_type, owner_id);
+            CREATE INDEX IF NOT EXISTS idx_item_campaign ON item(campaign_id);
             -- Multi-world: "main" is the well-known default world (what the old singleton
             -- `campaign` row becomes below); any other id is a world someone created and can
             -- share the id/link for others to join. `salt` seeds room generation so two
@@ -254,8 +270,42 @@ class World:
             " FROM web_session",
             (MAIN_CAMPAIGN_ID,),
         )
+        self._backfill_items()
         self._c.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         self._c.commit()
+
+    def _backfill_items(self) -> None:
+        """One-time (but idempotent — safe to re-run every startup) migration: give every
+        EXISTING loose loot dict in rooms.contents/character.inventory a real `item` row, so
+        nothing already in the world is silently invisible to the new first-class table. Keyed
+        by the loot dict's own "id" (already stable — see Character.inventory's docstring);
+        a dict with no id (pre-dates stable ids entirely) is skipped, same permissive gap
+        remove_item's own name-fallback already tolerates. INSERT OR IGNORE means a row that
+        already exists (created going forward by pick_up_item/drop_item/give_item/attack/
+        dev_spawn_item) is never clobbered by this sweep."""
+        now = time.time()
+        rows = self._c.execute("SELECT id, campaign_id, contents FROM rooms").fetchall()
+        for r in rows:
+            for c in json.loads(r["contents"] or "[]"):
+                if c.get("type") != "loot" or not c.get("id"):
+                    continue
+                self._c.execute(
+                    "INSERT OR IGNORE INTO item (id,campaign_id,name,owner_type,owner_id,created_at)"
+                    " VALUES (?,?,?,?,?,?)",
+                    (c["id"], r["campaign_id"] or MAIN_CAMPAIGN_ID, c.get("name", ""),
+                     "room", r["id"], now),
+                )
+        rows = self._c.execute("SELECT player_id, campaign_id, inventory FROM character").fetchall()
+        for r in rows:
+            for it in json.loads(r["inventory"] or "[]"):
+                if not it.get("id"):
+                    continue
+                self._c.execute(
+                    "INSERT OR IGNORE INTO item (id,campaign_id,name,description,owner_type,owner_id,created_at,acquired_at)"
+                    " VALUES (?,?,?,?,?,?,?,?)",
+                    (it["id"], r["campaign_id"] or MAIN_CAMPAIGN_ID, it.get("name", ""),
+                     it.get("description", ""), "character", r["player_id"], now, now),
+                )
 
     def _add_column_if_missing(self, table: str, column: str, coldef: str) -> None:
         """SQLite has no `ADD COLUMN IF NOT EXISTS` — guard manually so this stays safe to
@@ -644,6 +694,85 @@ class World:
             location_ids,
         ).fetchone()
         return row["n"] if row else 0
+
+    # --- item (first-class ownable object — see models.Item) --------------------
+    def upsert_item(self, *, item_id: str, campaign_id: str = MAIN_CAMPAIGN_ID, name: str,
+                    owner_type: str, owner_id: str, description: str = "",
+                    portable: bool = True, identified: bool = True,
+                    properties: dict | None = None, effects: list[dict] | None = None,
+                    acquired_at: float | None = None) -> Item:
+        """Create or fully replace an item's identity fields, INCLUDING ownership — unlike
+        upsert_entity (which never touches location_id here; callers use move_item instead
+        for that), upsert_item's whole job is idempotent create-or-set, so ownership is a
+        normal field. Existing description/properties/effects/acquired_at are preserved on
+        conflict when the caller passes nothing new (COALESCE), so a bare "make sure this
+        item exists" call (pick_up_item's create-if-missing path) never blanks out identity
+        a previous call already gave it."""
+        item = Item(id=item_id, campaign_id=campaign_id, name=name, description=description,
+                   owner_type=owner_type, owner_id=owner_id, portable=portable,
+                   identified=identified, properties=properties or {}, effects=effects or [],
+                   created_at=time.time(), acquired_at=acquired_at)
+        self._c.execute(
+            "INSERT INTO item (id,campaign_id,name,description,owner_type,owner_id,portable,"
+            "identified,properties,effects,created_at,acquired_at)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)"
+            " ON CONFLICT(id) DO UPDATE SET"
+            " name=excluded.name,"
+            " description=COALESCE(NULLIF(excluded.description, ''), item.description),"
+            " owner_type=excluded.owner_type, owner_id=excluded.owner_id,"
+            " portable=excluded.portable,"
+            " acquired_at=COALESCE(excluded.acquired_at, item.acquired_at)",
+            (item.id, campaign_id, item.name, item.description, item.owner_type, item.owner_id,
+             int(item.portable), int(item.identified), json.dumps(item.properties),
+             json.dumps(item.effects), item.created_at, item.acquired_at),
+        )
+        self._c.commit()
+        return self.item(item_id)
+
+    def item(self, item_id: str) -> Item | None:
+        r = self._c.execute("SELECT * FROM item WHERE id=?", (item_id,)).fetchone()
+        if not r:
+            return None
+        d = dict(r)
+        d.pop("campaign_id", None)  # scoping column, not part of Item's own shape (extra="forbid")
+        d["portable"] = bool(d["portable"])
+        d["identified"] = bool(d["identified"])
+        d["properties"] = json.loads(d["properties"] or "{}")
+        d["effects"] = json.loads(d["effects"] or "[]")
+        return Item.model_validate(d)
+
+    def items_of(self, owner_type: str, owner_id: str) -> list[Item]:
+        """Every item currently owned by one room/character/entity — e.g. "what is this NPC
+        holding" once give_item can hand something to one."""
+        rows = self._c.execute(
+            "SELECT * FROM item WHERE owner_type=? AND owner_id=?", (owner_type, owner_id)
+        ).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            d.pop("campaign_id", None)
+            d["portable"] = bool(d["portable"])
+            d["identified"] = bool(d["identified"])
+            d["properties"] = json.loads(d["properties"] or "{}")
+            d["effects"] = json.loads(d["effects"] or "[]")
+            out.append(Item.model_validate(d))
+        return out
+
+    def move_item(self, item_id: str, owner_type: str, owner_id: str, *,
+                  acquired_at: float | None = None) -> Item | None:
+        """Change WHO/WHERE owns an item — the one operation pick_up_item/drop_item/give_item
+        all reduce to, differing only in which (owner_type, owner_id) pair they pass. No-ops
+        (returns None) if the item row doesn't exist yet — callers that might hit a
+        pre-first-class-item item should upsert_item first (see pick_up_item)."""
+        if not self.item(item_id):
+            return None
+        self._c.execute(
+            "UPDATE item SET owner_type=?, owner_id=?,"
+            " acquired_at=COALESCE(?, acquired_at) WHERE id=?",
+            (owner_type, owner_id, acquired_at, item_id),
+        )
+        self._c.commit()
+        return self.item(item_id)
 
     # --- quest (see models.Quest) ------------------------------------------------
     def start_quest(self, quest_id: str, campaign_id: str = MAIN_CAMPAIGN_ID, *, title: str,

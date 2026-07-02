@@ -27,6 +27,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingRes
 from sse_starlette.sse import EventSourceResponse
 
 from . import chat_sessions, dm_loop, pairing, server, worldgen
+from .state import MAIN_CAMPAIGN_ID
 
 app = FastAPI(title="DNDMCP map")
 logger = logging.getLogger(__name__)
@@ -363,10 +364,14 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
   <button id=wizardCloseBtn type=button title="Close (Esc)">✕</button>
   <div id=wizStep1 class=wizStep>
    <h2>How do you want to play?</h2>
-   <button id=wizBrowseBtn class=wizBigBtn type=button style="display:none">💬 Right here in the browser
-    <span class=wizSub>no setup — play instantly in this tab</span></button>
-   <button id=wizAgentBtn class=wizBigBtn type=button>🖥 Through your own agent
-    <span class=wizSub>Claude Code / Claude Desktop — full MCP tool access</span></button>
+   <div class=sub style="margin:0 0 10px">Through your own agent is the better experience — it
+    runs on your agent's own model over the real MCP server, with full tool access. Right here
+    in the browser is the convenience option: zero setup, but a smaller built-in model narrates,
+    so it's simpler and less capable.</div>
+   <button id=wizBrowseBtn class=wizBigBtn type=button style="display:none" title="Zero setup — but the built-in narrator runs on a small model, so the storytelling is simpler">💬 Right here in the browser
+    <span class=wizSub>easiest — play instantly in this tab, less capable narration</span></button>
+   <button id=wizAgentBtn class=wizBigBtn type=button title="Best experience — your agent's model (e.g. Claude) is far stronger than the built-in narrator, so you get a much better Dungeon Master">🖥 Through your own agent
+    <span class=wizSub>Claude Code / Claude Desktop — the full MCP server, a stronger model runs your game</span></button>
   </div>
   <div id=wizStep2a class=wizStep>
    <button class=wizBackBtn type=button data-wizback>← back</button>
@@ -2218,7 +2223,8 @@ async def export_story(request: Request):
     timeline_lines = [f"- {e['text']}" for e in events] or ["- (nothing has happened yet)"]
     timeline_text = "\n".join(timeline_lines)
 
-    markdown = await worldgen.generate_story(char["name"], char["klass"], theme, premise, timeline_text)
+    markdown = await worldgen.generate_story(char["name"], char["klass"], theme, premise, timeline_text,
+                                             is_main=campaign_id == MAIN_CAMPAIGN_ID)
     via = "flash"
     if not markdown:
         via = "procedural"

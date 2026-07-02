@@ -91,14 +91,16 @@ def _room_messages(theme: str, came_from: str | None, exits: list[str],
                    nearby: list[tuple[str, str]] | None = None,
                    recent_events: list[str] | None = None, premise: str = "",
                    existing_names: list[str] | None = None,
-                   entry_room: tuple[str, str] | None = None) -> list[dict]:
+                   entry_room: tuple[str, str] | None = None, *,
+                   is_main: bool) -> list[dict]:
     # A bare theme label ("sundered weave") means nothing to a small model on its own — no
     # training-data association for a made-up phrase, so it falls back to generic dungeon-
     # crawl tropes (observed live: "sundered weave" alone produced "The Whispering Crypt,"
     # ancient runes, a wooden door — none of it grounded in the actual premise). The
     # campaign's premise text is what actually explains what the theme MEANS.
     premise_line = f" The world's premise: {premise}" if premise else ""
-    system = (f"{setting.GEN_BRIEF}\n\n"
+    brief = setting.GEN_BRIEF if is_main else setting.NEUTRAL_BRIEF
+    system = (f"{brief}\n\n"
               f"You are the world-builder for a {theme} dungeon crawl in this setting.{premise_line} "
               f"You invent what is TRUE about each room — facts for a Dungeon Master to narrate "
               f"from, not finished prose — and every room must clearly belong to THIS premise, "
@@ -137,7 +139,8 @@ async def generate_room_content(room_id: str, theme: str, *, entry_from: str | N
                                 salt: str = "", premise: str = "",
                                 existing_names: list[str] | None = None,
                                 deadline_s: float | None = None,
-                                entry_room: tuple[str, str] | None = None) -> dict:
+                                entry_room: tuple[str, str] | None = None,
+                                is_main: bool) -> dict:
     """Generate a room's content for the graph. Tries Flash (structured JSON); falls back
     to procedural. Returns game.generate_room's shape + `features` + a `via` marker.
 
@@ -158,7 +161,12 @@ async def generate_room_content(room_id: str, theme: str, *, entry_from: str | N
     a real budget (e.g. ~20-30s) from a REACTIVE caller (a player is synchronously waiting,
     e.g. move()) so a hung/cold Flash endpoint can't stall them for up to 4x150s (~10min) —
     realistically caps it at 1-2 attempts, then falls back to procedural, same as running out
-    of attempts."""
+    of attempts. `is_main`: True only for the shared default world (state.MAIN_CAMPAIGN_ID) —
+    gates whether setting.GEN_BRIEF's specific Sundered-Weave imagery is injected at all; any
+    other (player-invented) world gets setting.NEUTRAL_BRIEF instead, so its own premise isn't
+    competing against a whole paragraph of a different world's aesthetic. No default — every
+    caller must say explicitly which world this is, since guessing wrong either way is a real
+    regression (bleed-through for a custom world, or losing main's own lore by mistake)."""
     rng = game._seeded(room_id, salt)  # deterministic per (room_id, salt)
     base = game.generate_room(room_id, theme, entry_from=entry_from, salt=salt)  # procedural skeleton
 
@@ -173,7 +181,7 @@ async def generate_room_content(room_id: str, theme: str, *, entry_from: str | N
     # entry_room: (name, kind) of the room the player is walking FROM — the immediate tonal
     # anchor _nearby_region can't provide (it excludes its own origin). See _room_messages.
     messages = _room_messages(theme, entry_from, list(base["exits"].keys()), nearby, recent_events,
-                              premise, existing_names, entry_room=entry_room)
+                              premise, existing_names, entry_room=entry_room, is_main=is_main)
 
     # A single bad sample (malformed JSON) or a transient endpoint hiccup (cold start,
     # throttling — both observed in practice) shouldn't cost the room real content when a
@@ -379,6 +387,48 @@ async def generate_room_content(room_id: str, theme: str, *, entry_from: str | N
     return base
 
 
+_BIBLE_JSON = ('{"bible": 3-5 sentences expanding the premise below into a proper world '
+              'description — its central tension/conflict, sensory aesthetic (what it looks/'
+              'sounds/smells like), one or two concrete recurring objects or motifs, overall '
+              'tone. Preserve the original idea EXACTLY, never contradict or replace it — '
+              'only add detail a Dungeon Master could actually use.}')
+
+
+def _bible_messages(theme: str, premise: str) -> list[dict]:
+    system = (f"{setting.NEUTRAL_BRIEF}\n\n"
+              f"A player is starting a new {theme} dungeon-crawl world with this one-line "
+              f"premise: {premise!r}. Expand it into a proper world description that every "
+              f"future scene in this world will be grounded in. Reply with STRICT JSON only — "
+              f"no markdown code fences, no text outside the JSON object.")
+    user = f"Return JSON: {_BIBLE_JSON}"
+    return [{"role": "system", "content": system}, {"role": "user", "content": user}]
+
+
+async def generate_world_bible(theme: str, premise: str) -> str:
+    """Expand a player's one-line premise into a fuller (3-5 sentence) world description,
+    ONCE at world creation — the caller stores whatever this returns AS the campaign's
+    premise, so every later generation call (room/item/kit/NPC persona/dialogue/story) reuses
+    the expanded version for free, with no extra plumbing (they already all take `premise`).
+    This matters specifically for non-main worlds: once `is_main=False` swaps GEN_BRIEF's whole
+    paragraph out for setting.NEUTRAL_BRIEF (see generate_room_content), premise is the ONLY
+    per-world grounding text those calls get — a single recycled sentence forever was thin
+    compared to what the main world gets from GEN_BRIEF. Falls back to the original premise
+    unchanged if Flash is off/errors — same reliability-first pattern as everything else here;
+    an unexpanded premise is strictly worse than an expanded one, never worse than having none.
+    Not called for the main world — it already gets setting.GEN_BRIEF's full paragraph on
+    every call; expanding its own short premise on top would just be a wasted Flash call."""
+    gen = await flash_llm.generate(_bible_messages(theme, premise), max_tokens=220, temperature=0.85)
+    if not gen:
+        return premise
+    try:
+        data = json.loads(gen[gen.find("{"): gen.rfind("}") + 1])
+        bible = str(data.get("bible") or "").strip()
+        return bible or premise
+    except Exception:
+        logger.exception("generate_world_bible: malformed Flash JSON, keeping original premise: %r", gen)
+        return premise
+
+
 _ITEM_JSON = ('{"name": short display name, "description": one factual sentence about it '
               '(material, condition, what it\'s for) — not flowery prose, '
               '"portable": true or false — could a person plausibly carry this away?, '
@@ -394,9 +444,10 @@ _KIT_JSON = ('{"name": an evocative character first-or-full name fitting THIS wo
 
 
 def _kit_messages(theme: str, premise: str, klass: str,
-                  existing_names: list[str] | None = None) -> list[dict]:
+                  existing_names: list[str] | None = None, *, is_main: bool) -> list[dict]:
     premise_line = f" The world's premise: {premise}" if premise else ""
-    system = (f"{setting.GEN_BRIEF}\n\n"
+    brief = setting.GEN_BRIEF if is_main else setting.NEUTRAL_BRIEF
+    system = (f"{brief}\n\n"
               f"You outfit a brand-new {klass} beginning a {theme} adventure in this "
               f"setting.{premise_line} Invent their name and starting kit so both clearly "
               f"belong to THIS world — never generic medieval-dungeon defaults unless the "
@@ -409,16 +460,18 @@ def _kit_messages(theme: str, premise: str, klass: str,
 
 
 async def generate_starting_kit(theme: str, premise: str, klass: str,
-                                existing_names: list[str] | None = None) -> dict:
+                                existing_names: list[str] | None = None, *,
+                                is_main: bool) -> dict:
     """Theme-grounded character name + starter kit — replaces the one hardcoded torch/dagger/
     rations set every character used to spawn with regardless of world (observed: three
     characters in three different-themed worlds, identical name and inventory). Functional
     slots stay fixed (light/weapon/provisions — game balance is unchanged); only the SKIN is
     generated. Returns {"name": str|None, "items": [{"name","description"}...]|None, "via"} —
     None fields mean the caller keeps the procedural default (Flash off/failed), same
-    reliability-first pattern as every other generator here."""
+    reliability-first pattern as every other generator here. `is_main`: see
+    generate_room_content's docstring — same GEN_BRIEF/NEUTRAL_BRIEF gate."""
     base = {"name": None, "items": None, "via": "procedural"}
-    gen = await flash_llm.generate(_kit_messages(theme, premise, klass, existing_names),
+    gen = await flash_llm.generate(_kit_messages(theme, premise, klass, existing_names, is_main=is_main),
                                    max_tokens=260, temperature=0.9)
     if gen:
         try:
@@ -442,12 +495,61 @@ async def generate_starting_kit(theme: str, premise: str, klass: str,
     return base
 
 
+_LOOT_JSON = ('{"name": short display name for what this creature dropped when defeated — '
+             'a coin, trophy, relic, or tool, grounded in THIS world\'s theme/premise, never '
+             'generic loot-table filler ("a pouch of gold") unless the world genuinely uses '
+             'that kind of currency/object, "description": one factual sentence about it '
+             '(material, condition, what it\'s for) — not flowery prose}')
+
+
+def _loot_messages(monster_name: str, theme: str, room_context: str, premise: str = "",
+                   *, is_main: bool) -> list[dict]:
+    premise_line = f" The world's premise: {premise}" if premise else ""
+    brief = setting.GEN_BRIEF if is_main else setting.NEUTRAL_BRIEF
+    system = (f"{brief}\n\n"
+              f"A creature was just defeated in a {theme} dungeon crawl in this setting."
+              f"{premise_line} Invent one small, portable thing it dropped, grounded in THIS "
+              f"world's theme — never generic loot-table filler that could fit any setting. "
+              f"You reply with STRICT JSON only — no markdown code fences, no text outside "
+              f"the JSON object.")
+    user = (f"The {monster_name} was just defeated in this room: {room_context}\n"
+            f"Return JSON: {_LOOT_JSON}")
+    return [{"role": "system", "content": system}, {"role": "user", "content": user}]
+
+
+async def generate_loot_drop(monster_name: str, theme: str, room_context: str = "",
+                             premise: str = "", *, is_main: bool) -> dict:
+    """Themed loot dropped by a defeated monster — replaces game.loot_drop's PURELY
+    procedural pick (no LLM call at all; its own theme pool only really covers "gothic
+    horror"/default, the same thematic-mismatch gap generate_room_content's own comment
+    already flags for room dressing) with a Flash call grounded in this world's actual
+    premise. Falls back to game.loot_drop unchanged if Flash is off/errors — same
+    reliability-first pattern as every other generator here; `via` distinguishes which one
+    actually produced the result, same as everywhere else. `is_main`: see
+    generate_room_content's docstring — same GEN_BRIEF/NEUTRAL_BRIEF gate."""
+    base = {"name": game.loot_drop(theme, monster_name), "description": "", "via": "procedural"}
+    gen = await flash_llm.generate(
+        _loot_messages(monster_name, theme, room_context, premise, is_main=is_main),
+        max_tokens=100, temperature=0.9)
+    if gen:
+        try:
+            data = json.loads(gen[gen.find("{"): gen.rfind("}") + 1])
+            if data.get("name"):
+                base["name"] = str(data["name"]).strip()
+                base["description"] = str(data.get("description") or "").strip()
+                base["via"] = "flash"
+        except Exception:
+            logger.exception("generate_loot_drop: malformed Flash JSON, keeping procedural: %r", gen)
+    return base
+
+
 def _item_messages(description: str, theme: str, room_context: str,
-                   premise: str = "") -> list[dict]:
+                   premise: str = "", *, is_main: bool) -> list[dict]:
     # Same premise-grounding as _room_messages: a bare theme label means nothing to a small
     # model on a made-up theme — item flavor drifted generic without it, same failure mode.
     premise_line = f" The world's premise: {premise}" if premise else ""
-    system = (f"{setting.GEN_BRIEF}\n\n"
+    brief = setting.GEN_BRIEF if is_main else setting.NEUTRAL_BRIEF
+    system = (f"{brief}\n\n"
               f"You are adjudicating a player's attempt to pick up an object in a {theme} dungeon "
               f"crawl in this setting.{premise_line} Decide what's TRUE about the object and whether it's actually "
               f"portable — most furniture/fixtures/scenery are NOT, most small objects ARE. "
@@ -458,17 +560,18 @@ def _item_messages(description: str, theme: str, room_context: str,
 
 
 async def generate_item_content(description: str, theme: str, room_context: str = "",
-                                premise: str = "") -> dict:
+                                premise: str = "", *, is_main: bool) -> dict:
     """Adjudicate + flesh out a player-described pickup that isn't pre-seeded loot. Tries Flash
     (structured JSON, decides portability); falls back to procedural (always portable — without
     a model to judge plausibility, permissive keeps the game playable with Flash off).
     Returns {"name", "description", "portable", "reason", "via"} — every Flash call is a
     domain event; `via` is what lets the caller's world.log(...) text carry the same
     (flash)/(procedural) marker room.generated/entity.spawned/npc.talked already do, so
-    nothing that hits the model is invisible in the log stream or the GUI's call counter."""
+    nothing that hits the model is invisible in the log stream or the GUI's call counter.
+    `is_main`: see generate_room_content's docstring — same GEN_BRIEF/NEUTRAL_BRIEF gate."""
     base = {"id": uuid.uuid4().hex[:8], "name": description.strip().capitalize(),
            "description": "", "portable": True, "reason": None, "via": "procedural"}
-    messages = _item_messages(description, theme, room_context, premise)
+    messages = _item_messages(description, theme, room_context, premise, is_main=is_main)
     gen = await flash_llm.generate(messages, max_tokens=120, temperature=0.8)
     if gen:
         try:
@@ -508,12 +611,13 @@ def _npc_persona_messages(mon: dict, theme: str, room_name: str, room_kind: str,
                           atmosphere: str, nearby: list[tuple[str, str]] | None = None,
                           recent_events: list[str] | None = None,
                           existing_names: list[str] | None = None,
-                          premise: str = "") -> list[dict]:
+                          premise: str = "", *, is_main: bool) -> list[dict]:
     traits = ", ".join(mon.get("traits", [])) or "no notable traits"
     # Same premise-grounding as _room_messages — personas drifted just as generic as rooms
     # did on a bare made-up theme label; who someone IS depends on what this world MEANS.
     premise_line = f" The world's premise: {premise}" if premise else ""
-    system = (f"{setting.GEN_BRIEF}\n\n"
+    brief = setting.GEN_BRIEF if is_main else setting.NEUTRAL_BRIEF
+    system = (f"{brief}\n\n"
               f"You invent the TRUE individual identity of one {theme} dungeon inhabitant for "
               f"a Dungeon Master to roleplay from — facts, not a finished performance."
               f"{premise_line} "
@@ -540,7 +644,7 @@ async def generate_npc_persona(mon: dict, theme: str, room_name: str, room_kind:
                                recent_events: list[str] | None = None,
                                existing_names: list[str] | None = None,
                                deadline_s: float | None = None,
-                               premise: str = "") -> dict:
+                               premise: str = "", *, is_main: bool) -> dict:
     """LLM-generate an individual identity (name/persona/goal/disposition/attack_flavor) for
     one spawned SRD creature — the compendium gives mechanics (hp/ac/traits/attack_name), this
     gives who they ARE and how their attack should actually read in a world where "Scimitar"
@@ -551,9 +655,10 @@ async def generate_npc_persona(mon: dict, theme: str, room_name: str, room_kind:
     entity_names_in) — keeps identities unique instead of colliding across creatures/worlds.
     `deadline_s`: same budget contract as generate_room_content's — None (default) is the
     existing patient single-call behavior; a real budget bounds how long this can block a
-    reactive caller before falling back to the generic procedural identity below."""
+    reactive caller before falling back to the generic procedural identity below. `is_main`:
+    see generate_room_content's docstring — same GEN_BRIEF/NEUTRAL_BRIEF gate."""
     messages = _npc_persona_messages(mon, theme, room_name, room_kind, atmosphere,
-                                     nearby, recent_events, existing_names, premise)
+                                     nearby, recent_events, existing_names, premise, is_main=is_main)
     gen = None
     try:
         if deadline_s is not None:
@@ -599,7 +704,7 @@ async def generate_npc_persona(mon: dict, theme: str, room_name: str, room_kind:
 
 def _npc_messages(npc: dict, theme: str, room_context: str, message: str,
                   recent_events: list[str] | None = None, premise: str = "",
-                  speaker: str = "") -> list[dict]:
+                  speaker: str = "", *, is_main: bool) -> list[dict]:
     traits = ", ".join(npc.get("traits", [])) or "no notable traits"
     persona_line = f" {npc['persona']}" if npc.get("persona") else ""
     goal_line = f" Right now they want: {npc['goal']}." if npc.get("goal") else ""
@@ -614,7 +719,8 @@ def _npc_messages(npc: dict, theme: str, room_context: str, message: str,
     # they can use the name naturally (or pointedly refuse to).
     premise_line = f" The world's premise: {premise}" if premise else ""
     speaker_line = f" They are speaking with {speaker}." if speaker else ""
-    system = (f"{setting.GEN_BRIEF}\n\n"
+    brief = setting.GEN_BRIEF if is_main else setting.NEUTRAL_BRIEF
+    system = (f"{brief}\n\n"
               f"You are voicing {npc['name']} in a {theme} dungeon crawl in this setting."
               f"{premise_line} "
               f"Traits: {traits}.{persona_line}{goal_line}{disposition_line}{speaker_line} "
@@ -635,14 +741,16 @@ def _npc_messages(npc: dict, theme: str, room_context: str, message: str,
 
 async def generate_npc_response(npc: dict, theme: str, room_context: str, message: str,
                                 recent_events: list[str] | None = None, *,
-                                premise: str = "", speaker: str = "") -> dict:
+                                premise: str = "", speaker: str = "", is_main: bool) -> dict:
     """Generate one line of in-character NPC dialogue, informed by the conversation history
     already stored on `npc` (via talk_to) and — same as room/persona generation — recent
     events nearby, so an NPC can react to a fight or discovery instead of being blind to
     everything but its own persona and past chat. Tries Flash; falls back to a generic
     in-character line with no real continuity — without a model, there's nothing to
-    generate FROM."""
-    messages = _npc_messages(npc, theme, room_context, message, recent_events, premise, speaker)
+    generate FROM. `is_main`: see generate_room_content's docstring — same
+    GEN_BRIEF/NEUTRAL_BRIEF gate."""
+    messages = _npc_messages(npc, theme, room_context, message, recent_events, premise, speaker,
+                             is_main=is_main)
     gen = await flash_llm.generate(messages, max_tokens=120, temperature=0.9)
     if gen:
         return {"text": gen.strip().strip('"'), "via": "flash"}
@@ -650,8 +758,9 @@ async def generate_npc_response(npc: dict, theme: str, room_context: str, messag
 
 
 def _story_messages(character_name: str, klass: str, theme: str, premise: str,
-                    timeline_text: str) -> list[dict]:
-    system = (f"{setting.GEN_BRIEF}\n\n"
+                    timeline_text: str, *, is_main: bool) -> list[dict]:
+    brief = setting.GEN_BRIEF if is_main else setting.NEUTRAL_BRIEF
+    system = (f"{brief}\n\n"
               f"You are writing the finished chronicle of one player's journey through a "
               f"{theme} dungeon crawl in this setting, for them to keep afterward. You are "
               f"given a raw timeline of what ACTUALLY happened, in order — turn it into a "
@@ -667,11 +776,12 @@ def _story_messages(character_name: str, klass: str, theme: str, premise: str,
 
 
 async def generate_story(character_name: str, klass: str, theme: str, premise: str,
-                         timeline_text: str) -> str | None:
+                         timeline_text: str, *, is_main: bool) -> str | None:
     """Synthesize a whole markdown story from a player's real event timeline (see
     web.py's /export_story). Returns None if Flash is off/errors — caller falls back to a
     plain procedural listing of the same timeline, same reliability-first pattern as
     everything else in this module. Needs more headroom than a single room/line of dialogue
-    (this is a whole narrative), hence the much larger max_tokens."""
-    messages = _story_messages(character_name, klass, theme, premise, timeline_text)
+    (this is a whole narrative), hence the much larger max_tokens. `is_main`: see
+    generate_room_content's docstring — same GEN_BRIEF/NEUTRAL_BRIEF gate."""
+    messages = _story_messages(character_name, klass, theme, premise, timeline_text, is_main=is_main)
     return await flash_llm.generate(messages, max_tokens=1600, temperature=0.85)

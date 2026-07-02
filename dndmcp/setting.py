@@ -30,7 +30,14 @@ bone; glyphs that hum; light with no source. Classic D&D monsters fit as product
 Sundering — undead (its victims), constructs (its dead machines), cultists and aberrations
 (those it touched and changed)."""
 
-# Compact brief — injected into every generation prompt to keep output on-setting.
+# Compact brief — injected into every generation prompt to keep output on-setting. ONLY for
+# the main/default world — a player-invented custom world (its own theme + premise) must
+# never inherit THIS world's specific imagery (crystalline conduits, dead automata, glyphs);
+# that's a competing lore layer, not shared canon, once the premise is unrelated. See
+# NEUTRAL_BRIEF below and worldgen.py's `is_main` threading (every generation call site
+# picks one or the other based on whether campaign_id == MAIN_CAMPAIGN_ID) — confirmed live:
+# without this split, GEN_BRIEF's specific, repeated imagery instructions overpowered a
+# one-sentence custom premise on every single generation call, regardless of theme.
 GEN_BRIEF = (
     "Setting — The Sundered Weave: a dark-fantasy world where the Ancients' hyper-advanced art "
     "('the Weave') became magic, grew beyond control, and collapsed civilization in the Sundering. "
@@ -38,4 +45,17 @@ GEN_BRIEF = (
     "and cults worshipping the silent old machines. Magic is salvaged, dangerous, half-understood. "
     "Tone: gothic, melancholic, mysterious. Weave arcane-tech (crystalline conduits, dead automata, "
     "glyphs, sourceless light) through classic dungeon stone and bone."
+)
+
+# For every world OTHER than the main one: no fixed lore of its own — the premise below is
+# the ONLY fictional voice. Explicitly disclaims the main world's imagery (not just silent
+# about it) since a small model's own generic dungeon-crawl training priors are the fallback
+# once GEN_BRIEF is removed, and "crystalline ruins / ancient constructs / restless dead" is
+# exactly the kind of default that needs to be named and ruled out, not just left unsaid.
+NEUTRAL_BRIEF = (
+    "Setting — a tabletop dungeon-crawl RPG using SRD-style mechanics. This particular world "
+    "has no fixed lore of its own beyond what its premise below describes — invent its tone, "
+    "aesthetic, and inhabitants strictly from THAT premise. Never fall back on generic "
+    "dark-fantasy dungeon-crawl imagery (crystalline ruins, ancient constructs, ghosts, "
+    "ancient runes) unless the premise itself actually calls for it."
 )

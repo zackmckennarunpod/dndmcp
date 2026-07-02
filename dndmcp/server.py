@@ -356,8 +356,17 @@ async def start_adventure(theme: str = "gothic horror", character_name: str = "W
         start_id = "r0" if target_id == MAIN_CAMPAIGN_ID else f"{target_id}:r0"
         premise = premise or (f"A {theme} adventure. Something stirs in the dark, "
                               f"seeking what others feared to find.")
+        if target_id != MAIN_CAMPAIGN_ID:
+            # One-time expansion into a proper 3-5 sentence world description, stored AS the
+            # campaign's premise — every later generation call (room/item/kit/NPC/story)
+            # already threads `premise` through, so this is the one place that needs to know
+            # about it. See worldgen.generate_world_bible's docstring for why this matters
+            # specifically for non-main worlds: once is_main=False drops GEN_BRIEF, a single
+            # recycled sentence was the ONLY per-world grounding text those calls ever got.
+            premise = await worldgen.generate_world_bible(theme, premise)
         camp = world.create_campaign(target_id, theme=theme, premise=premise, start_room=start_id)
-        gen = await worldgen.generate_room_content(start_id, theme, salt=camp.salt, premise=camp.premise)
+        gen = await worldgen.generate_room_content(start_id, theme, salt=camp.salt, premise=camp.premise,
+                                                    is_main=target_id == MAIN_CAMPAIGN_ID)
         await _maybe_spawn_entity_persona(gen, start_id, theme, [], campaign_id=target_id,
                                           premise=camp.premise)  # no neighbors yet
         world.upsert_room(room_id=start_id, campaign_id=target_id, name=gen["name"],
@@ -374,7 +383,8 @@ async def start_adventure(theme: str = "gothic horror", character_name: str = "W
     # back to the procedural defaults untouched when Flash is off/fails.
     kit = await worldgen.generate_starting_kit(
         camp.theme, camp.premise, ch["klass"],
-        existing_names=[p.name for p in world.players(camp.id)])
+        existing_names=[p.name for p in world.players(camp.id)],
+        is_main=camp.id == MAIN_CAMPAIGN_ID)
     if kit["name"] and character_name in ("", "Wanderer"):
         ch["name"] = kit["name"]
     if kit["items"]:
@@ -520,7 +530,7 @@ async def _maybe_spawn_entity_persona(new_room: dict, dest_id: str, theme: str,
         mon, theme, new_room["name"], new_room.get("kind", ""), new_room["description"],
         nearby=nearby, recent_events=recent_events,
         existing_names=world.entity_names_in(campaign_id), deadline_s=deadline_s,
-        premise=premise)
+        premise=premise, is_main=campaign_id == MAIN_CAMPAIGN_ID)
     mon["name"] = persona["name"]
     world.upsert_entity(entity_id=mon["id"], campaign_id=campaign_id, kind=kind,
                         name=persona["name"], location_id=dest_id,
@@ -564,7 +574,8 @@ async def _generate_and_link(dest_id: str, theme: str, campaign_id: str, salt: s
         # model well before it reached this world's current size.
         existing_names=[name for _, name, _ in world.room_ids_in(campaign_id, limit=25)],
         deadline_s=deadline_s,
-        entry_room=(origin.name, origin.kind) if origin else None)
+        entry_room=(origin.name, origin.kind) if origin else None,
+        is_main=campaign_id == MAIN_CAMPAIGN_ID)
     new_room["exits"][game.opposite_of(entry_from)] = back_to_id
     # Whatever's left of the budget after room-content generation (which can itself burn the
     # whole thing across retries) is what the persona call gets — never a fresh full budget,
@@ -796,7 +807,7 @@ def active_quests(player_id: str) -> str:
 
 
 @mcp.tool()
-def attack(player_id: str, weapon_bonus: int = 3, damage_dice: str = "1d8") -> str:
+async def attack(player_id: str, weapon_bonus: int = 3, damage_dice: str = "1d8") -> str:
     """Attack the monster in your current room. Resolves d20 vs AC + damage, updates HP."""
     ch = world.character(player_id)
     if not ch:
@@ -810,6 +821,7 @@ def attack(player_id: str, weapon_bonus: int = 3, damage_dice: str = "1d8") -> s
     # rules-accurate: attack vs the monster's REAL SRD armor class
     res = game.resolve_attack(weapon_bonus, monster.get("ac", 12), damage_dice)
     died = False
+    loot_desc = ""
     if not res["hit"]:
         out = [f"🎲 You swing at the {monster['name']} (rolled {res['attack_roll']} vs AC {monster.get('ac',12)}) — **miss**."]
     else:
@@ -819,13 +831,19 @@ def attack(player_id: str, weapon_bonus: int = 3, damage_dice: str = "1d8") -> s
         died = monster["hp"] <= 0
         if died:
             room.contents = [c for c in room.contents if c is not monster]
-            # Loot on kill: rolled from the same per-theme pool room-gen already uses, plus
-            # gold/trophy variety (see game.loot_drop) — otherwise the monster just vanishes,
-            # the flattest moment in an on-camera fight. Dropped straight into room.contents
-            # in the exact shape pick_up_item/drop_item already expect (type/id/name), so no
-            # further plumbing is needed to make it pick-up-able.
+            # Loot on kill: Flash-generated and grounded in this world's actual premise (same
+            # premise-grounding every other generator here gets) — game.loot_drop's own pool
+            # is a purely procedural FALLBACK now (see generate_loot_drop's docstring for why
+            # that pool alone was thematically mismatched for anything but gothic horror/
+            # default). Dropped straight into room.contents in the exact shape pick_up_item/
+            # drop_item already expect (type/id/name), so no further plumbing is needed to
+            # make it pick-up-able.
             camp = _require_campaign(ch.campaign_id)
-            loot_name = game.loot_drop(camp.theme, monster["name"])
+            loot = await worldgen.generate_loot_drop(monster["name"], camp.theme,
+                                                      room_context=room.description,
+                                                      premise=camp.premise,
+                                                      is_main=camp.id == MAIN_CAMPAIGN_ID)
+            loot_name, loot_desc = loot["name"], loot["description"]
             loot_item = {"type": "loot", "id": uuid.uuid4().hex[:8], "name": loot_name}
             room.contents.append(loot_item)
             out.append(f"💀 The {monster['name']} falls, dropping {loot_name}!")
@@ -859,8 +877,12 @@ def attack(player_id: str, weapon_bonus: int = 3, damage_dice: str = "1d8") -> s
         world.kill_entity(monster["id"])
         world.log("entity.died", f"{ch.name} slew {monster['name']}.", player_id=player_id,
                  subject_type="entity", subject_id=monster["id"])
+        world.upsert_item(item_id=loot_item["id"], campaign_id=ch.campaign_id, name=loot_name,
+                          description=loot_desc, owner_type="room", owner_id=room.id)
         world.log("item.spawned", f"{loot_name} dropped by {monster['name']} in {room.name}.",
                  player_id=player_id, subject_type="room", subject_id=room.id)
+        world.log("item.spawned", f"{loot_name} dropped by {monster['name']} in {room.name}.",
+                 player_id=player_id, subject_type="item", subject_id=loot_item["id"])
     return "\n".join(out)
 
 
@@ -891,6 +913,7 @@ async def pick_up_item(player_id: str, item_id: str | None = None,
         match = loot[0]
 
     if match:
+        item_id_final = match.get("id") or uuid.uuid4().hex[:8]
         room.contents = [c for c in room.contents if c is not match]
         world.upsert_room(room_id=room.id, campaign_id=ch.campaign_id, name=room.name,
                           description=room.description, exits=room.exits,
@@ -901,12 +924,19 @@ async def pick_up_item(player_id: str, item_id: str | None = None,
         camp = _require_campaign(ch.campaign_id)
         flavor = await worldgen.generate_item_content(match["name"], camp.theme,
                                                        room_context=room.description,
-                                                       premise=camp.premise)
+                                                       premise=camp.premise,
+                                                       is_main=camp.id == MAIN_CAMPAIGN_ID)
         desc = flavor.get("description", "")
-        world.add_item(player_id, {"id": match.get("id") or uuid.uuid4().hex[:8],
-                                   "name": match["name"], "description": desc})
+        world.add_item(player_id, {"id": item_id_final, "name": match["name"], "description": desc})
+        # upsert (not just move_item) — this loot dict may predate the first-class item table
+        # entirely (backfill only runs at process start), so it might not have a row yet.
+        world.upsert_item(item_id=item_id_final, campaign_id=ch.campaign_id, name=match["name"],
+                          description=desc, owner_type="character", owner_id=player_id,
+                          acquired_at=time.time())
         world.log("item.picked_up", f"{ch.name} picked up {match['name']} ({flavor['via']}).",
                   player_id=player_id, subject_type="room", subject_id=room.id)
+        world.log("item.picked_up", f"{ch.name} picked up {match['name']} ({flavor['via']}).",
+                  player_id=player_id, subject_type="item", subject_id=item_id_final)
         detail = f" {desc}" if desc else ""
         return f"✦ You take {match['name']}.{detail} Added to your inventory."
 
@@ -920,14 +950,21 @@ async def pick_up_item(player_id: str, item_id: str | None = None,
     # to adjudicate plausibility and flesh out what it actually is.
     camp = _require_campaign(ch.campaign_id)
     item = await worldgen.generate_item_content(item_name, camp.theme, room_context=room.description,
-                                                premise=camp.premise)
+                                                premise=camp.premise,
+                                                is_main=camp.id == MAIN_CAMPAIGN_ID)
     if not item["portable"]:
         reason = f" ({item['reason']})" if item.get("reason") else ""
         return f"You can't take that{reason}."
-    world.add_item(player_id, {"id": item.get("id") or uuid.uuid4().hex[:8],
-                               "name": item["name"], "description": item["description"]})
+    item_id_final = item.get("id") or uuid.uuid4().hex[:8]
+    world.add_item(player_id, {"id": item_id_final, "name": item["name"],
+                               "description": item["description"]})
+    world.upsert_item(item_id=item_id_final, campaign_id=ch.campaign_id, name=item["name"],
+                      description=item["description"], owner_type="character",
+                      owner_id=player_id, acquired_at=time.time())
     world.log("item.picked_up", f"{ch.name} picked up {item['name']} ({item['via']}).",
               player_id=player_id, subject_type="room", subject_id=room.id)
+    world.log("item.picked_up", f"{ch.name} picked up {item['name']} ({item['via']}).",
+              player_id=player_id, subject_type="item", subject_id=item_id_final)
     detail = f" {item['description']}" if item["description"] else ""
     return f"✦ You take {item['name']}.{detail} Added to your inventory."
 
@@ -955,14 +992,74 @@ def drop_item(player_id: str, item_id: str | None = None, item_name: str | None 
         return f"You aren't carrying anything called {(item_id or item_name)!r}."
     remove_id = match.get("id") or match["name"]  # matches remove_item's own fallback key
     world.remove_item(player_id, remove_id)
-    room.contents.append({"type": "loot", "id": match.get("id") or uuid.uuid4().hex[:8],
-                          "name": match["name"]})
+    item_id_final = match.get("id") or uuid.uuid4().hex[:8]
+    room.contents.append({"type": "loot", "id": item_id_final, "name": match["name"]})
     world.upsert_room(room_id=room.id, campaign_id=ch.campaign_id, name=room.name,
                       description=room.description, exits=room.exits,
                       contents=room.contents, features=room.features)
+    world.upsert_item(item_id=item_id_final, campaign_id=ch.campaign_id, name=match["name"],
+                      description=match.get("description", ""), owner_type="room", owner_id=room.id)
     world.log("item.dropped", f"{ch.name} left {match['name']} here.", player_id=player_id,
              subject_type="room", subject_id=room.id)
+    world.log("item.dropped", f"{ch.name} left {match['name']} here.", player_id=player_id,
+             subject_type="item", subject_id=item_id_final)
     return f"You set {match['name']} down."
+
+
+@mcp.tool()
+def give_item(player_id: str, item_id: str | None = None, item_name: str | None = None, *,
+             npc_name: str | None = None, to_player_name: str | None = None) -> str:
+    """Hand something from your inventory to an NPC or another PLAYER standing in your
+    current room — pass exactly one of npc_name/to_player_name. Prefer item_id when you have
+    it (character_sheet()'s inventory line carries [item_id: ...]); item_name falls back to a
+    substring match. Unlike drop_item, a given item does NOT become loose room loot — it's
+    now held by whoever you gave it to (see the first-class `item` table's owner_type/
+    owner_id), so it won't show up for a third player to pick_up_item out of the room."""
+    if bool(npc_name) == bool(to_player_name):
+        return "Give it to exactly one of: npc_name, or to_player_name."
+    ch = world.character(player_id)
+    if not ch:
+        return "Unknown player_id. Call start_adventure first."
+    room = _require_room(ch.location_id)
+    match = None
+    if item_id:
+        match = next((i for i in ch.inventory if i.get("id") == item_id), None)
+    elif item_name:
+        match = next((i for i in ch.inventory if item_name.lower() in i["name"].lower()), None)
+    if not match:
+        return f"You aren't carrying anything called {(item_id or item_name)!r}."
+
+    if npc_name:
+        npc = next((c for c in room.contents
+                   if c.get("type") == "monster" and npc_name.lower() in c["name"].lower()), None)
+        if not npc:
+            return f"No {npc_name!r} here to give it to."
+        owner_type, owner_id, recipient_label = "entity", npc["id"], npc["name"]
+    else:
+        target = next((p for p in world.players(ch.campaign_id)
+                      if p.player_id != player_id and p.location_id == ch.location_id
+                      and to_player_name.lower() in p.name.lower()), None)
+        if not target:
+            return f"No {to_player_name!r} here to give it to."
+        owner_type, owner_id, recipient_label = "character", target.player_id, target.name
+
+    remove_id = match.get("id") or match["name"]  # matches remove_item's own fallback key
+    world.remove_item(player_id, remove_id)
+    item_id_final = match.get("id") or uuid.uuid4().hex[:8]
+    if owner_type == "character":
+        # Mirrors pick_up_item's inventory-add exactly — the RECIPIENT's own character_sheet()
+        # reads character.inventory directly, same as every other render site; give_item must
+        # keep that in sync, not just the first-class item row.
+        world.add_item(owner_id, {"id": item_id_final, "name": match["name"],
+                                  "description": match.get("description", "")})
+    world.upsert_item(item_id=item_id_final, campaign_id=ch.campaign_id, name=match["name"],
+                      description=match.get("description", ""), owner_type=owner_type,
+                      owner_id=owner_id, acquired_at=time.time())
+    world.log(f"item.given_to_{owner_type}", f"{ch.name} gave {match['name']} to {recipient_label}.",
+             player_id=player_id, subject_type="room", subject_id=room.id)
+    world.log(f"item.given_to_{owner_type}", f"{ch.name} gave {match['name']} to {recipient_label}.",
+             player_id=player_id, subject_type="item", subject_id=item_id_final)
+    return f"✦ You give {match['name']} to {recipient_label}."
 
 
 @mcp.tool()
@@ -1005,7 +1102,8 @@ async def talk_to(player_id: str, message: str, npc_name: str | None = None) -> 
                                                   room.description, nearby=nearby,
                                                   recent_events=recent_events,
                                                   existing_names=world.entity_names_in(ch.campaign_id),
-                                                  premise=camp.premise)
+                                                  premise=camp.premise,
+                                                  is_main=camp.id == MAIN_CAMPAIGN_ID)
         npc["name"] = gen["name"]
         ent = world.upsert_entity(entity_id=npc["id"], campaign_id=ch.campaign_id, kind=kind,
                                   name=gen["name"], location_id=room.id,
@@ -1020,7 +1118,8 @@ async def talk_to(player_id: str, message: str, npc_name: str | None = None) -> 
     result = await worldgen.generate_npc_response(npc_for_llm, camp.theme, room.description,
                                                   message, recent_events=recent_events,
                                                   premise=camp.premise,
-                                                  speaker=f"{ch.name}, a {ch.klass}")
+                                                  speaker=f"{ch.name}, a {ch.klass}",
+                                                  is_main=camp.id == MAIN_CAMPAIGN_ID)
     world.append_entity_memory(ent.id, "player", message)
     world.append_entity_memory(ent.id, "npc", result["text"])
     world.log("npc.talked",
@@ -1128,7 +1227,8 @@ if os.environ.get("DNDMCP_DEV_TOOLS") == "1":
         persona = await worldgen.generate_npc_persona(mon, camp.theme, room.name, room.kind,
                                                       room.description,
                                                       existing_names=world.entity_names_in(campaign_id),
-                                                      premise=camp.premise)
+                                                      premise=camp.premise,
+                                                      is_main=campaign_id == MAIN_CAMPAIGN_ID)
         mon["name"] = persona["name"]
         world.upsert_entity(entity_id=mon["id"], campaign_id=campaign_id, kind=kind,
                             name=persona["name"], location_id=room_id,
@@ -1156,14 +1256,21 @@ if os.environ.get("DNDMCP_DEV_TOOLS") == "1":
         if not room:
             return f'No room {room_id!r} in world {campaign_id!r}.'
         item = await worldgen.generate_item_content(item_name, camp.theme, room_context=room.description,
-                                                    premise=camp.premise)
-        loot = {"type": "loot", "id": item.get("id") or uuid.uuid4().hex[:8], "name": item["name"]}
+                                                    premise=camp.premise,
+                                                    is_main=campaign_id == MAIN_CAMPAIGN_ID)
+        item_id_final = item.get("id") or uuid.uuid4().hex[:8]
+        loot = {"type": "loot", "id": item_id_final, "name": item["name"]}
         room.contents.append(loot)
         world.upsert_room(room_id=room_id, campaign_id=campaign_id, name=room.name,
                           description=room.description, exits=room.exits, contents=room.contents,
                           features=room.features, kind=room.kind)
+        world.upsert_item(item_id=item_id_final, campaign_id=campaign_id, name=item["name"],
+                          description=item.get("description", ""), owner_type="room",
+                          owner_id=room_id)
         world.log("item.spawned", f"{item['name']} appeared in {room.name} (dev-spawned).",
                  campaign_id=campaign_id, subject_type="room", subject_id=room_id)
+        world.log("item.spawned", f"{item['name']} appeared in {room.name} (dev-spawned).",
+                 campaign_id=campaign_id, subject_type="item", subject_id=item_id_final)
         return f"✓ Spawned {item['name']} in {room_id} ({room.name})."
 
     @mcp.tool()
