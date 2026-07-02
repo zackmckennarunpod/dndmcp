@@ -39,6 +39,6 @@ Reposition as **"the GPU oracle for agents"**:
 4. **Creativity** — already strong; just make sure the narration says the novel thing out loud.
 
 ## Still pending
-Dean's PROMPT not yet announced. Judging criteria are theme-independent, so this prep holds.
+The hackathon theme/prompt was not yet announced when this was written. Judging criteria are theme-independent, so this prep holds.
 When the prompt drops: map via the decision tree (KNOWLEDGE.md), keep cross-silicon as the
 spine unless the theme demands a different hero.
