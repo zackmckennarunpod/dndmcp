@@ -134,7 +134,7 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
  h1{font:600 16px 'Cinzel',serif;letter-spacing:1.5px;margin:0;color:var(--ghost-bright);
    text-shadow:0 0 12px rgba(79,216,196,.35)}
  .sub{color:var(--muted);font-size:12px}
- #tagline{padding:0 18px 10px;color:var(--muted);font-size:12px;max-width:760px}
+ #tagline{padding:6px 18px 10px;color:var(--muted);font-size:12px;max-width:760px}
  /* 3 columns: map (flexible width) | live stream (own space, not buried below the fold) | the
     existing character/room/recent sidebar. */
  main{display:grid;grid-template-columns:1fr 340px 280px;gap:16px;padding:16px 18px}
