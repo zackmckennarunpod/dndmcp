@@ -931,6 +931,9 @@ const nodeLayer = zoomLayer.append('g');
 // re-fits itself to whatever's actually in the graph, so a growing world never silently drifts
 // half off-screen with no indication anything's missing.
 let userInteracted = false;
+let selectedRoomId = null;  // last-clicked node -- gets its name drawn on the map itself so
+                             // the link between "what I clicked" and the sidebar panel that
+                             // just changed is obvious, not just implied
 const zoomBehavior = d3.zoom().scaleExtent([0.25, 4])
   // Plain mouse-wheel over the SVG used to always zoom, which d3 implements by calling
   // preventDefault() on the wheel event — that's what trapped page scroll the instant the
@@ -1038,6 +1041,17 @@ function ticked(){
  nodeLayer.selectAll('g.node').attr('transform', d=>`translate(${d.x},${d.y})`);
 }
 
+// Only the selected node ever gets its name drawn on the map (undiscovered nodes still show
+// "???" so clicking one doesn't silently confirm there's nothing there) — bound to the live
+// data already on each g.node datum, so this is cheap enough to call on every click without
+// waiting for the next poll's full renderGraph.
+function updateLabels(){
+ nodeLayer.selectAll('g.node').select('text.label')
+   .text(d=> !d.discovered ? '???' : (d.id === selectedRoomId ? d.name : ''))
+   .attr('fill', d=> (d.discovered && d.id === selectedRoomId) ? '#8ff0e0' : '#8d7fae')
+   .attr('font-weight', d=> (d.discovered && d.id === selectedRoomId) ? '600' : '400');
+}
+
 function renderGraph(rooms, players, you){
  const empty = document.getElementById('mapEmpty');
  if(!rooms.length){ empty.style.display=''; svg.style('display','none'); return; }
@@ -1102,6 +1116,8 @@ function renderGraph(rooms, players, you){
      }).on('mouseleave', function(){
        tooltip.style.display = 'none';
      }).on('click', function(event, d){
+       selectedRoomId = d.id;
+       updateLabels();
        centerOn(d);
        showRoomInfo(d);
      });
@@ -1113,7 +1129,7 @@ function renderGraph(rooms, players, you){
    // A soft glow on your own current room only — you're a ghost too; this is the one node
    // that's genuinely "alive" right now, everything else is just trace/memory.
    .style('filter', d=> d.mine ? 'drop-shadow(0 0 7px #4fd8c4)' : null);
- nodeSel.select('text.label').text(d=> d.discovered ? '' : '???');
+ updateLabels();
  nodeSel.select('text.count').text(d=> d.count ? d.count : '');
 
  // IMPORTANT: link objects' source/target start as plain id STRINGS. d3-force only rewrites
