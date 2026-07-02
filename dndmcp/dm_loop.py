@@ -567,12 +567,14 @@ async def _tool_character_sheet(session: DMSession) -> str:
 
 
 async def _tool_roll_dice(session: DMSession, expression: str = "1d20") -> str:
-    # No player_id concept on this one (server.roll_dice takes only `expression`) — still
-    # gated on an adventure being underway so a model can't roll dice before the game exists.
+    # player_id is injected here, never in the model-facing schema (same boundary as every
+    # other wrapper in this module) — this is what makes a standalone roll (a trap, a skill
+    # check) show up in the world stream/metrics/story at all; previously it was invisible
+    # even though attack()'s own rolls (via combat.resolved) always were.
     err = _require_started(session)
     if err:
         return err
-    return _sanitize(server.roll_dice(expression))
+    return _sanitize(server.roll_dice(expression, player_id=session.player_id))
 
 
 async def _tool_take_damage(session: DMSession, amount: int, source: str = "") -> str:

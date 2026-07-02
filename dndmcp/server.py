@@ -685,13 +685,25 @@ async def move(player_id: str, direction: str) -> str:
 
 
 @mcp.tool()
-def roll_dice(expression: str = "1d20") -> str:
-    """Roll dice, e.g. '1d20+3', '2d6'. The honest random heart of the game."""
+def roll_dice(expression: str = "1d20", player_id: str | None = None) -> str:
+    """Roll dice, e.g. '1d20+3', '2d6'. The honest random heart of the game.
+
+    player_id is optional and NOT part of the schema a connecting agent sees (kept out of
+    the MCP tool signature on purpose — existing agents already calling this with just
+    `expression` must keep working unchanged); dm_loop.py's own wrapper passes the browser
+    player's real id so these rolls stop being invisible to the world stream/metrics/story —
+    confirmed live: every OTHER roll (attack, via combat.resolved) was logged, but a bare
+    roll_dice call for a trap/skill check never was, at all."""
     try:
         r = game.roll(expression)
     except ValueError as e:
         return f"⚠ {e}"
-    return f"🎲 {expression} → rolls {r['rolls']} {'+' if r['modifier']>=0 else ''}{r['modifier']} = **{r['total']}**"
+    text = f"🎲 {expression} → rolls {r['rolls']} {'+' if r['modifier']>=0 else ''}{r['modifier']} = **{r['total']}**"
+    if player_id:
+        ch = world.character(player_id)
+        world.log("dice.rolled", f"{ch.name if ch else 'Someone'} rolled {expression}: {text}",
+                  player_id=player_id)
+    return text
 
 
 @mcp.tool()

@@ -34,6 +34,12 @@ logger = logging.getLogger(__name__)
 _RANDOM_ENCOUNTER_MAX_CR = 1.0
 _MAX_MATCHED_MONSTER_CR = 2.0
 
+# Matched fuzzily (substring) against a generated room's own "kind" to catch a sparse
+# in-between space (a bare hallway/landing/threshold — see _ROOM_JSON's "kind" guidance) so
+# _room_messages can forbid generating a SECOND one directly adjacent to it — two connector
+# rooms back-to-back reads as padding, not pacing.
+_TRANSITIONAL_KIND_WORDS = ("hallway", "corridor", "landing", "threshold", "passage")
+
 # No hardcoded theme→creature table on purpose: a fixed Python mapping can only ever cover
 # the themes someone thought to enumerate, and a "sci-fi frontier" bandit swinging a Scimitar
 # (a real bug this replaced — see generate_room_content's monster_type handling below) just
@@ -57,7 +63,12 @@ _ROOM_JSON = ('{"name": a PROPER NAME for this specific room, capitalized like a
               'forgotten) only belongs here if the premise itself is built from that word. '
               'Must not repeat a name already used in this world (listed below, if any). '
               '"kind": one or two words (e.g. "cellar", '
-              '"great hall", "attic" — informs how it connects to the world), '
+              '"great hall", "attic" — informs how it connects to the world). On occasion '
+              '(not most rooms — this is the exception, real set-piece rooms should still '
+              'dominate), a bare in-between space is a legitimate choice: "hallway", '
+              '"corridor", "landing", "threshold", "passage" — sparse on purpose, still named '
+              'and atmospheric, just without a monster/loot. Never two in a row (see the '
+              'note above about the room being left, if it was already one of these), '
               '"atmosphere": 2-4 sentences of vivid, SPECIFIC sensory detail (sight, smell, '
               'sound, light, texture) — substantial enough to actually paint the room, not a '
               'single bare fact. Still facts for a Dungeon Master to narrate FROM, not finished '
@@ -120,6 +131,14 @@ def _room_messages(theme: str, came_from: str | None, exits: list[str],
         # without this line the model knew rooms two hops away but not the immediate origin.
         e_name, e_kind = entry_room
         context = f" They are leaving {e_name}{f' ({e_kind})' if e_kind else ''} — this room adjoins it directly."
+        # Sparse "in-between" rooms (a bare hallway, an empty landing, a plain threshold — see
+        # TRANSITIONAL_KINDS in _ROOM_JSON's "kind" guidance) are a real, occasional choice,
+        # not every room needs to be a set-piece. But two of them back-to-back reads as
+        # padding, not pacing — so explicitly forbid it right here, using the ONE piece of
+        # context that actually knows what's directly adjacent.
+        if e_kind and any(w in e_kind.lower() for w in _TRANSITIONAL_KIND_WORDS):
+            context += (f" {e_name} was ALREADY a bare transitional space (a hallway/landing/"
+                       f"threshold) — this room must NOT also be one; give it real content.")
     if nearby:
         listed = ", ".join(f"{name} ({kind})" if kind else name for name, kind in nearby)
         context += (f" Nearby, already-explored areas: {listed}. Keep this room's tone/architecture "
@@ -134,6 +153,15 @@ def _room_messages(theme: str, came_from: str | None, exits: list[str],
         # (observed live) — the model has no way to know a name is already taken since each
         # room is generated as its own independent call.
         context += f" Room names already used in this world (do not reuse): {', '.join(existing_names)}."
+        # A DIFFERENT failure mode from exact reuse: reaching for the same descriptive word
+        # repeatedly across a whole chain (confirmed live: 6 of 8 consecutive rooms in one
+        # bunker world all opened with "Rusty" — "the Rusty Workshop," "the Rusty Airlock,"
+        # "the Rusty Vent Shaft"...). Each room is still its own independent call with no
+        # memory of this pattern forming, so it has to be told explicitly, every time.
+        if len(existing_names) >= 2:
+            context += (" Vary your word choice — do not reach for the same adjective/"
+                       "descriptor that already opens multiple names above just because it "
+                       "fits the theme; the theme supports many different words, not one.")
     user = (f"Generate the next room{enter}. Exits lead: {', '.join(exits) or 'none'}.{context} "
             f"Return JSON: {_ROOM_JSON}")
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
