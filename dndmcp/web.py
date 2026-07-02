@@ -461,9 +461,7 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
   </div>
  </div>
 </div>
-<main style="margin-top:16px">
- <div class=panel><h2 id=mapTitle>World map (shared, live)</h2><div class=sub id=mapExplainer style="display:none;margin-bottom:2px">one persistent world everyone shares — other players' ghosts have already passed through it</div><div class=sub id=whereInMap style="margin-bottom:2px">—</div>
-<div id=spectateBar style="display:none;margin-bottom:8px;padding:8px 10px;background:var(--panel);border:1px solid var(--border);border-radius:8px;font-size:12px">
+<div id=spectateBar style="display:none;max-width:1100px;margin:16px auto 0;padding:10px 14px;background:var(--panel);border:1px solid var(--border);border-radius:8px;font-size:12px">
   <div style="color:var(--warm-bright);text-transform:uppercase;letter-spacing:.04em;font-size:10.5px;margin-bottom:6px">👀 Active now</div>
   <div id=spectateChips style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:6px"></div>
   <div id=spectateCard style="display:none;padding:8px 10px;background:var(--link);border-radius:6px">
@@ -478,6 +476,8 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
     <div id=spectateCardNarration style="color:var(--text);line-height:1.5"></div>
   </div>
 </div>
+<main style="margin-top:16px">
+ <div class=panel><h2 id=mapTitle>World map (shared, live)</h2><div class=sub id=mapExplainer style="display:none;margin-bottom:2px">one persistent world everyone shares — other players' ghosts have already passed through it</div><div class=sub id=whereInMap style="margin-bottom:2px">—</div>
 <div class=sub style="margin-bottom:4px;opacity:.85">
   <span style="color:var(--ghost)">●</span> your room &nbsp;
   <span style="color:var(--visited)">●</span> places you've been &nbsp;
@@ -499,7 +499,16 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
    <div class=sub style="margin-bottom:8px;display:flex;align-items:center;gap:6px">
     <span id=streamDot></span><span id=streamTitle style="display:none">Live world stream</span>
     <span id=streamSub>every player, every session</span>
-    <button id=streamFilterBtn style="margin-left:auto">⚡ Flash calls only</button></div>
+    <select id=streamFilterSelect style="margin-left:auto;background:var(--link);color:var(--text);border:1px solid var(--border);border-radius:5px;padding:3px 6px;font:11.5px 'IBM Plex Mono',monospace">
+     <option value=all>All events</option>
+     <option value=flash>⚡ Flash calls only</option>
+     <option id=streamFilterSpectateOpt value=spectate disabled>👀 Spectating only</option>
+     <option value=bot_chat>🤖 Bot chat only</option>
+     <option value=combat>⚔ Combat only</option>
+     <option value=movement>🚶 Movement only</option>
+     <option value=items>🎒 Items only</option>
+     <option value=npc>🗣 NPC talk only</option>
+    </select></div>
    <div id=stream><div class=empty>waiting for the world to move...</div></div>
   </div>
   <div id=midTab-chat class=midTabBody>
@@ -963,6 +972,25 @@ let spectateId = null;      // truncated (6-char) player_id of whoever the "Acti
                              // (highlights their current room), never touches ?player= or any
                              // tool call. Cleared if they drop out of s.players entirely.
 const SPECTATE_ACTIVE_WINDOW_S = 600;  // "active now" = acted in the last 10 minutes
+
+// Stream filter presets -- declared early (not down near the rest of the stream-panel wiring)
+// so renderSpectateBar can safely reference streamFilterMode on tick()'s first synchronous
+// call, before the later `const`s in that section have initialized (same TDZ hazard tick()
+// itself already works around by using getElementById directly on its own first call).
+// kindPrefix reuses /stream/events' own general ?kind_prefix= filter server-side (already
+// there for room/npc/combat/etc namespacing); 'spectate' is the one client-side-only mode,
+// filtering the existing connection by player_id rather than opening a second one.
+const STREAM_FILTER_MODES = {
+  all:      {title: 'Live world stream', sub: 'every player, every session'},
+  flash:    {title: 'Flash calls', sub: 'every GPU generation call this world has made', flashOnly: true},
+  spectate: {title: 'Spectating', sub: "only the character you're watching above"},
+  bot_chat: {title: 'Bot chat', sub: 'what the self-playing characters are doing', kindPrefix: 'bot.'},
+  combat:   {title: 'Combat', sub: 'every fight, this world', kindPrefix: 'combat.'},
+  movement: {title: 'Movement', sub: 'who went where', kindPrefix: 'player.'},
+  items:    {title: 'Items', sub: 'picked up, dropped, given', kindPrefix: 'item.'},
+  npc:      {title: 'NPC talk', sub: 'conversations with NPCs', kindPrefix: 'npc.'},
+};
+let streamFilterMode = 'all';
 const zoomBehavior = d3.zoom().scaleExtent([0.25, 4])
   // Plain mouse-wheel over the SVG used to always zoom, which d3 implements by calling
   // preventDefault() on the wheel event — that's what trapped page scroll the instant the
@@ -1233,12 +1261,14 @@ function renderSpectateBar(players, rooms){
   if(!active.length){
     bar.style.display = 'none';
     spectateId = null;
+    syncStreamFilterToSpectate();
     return;
   }
   bar.style.display = '';
   // Dropped out of the active window (or the world reset) since last poll -- fall back to
   // just showing the chips with nothing selected, rather than pointing at stale data.
   if(spectateId && !active.some(p => p.player_id === spectateId)) spectateId = null;
+  syncStreamFilterToSpectate();
 
   document.getElementById('spectateChips').innerHTML = active.map(p =>
     `<a href="#" class="spectateChip" data-pid="${esc(p.player_id)}" style="` +
@@ -1400,23 +1430,31 @@ const streamEl = document.getElementById('stream');
 const streamDot = document.getElementById('streamDot');
 const streamTitle = document.getElementById('streamTitle');
 const streamSub = document.getElementById('streamSub');
-const filterBtn = document.getElementById('streamFilterBtn');
+const filterSelect = document.getElementById('streamFilterSelect');
+const filterSpectateOpt = document.getElementById('streamFilterSpectateOpt');
 let es = null;
-let flashOnly = false;
 let streamCaughtUp = true;
 
 function connectStream(){
   if (es) es.close();
   streamEl.innerHTML = '<div class=empty>waiting for the world to move...</div>';
+  const cfg = STREAM_FILTER_MODES[streamFilterMode] || STREAM_FILTER_MODES.all;
   let url = '/stream/events?campaign='+encodeURIComponent(campaignId);
-  // Default mode backfills the trailing ~20 events so a fresh tab opens onto the world's
-  // recent life instead of an empty box until someone acts; Flash-only keeps its full
-  // from-the-beginning backfill (that view IS the complete history).
-  if (flashOnly) url += '&flash_only=1&backfill=1';
-  else url += '&backfill=recent';
+  // flashOnly backfills the world's FULL Flash-call history from the beginning (that view IS
+  // the complete history); everything else shares a fresh tab's default trailing-~20-events
+  // backfill. kindPrefix reuses /stream/events' own general filter server-side. 'spectate'
+  // is the one mode with no server-side query at all -- it filters client-side on the SAME
+  // connection as 'all' (see the handler below), since the event payload already carries
+  // player_id and spectateId is already that same truncated form.
+  if (cfg.flashOnly) url += '&flash_only=1&backfill=1';
+  else {
+    url += '&backfill=recent';
+    if (cfg.kindPrefix) url += '&kind_prefix='+encodeURIComponent(cfg.kindPrefix);
+  }
   es = new EventSource(url);
   es.addEventListener('world-event', (e) => {
     const ev = JSON.parse(e.data);
+    if (streamFilterMode === 'spectate' && ev.player_id !== spectateId) return;
     const empty = streamEl.querySelector('.empty');
     if (empty) empty.remove();
     const div = document.createElement('div');
@@ -1446,22 +1484,41 @@ function connectStream(){
   };
 }
 
-filterBtn.addEventListener('click', () => {
-  flashOnly = !flashOnly;
-  filterBtn.classList.toggle('active', flashOnly);
-  filterBtn.textContent = flashOnly ? '✕ Showing Flash calls only' : '⚡ Flash calls only';
-  streamTitle.textContent = flashOnly ? 'Flash calls' : 'Live world stream';
-  streamSub.textContent = flashOnly
-    ? 'every GPU generation call this world has made'
-    : 'every player, every session';
+filterSelect.addEventListener('change', () => {
+  streamFilterMode = filterSelect.value;
+  const cfg = STREAM_FILTER_MODES[streamFilterMode];
+  streamTitle.textContent = cfg.title;
+  streamSub.textContent = cfg.sub;
+  // Always reconnect, even for 'spectate' (whose backfill query is identical to 'all') --
+  // the backfilled batch flows through the SAME world-event handler as live events, so
+  // reconnecting is what makes the filter apply to rows already on screen, not just new
+  // ones. Skipping this for 'spectate' left stale unfiltered rows sitting there until they
+  // aged out on their own (confirmed live) -- worth the minor reconnect cost to avoid.
   connectStream();
 });
+// Keeps the dropdown in sync with spectating state -- called from renderSpectateBar
+// whenever spectateId changes, not just on this select's own 'change' event. Uses
+// getElementById directly rather than the filterSelect/streamTitle/streamSub consts above --
+// renderSpectateBar can fire from tick()'s first synchronous call, before this section's own
+// consts have initialized (same TDZ hazard tick() itself already works around elsewhere).
+function syncStreamFilterToSpectate(){
+  const opt = document.getElementById('streamFilterSpectateOpt');
+  if (opt) opt.disabled = !spectateId;
+  if (!spectateId && streamFilterMode === 'spectate') {
+    streamFilterMode = 'all';
+    const sel = document.getElementById('streamFilterSelect');
+    if (sel) sel.value = 'all';
+    const t = document.getElementById('streamTitle'), s = document.getElementById('streamSub');
+    if (t) t.textContent = STREAM_FILTER_MODES.all.title;
+    if (s) s.textContent = STREAM_FILTER_MODES.all.sub;
+  }
+}
 
 // Clicking the header counter opens the FULL Flash-call history on its own page (new tab) —
 // every call ANY world has ever made, uncapped, not a live-filtered view of the panel below
-// (that's what the "⚡ Flash calls only" toggle on the stream panel is for instead). No
-// ?campaign= here on purpose — the header number itself is now server-wide (see /state's
-// flash_calls query), so the page it opens must match that same total, not just this world's.
+// (that's what the stream filter dropdown is for instead). No ?campaign= here on purpose —
+// the header number itself is now server-wide (see /state's flash_calls query), so the page
+// it opens must match that same total, not just this world's.
 document.getElementById('flashcount').style.cursor = 'pointer';
 document.getElementById('flashcount').title = 'Click to see every Flash call this server has ever made, across all worlds';
 document.getElementById('flashcount').addEventListener('click', () => {
