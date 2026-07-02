@@ -531,11 +531,23 @@ class World:
         self._c.execute("UPDATE rooms SET visited=1 WHERE id=?", (room_id,))
         self._c.commit()
 
-    def room_ids_in(self, campaign_id: str) -> list[tuple[str, str, str]]:
+    def room_ids_in(self, campaign_id: str, *, limit: int | None = None) -> list[tuple[str, str, str]]:
         """(id, name, kind) for every room in one world — a cheap listing for dev tooling
-        (see server.py dev_list_rooms) without loading each room's full contents/exits."""
+        (see server.py dev_list_rooms) without loading each room's full contents/exits.
+
+        `limit`: when given, returns only the `limit` MOST RECENTLY created rooms (ORDER BY
+        rowid DESC). Callers feeding this into an LLM's "don't reuse these names" constraint
+        (worldgen.generate_room_content's existing_names) need this — an unbounded list grows
+        with the world forever (142 names in the live 'main' campaign as of writing), and a
+        7B model reliably stops honoring a "do not reuse" instruction that long: confirmed
+        live via repeated (flash) duplicate names (Conduit Crypt x4, Weave Withering x3,
+        etc.) despite the instruction being present. Capping to recent rooms keeps the
+        constraint within what the model can actually track, and collisions with a
+        long-since-visited room on the other side of the map are harmless anyway."""
+        order_limit = " ORDER BY rowid DESC LIMIT ?" if limit is not None else ""
+        params = (campaign_id, limit) if limit is not None else (campaign_id,)
         rows = self._c.execute(
-            "SELECT id, name, kind FROM rooms WHERE campaign_id=?", (campaign_id,)
+            f"SELECT id, name, kind FROM rooms WHERE campaign_id=?{order_limit}", params
         ).fetchall()
         return [(r["id"], r["name"], r["kind"] or "") for r in rows]
 
