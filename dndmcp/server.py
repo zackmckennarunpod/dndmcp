@@ -559,7 +559,10 @@ async def _generate_and_link(dest_id: str, theme: str, campaign_id: str, salt: s
     new_room = await worldgen.generate_room_content(
         dest_id, theme, entry_from=entry_from, nearby=nearby, recent_events=recent_events,
         salt=salt, premise=premise,
-        existing_names=[name for _, name, _ in world.room_ids_in(campaign_id)],
+        # Capped to the most recent rooms (not the whole world) — see room_ids_in's docstring:
+        # an unbounded "don't reuse these names" list stopped being reliably honored by the 7B
+        # model well before it reached this world's current size.
+        existing_names=[name for _, name, _ in world.room_ids_in(campaign_id, limit=25)],
         deadline_s=deadline_s,
         entry_room=(origin.name, origin.kind) if origin else None)
     new_room["exits"][game.opposite_of(entry_from)] = back_to_id
@@ -585,16 +588,28 @@ async def _generate_and_link(dest_id: str, theme: str, campaign_id: str, salt: s
     # ref = dest_id: room ids are already unique across worlds (non-main worlds prefix with
     # their own campaign_id), so no extra namespacing is needed for the cache key.
     _track(asyncio.create_task(
-        _prefetch_room_art(dest_id, new_room["name"], new_room["description"], campaign_id)))
+        _prefetch_room_art(dest_id, new_room["name"], new_room["description"],
+                          new_room.get("features"), campaign_id)))
 
 
-async def _prefetch_room_art(room_id: str, name: str, description: str, campaign_id: str) -> None:
+async def _prefetch_room_art(room_id: str, name: str, description: str,
+                             features: list[str] | None, campaign_id: str) -> None:
     """Generate (via Flash) and link art for a just-generated room, fired-and-forgotten from
     _generate_and_link right after the room itself is persisted. `room_id` doubles as the art
     cache ref (see art.prefetch). Never raises — art.prefetch already swallows its own errors
     and returns False on any failure/disabled state, in which case this is a true no-op (no
-    image_ref set, no log entry, matching "art off -> zero behavior change")."""
-    if await art.prefetch(room_id, f"{name}: {description}"):
+    image_ref set, no log entry, matching "art off -> zero behavior change").
+
+    `features` (the room's concrete objects, e.g. "a cracked anvil embedded in the floor") get
+    appended to the prompt alongside name+description — description text is often mood/
+    atmosphere prose with few concrete visual nouns ("the air hums with a faint, resonant
+    energy"), so the image model had comparatively little to actually draw. features are
+    exactly the visual grounding that was missing (confirmed as a real gap, not hypothetical:
+    the prompt sent before this fix was JUST name+description)."""
+    prompt = f"{name}: {description}"
+    if features:
+        prompt += " Notable details: " + "; ".join(features) + "."
+    if await art.prefetch(room_id, prompt):
         world.set_room_image(room_id, room_id)
         world.log("art.generated", f"art for {name} (flash)", campaign_id=campaign_id,
                   subject_type="room", subject_id=room_id)
