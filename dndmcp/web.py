@@ -463,14 +463,20 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
 </div>
 <main style="margin-top:16px">
  <div class=panel><h2 id=mapTitle>World map (shared, live)</h2><div class=sub id=mapExplainer style="display:none;margin-bottom:2px">one persistent world everyone shares — other players' ghosts have already passed through it</div><div class=sub id=whereInMap style="margin-bottom:2px">—</div>
-<div id=spectateBar style="display:none;margin-bottom:6px;padding:6px 8px;background:var(--panel);border:1px solid var(--border);border-radius:6px;font-size:12px">
-  <span style="color:var(--warm-bright)">👀 Active now:</span>
-  <span id=spectateNames style="margin-left:4px"></span>
-  <span id=spectateNow style="margin-left:8px;display:none">
-    — <span style="color:var(--warm-bright)">Spectating:</span> <span id=spectateLabel></span>
-    <a href="#" id=spectateNextBtn style="margin-left:6px;color:var(--muted);text-decoration:underline dotted">⏭ next</a>
-    <a href="#" id=spectateStopBtn style="margin-left:6px;color:var(--muted);text-decoration:underline dotted">✕ stop</a>
-  </span>
+<div id=spectateBar style="display:none;margin-bottom:8px;padding:8px 10px;background:var(--panel);border:1px solid var(--border);border-radius:8px;font-size:12px">
+  <div style="color:var(--warm-bright);text-transform:uppercase;letter-spacing:.04em;font-size:10.5px;margin-bottom:6px">👀 Active now</div>
+  <div id=spectateChips style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:6px"></div>
+  <div id=spectateCard style="display:none;padding:8px 10px;background:var(--link);border-radius:6px">
+    <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px">
+      <span id=spectateCardName style="color:var(--warm-bright);font-weight:600"></span>
+      <span>
+        <a href="#" id=spectateNextBtn style="color:var(--muted);text-decoration:underline dotted">⏭ next</a>
+        <a href="#" id=spectateStopBtn style="margin-left:6px;color:var(--muted);text-decoration:underline dotted">✕ stop</a>
+      </span>
+    </div>
+    <div id=spectateCardRoom style="color:var(--muted);margin-bottom:4px"></div>
+    <div id=spectateCardNarration style="color:var(--text);line-height:1.5"></div>
+  </div>
 </div>
 <div class=sub style="margin-bottom:4px;opacity:.85">
   <span style="color:var(--ghost)">●</span> your room &nbsp;
@@ -1209,11 +1215,15 @@ function renderGraph(rooms, players, you){
 // "Active now" spectate strip -- lets a visitor watch a SPECIFIC character move around live,
 // separate from their own ?player= (if any). Purely a view overlay: it never calls a game
 // tool, just highlights spectateTarget's current room on the map (see renderGraph's
-// n.spectating) and re-derives its label from the latest poll every tick, same as any other
-// on-screen state here. Hidden entirely when nobody's acted recently -- an empty "Active now"
-// strip would just be noise on a quiet world. players/rooms are cached module-level (not just
-// passed as args) so the Next/Stop button handlers below -- which fire from a click, not a
-// poll -- can re-render against the latest known state without waiting for the next tick().
+// n.spectating). Hidden entirely when nobody's acted recently -- an empty strip would just
+// be noise on a quiet world. Two-part layout on purpose (not a one-card-at-a-time carousel):
+// a row of chips shows EVERYONE active at a glance (so you're never hiding who else is
+// playing), and the detail card below shows richer live info -- room + full narration, from
+// bot_player's own status file (bot.narrated in the shared log/stream is deliberately just a
+// short snippet; this card is the "somewhere else" for the full text) -- for whichever one
+// is currently selected. players/rooms cached module-level so the Next/Stop handlers, which
+// fire from a click rather than a poll, can re-render against the latest known state without
+// waiting for the next tick().
 let lastPlayers = [], lastRooms = [];
 function renderSpectateBar(players, rooms){
   lastPlayers = players; lastRooms = rooms;
@@ -1227,30 +1237,32 @@ function renderSpectateBar(players, rooms){
   }
   bar.style.display = '';
   // Dropped out of the active window (or the world reset) since last poll -- fall back to
-  // just showing the strip with nothing selected, rather than pointing at stale data.
+  // just showing the chips with nothing selected, rather than pointing at stale data.
   if(spectateId && !active.some(p => p.player_id === spectateId)) spectateId = null;
 
-  document.getElementById('spectateNames').innerHTML = active.map(p =>
-    `<a href="#" class="spectateNameLink" data-pid="${esc(p.player_id)}" `
-    + `style="color:${p.player_id===spectateId ? 'var(--warm-bright)' : 'var(--ghost-bright)'};`
-    // No separate badge here either — same reasoning as /metrics' player_rows: bot names
-    // already carry 🤖 themselves (state.py's mark_bot), doubling it here would duplicate it.
-    + `text-decoration:none;margin-right:8px">${esc(p.name || '?')} `
-    + `<span style="color:var(--muted)">(${esc(p.klass || '?')})</span></a>`
+  document.getElementById('spectateChips').innerHTML = active.map(p =>
+    `<a href="#" class="spectateChip" data-pid="${esc(p.player_id)}" style="` +
+    `padding:3px 9px;border-radius:12px;text-decoration:none;font-size:11.5px;` +
+    `background:${p.player_id===spectateId ? 'var(--warm)' : 'var(--link)'};` +
+    `color:${p.player_id===spectateId ? 'var(--bg)' : 'var(--ghost-bright)'}">` +
+    `${esc(p.name || '?')} <span style="opacity:.75">(${esc(p.klass || '?')})</span></a>`
   ).join('');
-  document.querySelectorAll('.spectateNameLink').forEach(el => {
+  document.querySelectorAll('.spectateChip').forEach(el => {
     el.addEventListener('click', ev => { ev.preventDefault(); spectateId = el.dataset.pid; renderSpectateBar(players, rooms); });
   });
 
-  const nowSpan = document.getElementById('spectateNow');
+  const card = document.getElementById('spectateCard');
   if(spectateId){
     const target = active.find(p => p.player_id === spectateId);
     const room = rooms.find(r => r.id === target.location_id);
-    nowSpan.style.display = '';
-    document.getElementById('spectateLabel').textContent =
-      (target.name || '?') + ' — ' + (room ? (room.discovered ? room.name : '???') : 'somewhere unknown');
+    card.style.display = '';
+    document.getElementById('spectateCardName').textContent = target.name || '?';
+    document.getElementById('spectateCardRoom').textContent =
+      room ? (room.discovered ? room.name : '???') : 'somewhere unknown';
+    document.getElementById('spectateCardNarration').textContent =
+      target.last_narration || target.last_action || '(nothing to report yet)';
   } else {
-    nowSpan.style.display = 'none';
+    card.style.display = 'none';
   }
 }
 document.getElementById('spectateNextBtn').addEventListener('click', ev => {
@@ -1310,8 +1322,24 @@ async function tick(){
       logEl.appendChild(wb);
     }
   }
-  renderGraph(s.rooms||[], s.players||[], s.you||null);
-  renderSpectateBar(s.players||[], s.rooms||[]);
+  // If actively spectating someone, render the map through THEIR eyes -- fetch the same
+  // per-player-scoped /state a viewer's own playerId already gets (discovered rooms scoped
+  // to that character -- similar to what /story's "View on map" link does, but via a
+  // dedicated &spectate= param (NOT &player=): the client only ever holds a truncated
+  // 6-char id for anyone but itself, and &spectate= resolves that server-side without ever
+  // touching identity (you/character/chat-resume stay tied to the real ?player= only -- see
+  // /state's own comment on why). Falls back to the viewer's own rooms on any fetch hiccup
+  // rather than blanking the map.
+  let mapRooms = s.rooms || [];
+  if (spectateId) {
+    try {
+      const specUrl = '/state?campaign='+encodeURIComponent(campaignId)+'&spectate='+encodeURIComponent(spectateId);
+      const specState = await (await fetch(specUrl)).json();
+      mapRooms = specState.rooms || mapRooms;
+    } catch(e) { /* keep mapRooms = s.rooms */ }
+  }
+  renderGraph(mapRooms, s.players||[], s.you||null);
+  renderSpectateBar(s.players||[], mapRooms);
   rebuildHighlightIndex(s);
   const camp = s.campaign;
   lastCampaignTheme = camp && camp.theme;
@@ -2202,6 +2230,14 @@ _EMPTY_STATE = {"rooms": [], "players": [], "character": None, "you": None, "cur
 @app.get("/state")
 def state(request: Request) -> JSONResponse:
     player_id = request.query_params.get("player")
+    # A different query param from `player` on purpose — `player` means "this genuinely IS
+    # my own character" (drives you/character/current_room/chat-resume below); `spectate` is
+    # view-only (the world map's spectate card, see renderSpectateBar's JS), and only ever
+    # affects room discovery, never identity. The CLIENT only ever has a truncated 6-char
+    # player_id for anyone but itself (see the `players` list comment below on why full ids
+    # aren't shipped to a viewer) — resolve the real one server-side via a prefix match, so
+    # the full id never has to cross the wire to compute the right discovered-rooms set.
+    spectate_prefix = request.query_params.get("spectate")
     # Multi-world: each world's map is independent now — "main" is the well-known default
     # (what every pre-multi-world link/bookmark still means), anything else is a specific
     # world someone created/shared (see server.py start_adventure's campaign_id).
@@ -2263,10 +2299,17 @@ def state(request: Request) -> JSONResponse:
         # to gate spoilers). Spectating with no ?player= has no "you" to gate against, so fall
         # back to the global flag (anyone-has-visited) rather than blanking the whole map.
         discovered_ids: set[str] | None = None
-        if player_id:
+        discover_for = player_id
+        if spectate_prefix:
+            row = c.execute(
+                "SELECT player_id FROM character WHERE campaign_id=? AND player_id LIKE ?",
+                (campaign_id, spectate_prefix + "%"),
+            ).fetchone()
+            discover_for = row["player_id"] if row else None
+        if discover_for:
             discovered_ids = {row["to_id"] for row in c.execute(
                 "SELECT to_id FROM edges WHERE from_type='character' AND from_id=?"
-                " AND to_type='room' AND edge_type='discovered'", (player_id,)
+                " AND to_type='room' AND edge_type='discovered'", (discover_for,)
             ).fetchall()}
 
         rooms = []
@@ -2290,15 +2333,25 @@ def state(request: Request) -> JSONResponse:
         # last_seen backs the world page's "active now" spectate strip (client-side filters to
         # the last 10 minutes) — same per-row MAX(ts) subquery /metrics already uses for its
         # own Characters table, just scoped down to one campaign here.
-        players = [{"player_id": p["player_id"][:6], "name": p["name"], "klass": p["klass"],
-                    "location_id": p["location_id"], "last_seen": p["last_seen"],
-                    "is_bot": bool(p["is_bot"])}
-                   for p in c.execute(
-                       "SELECT ch.player_id AS player_id, ch.name AS name, ch.klass AS klass,"
-                       " ch.location_id AS location_id, ch.is_bot AS is_bot,"
-                       " (SELECT MAX(ts) FROM log WHERE player_id=ch.player_id AND campaign_id=ch.campaign_id) AS last_seen"
-                       " FROM character ch WHERE campaign_id=?",
-                       (campaign_id,)).fetchall()]
+        # bot_player's live status (full narration, not the shared log's truncated snippet —
+        # see bot_player.py's module docstring) is keyed by full player_id, so this lookup
+        # must happen BEFORE truncating to 6 chars below.
+        bot_status = bot_player.status_by_player_id()
+        players = []
+        for p in c.execute(
+            "SELECT ch.player_id AS player_id, ch.name AS name, ch.klass AS klass,"
+            " ch.location_id AS location_id, ch.is_bot AS is_bot,"
+            " (SELECT MAX(ts) FROM log WHERE player_id=ch.player_id AND campaign_id=ch.campaign_id) AS last_seen"
+            " FROM character ch WHERE campaign_id=?", (campaign_id,)
+        ).fetchall():
+            entry = {"player_id": p["player_id"][:6], "name": p["name"], "klass": p["klass"],
+                     "location_id": p["location_id"], "last_seen": p["last_seen"],
+                     "is_bot": bool(p["is_bot"])}
+            status = bot_status.get(p["player_id"])
+            if status:
+                entry["last_action"] = status.get("last_action")
+                entry["last_narration"] = status.get("last_narration")
+            players.append(entry)
         # The world's founding hook — theme + premise, seeded once at create_campaign and
         # never touched again. Currently only ever shown once, in start_adventure's own reply
         # text, then lost to scrollback — surfacing it here so anyone watching (a spectator,

@@ -54,11 +54,19 @@ MAX_PLAYER_HISTORY = 16   # a plain chat history (no tool_calls to keep paired, 
 PLAYER_SYSTEM_PROMPT = """You are playing a character in a live tabletop RPG, entirely on \
 your own — there is no human telling you what to do. Every message you receive is either \
 "begin" (you have no character yet) or the Dungeon Master's narration of what just happened. \
-Reply with ONE short, first-person sentence describing your NEXT action — something a \
-curious, mildly cautious adventurer would actually do: explore, fight, talk to someone, pick \
-things up, pursue a goal. Never ask a question, never narrate an outcome yourself, and don't \
-default to repeating "look around" turn after turn. If the DM says you're dead, reply with a \
-one-line wish to start over as a new character in a different invented theme."""
+Reply with ONE short, first-person sentence describing your NEXT action.
+
+Be decisive, not hesitant — never "I consider whether...", "I try to determine if...", or \
+"I gaze at ___, wondering...". Vague/hedging actions like that don't map to anything real in \
+the game and just produce a flat re-description, not real progress. Commit to a concrete \
+action instead: attack a monster if one's present, pick up an item you were just told about, \
+talk to an NPC who's there, move through an exit, or advance a goal you've already set. If \
+the narration just named something by name — an item, a switch, a door, a person — interact \
+with THAT specific thing rather than standing back and observing it. Never ask a question, \
+never narrate an outcome yourself, and don't default to repeating "look around" turn after \
+turn — you already know what's here from the last narration; act on it instead of \
+re-examining it. If the DM says you're dead, reply with a one-line wish to start over as a \
+new character in a different invented theme."""
 
 
 async def _decide_action(history: list[dict]) -> str:
@@ -72,6 +80,22 @@ async def _decide_action(history: list[dict]) -> str:
         logger.exception("bot_player._decide_action: chat completion failed")
         return "I wait and watch, uncertain what to do next."
     return (message.get("content") or "").strip() or "I press onward."
+
+
+def _snippet(text: str, limit: int = 140) -> str:
+    """Compact form for the shared log/stream — full narration is 2-5 sentences (dm_loop's
+    own persona instruction), far longer than every other log line here ("X picked up
+    crystal shard") and dominated the compact Recent panel. Cuts at a sentence boundary
+    within `limit` chars if there is one, else a word boundary, so it never lands mid-word."""
+    text = text.strip()
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    sentence_end = max(cut.rfind(". "), cut.rfind("! "), cut.rfind("? "))
+    if sentence_end > limit * 0.4:
+        return cut[:sentence_end + 1]
+    space = cut.rfind(" ")
+    return (cut[:space] if space > 0 else cut) + "…"
 
 
 # --- live status, for debugging without inspecting the running process directly ------------
@@ -89,6 +113,18 @@ def _write_status(slot: str, **fields) -> None:
         p.write_text(json.dumps(data, indent=2))
     except Exception:
         logger.exception("bot_player._write_status: failed to write %s", slot)
+
+
+def status_by_player_id() -> dict[str, dict]:
+    """Re-keys the on-disk {slot: status} file by full player_id instead — what web.py's
+    /state actually wants (it has player_ids, not slot names), so the world map's spectate
+    card can show a currently-running bot's live last_action/last_narration. Read-only, safe
+    to call from any process/request; returns {} on any error (never breaks a page load)."""
+    try:
+        data = json.loads(_status_path().read_text())
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+    return {s["player_id"]: s for s in data.values() if s.get("player_id")}
 
 
 def _clear_status(slot: str) -> None:
@@ -128,13 +164,24 @@ async def _run_one_turn(slot: str, session: dm_loop.DMSession, history: list[dic
         # decided to do, and how the DM narrated it) was only ever visible in this process's
         # own memory. Log it too, so it shows up everywhere any other player's activity does:
         # the world map's live stream, /metrics, and this character's own /story export.
+        # TWO entries, not one — reads as an actual back-and-forth in the stream (the bot's
+        # line, then the DM's reply) instead of one run-on sentence. Narration is truncated
+        # to a snippet: dm_loop's own persona asks for 2-5 full sentences, which is far
+        # longer than every other log line here (compare "X picked up crystal shard") and
+        # was dominating the compact Recent/stream panels — the full narration was never
+        # persisted anywhere else anyway, so this is a real information loss, not just
+        # display truncation, but /story's export re-synthesizes fresh from the whole event
+        # log rather than replaying raw narration text, so it isn't affected by this.
         ch = server.world.character(session.player_id)
         name = ch.name if ch else "The bot"
         if narration:
-            server.world.log("bot.narrated", f'{name}: "{action}" — {narration}',
-                             player_id=session.player_id)
+            server.world.log("bot.said", f'{name}: "{action}"', player_id=session.player_id)
+            server.world.log("bot.narrated", _snippet(narration), player_id=session.player_id)
+        # Full, untruncated narration lives HERE (bot_status.json), not in the shared log —
+        # this is the "somewhere else" for people who actually want to follow one character
+        # closely (the spectate card, via /state), separate from the terse shared stream.
         _write_status(slot, state="sleeping", player_id=session.player_id,
-                     character_name=name, last_narration=narration[:200])
+                     character_name=name, last_action=action, last_narration=narration)
 
     history.append({"role": "user", "content": narration or "(nothing seems to happen)"})
     if len(history) > MAX_PLAYER_HISTORY:
