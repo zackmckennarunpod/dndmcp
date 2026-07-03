@@ -983,7 +983,29 @@ async def handle_message(session: DMSession, user_text: str) -> AsyncIterator[di
     free retry. A SECOND such failure in the same turn stops the loop rather than looping
     forever against a model that can't recover, and returns whatever text the model already
     produced (often none, alongside a bad tool_calls message) or a safe in-character line.
+
+    Session-death guard (playtest-reported "worst finding"): session.player_id being SET is
+    not the same thing as the character still existing. It goes stale when the underlying
+    character/world disappears out from under a live session (a world reset via
+    scripts/reset_world.sh or delete_world.sh, or -- same shape -- a redeploy landing between
+    this session minting player_id and its next turn). Before this guard, that case fell
+    through into full DM mode: session.player_id truthy meant `in_intake` was False, so every
+    tool (look/move/etc, see server.py) just returned "Unknown player_id. Call start_adventure
+    first." as an ordinary tool RESULT for the model to narrate around -- confirmed live as a
+    silent, confusing failure (chat kept accepting input, the model improvised something
+    vague, and separately /state's tick() quietly relabeled the header back to "Spectating"
+    with no explanation tying the two together). Checked here, first, before touching the
+    model at all -- cheaper (no wasted LLM/Flash call on a turn that can't possibly resolve)
+    and gives the browser a single, unambiguous signal (`type: "session_expired"`) instead of
+    letting the model's improvisation stand in for a real error.
     """
+    if session.player_id and server.world.character(session.player_id) is None:
+        yield {"type": "session_expired",
+               "text": "This character's thread was lost on the server (the world may have "
+                       "been reset). Your progress up to now is gone from this browser tab -- "
+                       'hit "Start again" below to begin a new character.'}
+        return
+
     # SERVER-KNOWN STATE, injected fresh every turn — never model-inferred. Observed live
     # without this: a fresh session asked "I want to go to the next room" got a fully
     # HALLUCINATED room ("a sturdy wooden door to the north...") for a character that did
