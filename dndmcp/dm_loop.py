@@ -911,6 +911,22 @@ def _room_has_live_monster(session: DMSession) -> bool:
     return any(c.get("type") == "monster" and c.get("hp", 0) > 0 for c in room.contents)
 
 
+# Same failure mode as the spectral-wolf incident above, but for movement instead of combat:
+# confirmed live (2026-07-03) a bot character narrated dozens of turns of travel ("I walk into
+# the tunnel", "I enter the cavern") without ever calling move -- location_id never changed,
+# so _generate_and_link (the ONLY thing that creates a new room) never fired. world-wide
+# room.generated stayed flat the whole session despite ongoing chat/bot activity. Force
+# tool_choice to move the same way force_attack does, gated on the room actually having
+# somewhere to go (an empty exit_map means forcing move would just guarantee a malformed call).
+_MOVEMENT_VERBS = re.compile(
+    r'\b(walk|move|go|enter|head|travel|climb|crawl|step|proceed|continue|exit|leave|approach)\b',
+    re.IGNORECASE)
+
+
+def _room_has_exits(session: DMSession) -> bool:
+    return bool(session.exit_map)
+
+
 def _needs_theme_question(session: DMSession) -> bool:
     """True exactly when start_adventure's `theme` argument will actually be USED — i.e. this
     turn is going to CREATE a brand-new world, not join one that already exists.
@@ -1102,10 +1118,15 @@ async def handle_message(session: DMSession, user_text: str) -> AsyncIterator[di
             # spectral-wolf incident narrated the same "attack" failing/passing through for
             # three turns straight with zero dice, zero HP change, an unresolvable loop).
             force_attack = bool(_COMBAT_VERBS.search(user_text)) and _room_has_live_monster(session)
+            # Combat wins if a turn somehow matches both (e.g. "charge into the tunnel and
+            # attack") -- resolving the fight takes priority over relocating mid-combat.
+            force_move = (bool(_MOVEMENT_VERBS.search(user_text)) and _room_has_exits(session)
+                         and not force_attack)
+            force_tool = "attack" if force_attack else ("move" if force_move else None)
             logger.info("dm_loop.handle_message: zero tool calls on first attempt "
                        "(player_id=%s, action=%r) -- retrying with %s",
                        session.player_id, user_text[:100],
-                       "forced attack" if force_attack else "nudge")
+                       f"forced {force_tool}" if force_tool else "nudge")
             nudge = {"role": "system", "content": (
                 "[SERVER STATE] You just replied with no tool call at all. If the player's "
                 "message described an action — moving, attacking, searching, picking "
@@ -1113,8 +1134,7 @@ async def handle_message(session: DMSession, user_text: str) -> AsyncIterator[di
                 "instead of narrating in prose. If it was genuinely just a question or chat "
                 "with no action to resolve, you may reply in plain text.")}
             try:
-                message = await _chat(call_messages + [nudge], tools,
-                                      force_tool="attack" if force_attack else None)
+                message = await _chat(call_messages + [nudge], tools, force_tool=force_tool)
             except Exception:
                 logger.exception("dm_loop.handle_message: no-tool-call retry failed "
                                 "(player_id=%s)", session.player_id)
