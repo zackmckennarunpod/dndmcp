@@ -65,11 +65,12 @@ async def _flash_status_poller() -> None:
                 _flash_status[key] = {"state": "off"}
                 continue
             try:
-                status = await mod.worker_status()
-                _flash_status[key] = {"state": "warm" if status.get("workers") else "cold",
-                                      "workers": status.get("workers")}
+                # mod.worker_status() already returns a resolved state ("active"/"starting"/
+                # "cold"/"error") -- see flash_llm._cached_health's docstring for why this is
+                # NOT just a worker count (presence alone doesn't mean an endpoint can serve).
+                _flash_status[key] = await mod.worker_status()
             except Exception as exc:
-                _flash_status[key] = {"state": "unknown", "error": str(exc)}
+                _flash_status[key] = {"state": "error", "error": str(exc)}
         await asyncio.sleep(8)
 
 
@@ -276,6 +277,7 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
    font-size:12px;line-height:1.5}
  #stream div.new{animation:flash .8s ease-out}
  #stream .who{color:var(--warm)}
+ #stream .evts{color:var(--muted);margin-right:5px;font-size:11px;opacity:.8}
  @keyframes flash{from{background:#4fd8c433}to{background:transparent}}
  #streamDot{width:8px;height:8px;border-radius:50%;background:var(--ghost);display:inline-block;
    margin-right:6px;box-shadow:0 0 6px var(--ghost)}
@@ -602,7 +604,7 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
  </div>
  <aside style="display:flex;flex-direction:column;gap:16px">
   <details open class=panel>
-   <summary>Character</summary>
+   <summary id=charSummary>Character</summary>
    <div class=body style="margin-top:6px">
     <div class=ch id=char>—</div>
     <button id=exportStoryBtn style="margin-top:10px;width:100%">📜 Export story</button>
@@ -979,6 +981,25 @@ document.getElementById('shareBtn').addEventListener('click', async () => {
 });
 function esc(s){ return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function escRegex(s){ return s.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&'); }
+// Relative "Xs/m/h/d ago" for stream events -- ev.ts is already a bare epoch-seconds float
+// from the log table (see /stream/events), just never rendered. Coarse buckets on purpose:
+// this is "how stale is this" at a glance, not a precision clock.
+function relTime(ts){
+  const s = Math.max(0, Date.now()/1000 - ts);
+  if (s < 5) return 'just now';
+  if (s < 60) return Math.floor(s)+'s ago';
+  if (s < 3600) return Math.floor(s/60)+'m ago';
+  if (s < 86400) return Math.floor(s/3600)+'h ago';
+  return Math.floor(s/86400)+'d ago';
+}
+// Rows are static once prepended (see connectStream's world-event handler) -- re-stamp every
+// visible one on an interval decoupled from tick()'s 1.5s poll, since a relative label only
+// needs to move in whole seconds/minutes, not that often.
+setInterval(() => {
+  document.querySelectorAll('#stream .evts[data-ts]').forEach(el => {
+    el.textContent = relTime(parseFloat(el.dataset.ts));
+  });
+}, 15000);
 
 // Highlight known entity names (rooms/actors/items) wherever they show up in free-text log
 // lines, so "Corrin Vale moved south into Dreadful Descent" reads at a glance instead of as
@@ -1494,12 +1515,14 @@ async function tick(){
   // /state's own comment on why). Falls back to the viewer's own rooms on any fetch hiccup
   // rather than blanking the map.
   let mapRooms = s.rooms || [];
+  s.spectated_character = null;
   if (spectateId) {
     try {
       const specUrl = '/state?campaign='+encodeURIComponent(campaignId)+'&spectate='+encodeURIComponent(spectateId);
       const specState = await (await fetch(specUrl)).json();
       mapRooms = specState.rooms || mapRooms;
-    } catch(e) { /* keep mapRooms = s.rooms */ }
+      s.spectated_character = specState.spectated_character || null;
+    } catch(e) { /* keep mapRooms = s.rooms, spectated_character stays null */ }
   }
   renderGraph(mapRooms, s.players||[], s.you||null);
   renderSpectateBar(s.players||[], mapRooms);
@@ -1526,7 +1549,13 @@ async function tick(){
         return `<div style="margin-bottom:8px"><b>📜 ${esc(q.title)}</b><br>${qsteps}</div>`;
       }).join('')
     : '<span class=empty>no active quests</span>';
-  const ch = s.character;
+  // While spectating, the Character panel shows the WATCHED character's own sheet instead of
+  // the viewer's — otherwise it kept showing "your" stats while the map/narration below it
+  // were all about someone else, which read as broken rather than "you're still you"
+  // (confirmed live 2026-07-03). Falls back to the viewer's own character the instant
+  // spectating stops, same as everywhere else spectateId gates behavior.
+  const ch = spectateId ? s.spectated_character : s.character;
+  document.getElementById('charSummary').textContent = spectateId ? `👀 Watching: ${ch ? ch.name : '…'}` : 'Character';
   const invHtml = (ch?.inventory||[]).map(it => {
     const name = typeof it === 'string' ? it : it.name;
     const desc = typeof it === 'string' ? '' : (it.description||'');
@@ -1547,7 +1576,12 @@ async function tick(){
   // Worker warm/cold badge -- purely informational (see _flash_status_poller server-side);
   // 'off' means that endpoint's feature flag is disabled, not that it's cold.
   const fstat = s.flash_status || {};
-  const badgeIcon = st => st==='warm' ? '🟢' : st==='cold' ? '🟡' : st==='off' ? '⚪' : '❔';
+  // 'active' = usable capacity RIGHT NOW, not just "a worker exists" (see
+  // flash_llm._cached_health -- throttled/unhealthy workers don't count as active). 'cold'
+  // and 'starting' both just mean "not ready yet, wait a beat" from a glance, so they share
+  // one color; 'error' is a real problem (workers present but every one unusable, or the
+  // /health call itself failed) and gets its own.
+  const badgeIcon = st => st==='active' ? '🟢' : st==='error' ? '🔴' : st==='off' ? '⚪' : '🟡';
   const badgePart = (label, info) => `${badgeIcon((info||{}).state)} ${label}`;
   document.getElementById('flashStatus').textContent =
     [badgePart('Art', fstat.art), badgePart('LLM', fstat.llm)].join('  ');
@@ -1598,8 +1632,9 @@ function connectStream(){
     const empty = streamEl.querySelector('.empty');
     if (empty) empty.remove();
     const div = document.createElement('div');
+    const when = ev.ts ? `<span class=evts data-ts="${ev.ts}">${relTime(ev.ts)}</span> ` : '';
     const who = ev.player_id ? `<span class=who>${esc(ev.player_id.slice(0,6))}</span> ` : '';
-    div.innerHTML = `${who}${highlightKnown(esc(ev.text))}`;
+    div.innerHTML = `${when}${who}${highlightKnown(esc(ev.text))}`;
     streamEl.prepend(div);
     while (streamEl.children.length > 50) streamEl.lastChild.remove();
     // backfilled rows arrive all at once on connect (both modes backfill now) — only flash
@@ -2434,7 +2469,7 @@ async def chat_reset(request: Request):
     return JSONResponse({"ok": True})
 
 
-_EMPTY_STATE = {"rooms": [], "players": [], "character": None, "you": None, "current_room": None, "log": [], "quests": [], "flash_calls": 0, "campaign": None, "server_version": SERVER_VERSION}
+_EMPTY_STATE = {"rooms": [], "players": [], "character": None, "you": None, "current_room": None, "log": [], "spectated_character": None, "quests": [], "flash_calls": 0, "campaign": None, "server_version": SERVER_VERSION}
 
 
 @app.get("/state")
@@ -2506,21 +2541,36 @@ def state(request: Request) -> JSONResponse:
         # Per-VIEWING-PLAYER discovery, not the global `visited` flag — a room another player
         # generated/visited isn't "known" to you until you've actually been there yourself
         # (character--discovered-->room edge, same mechanism server.py's _adjacent_rooms uses
-        # to gate spoilers). Spectating with no ?player= has no "you" to gate against, so fall
-        # back to the global flag (anyone-has-visited) rather than blanking the whole map.
+        # to gate spoilers). This gating is for the viewer's OWN character (?player=) only.
+        # Spectating (?spectate=, the "Active now" strip) deliberately does NOT restrict to
+        # just the watched character's own path — confirmed live (2026-07-03): that made most
+        # of an already-explored shared world permanently unclickable while watching someone
+        # whose path hadn't personally crossed it yet. Spectating falls back to the same global
+        # flag (anyone-has-ever-visited) an anonymous no-?player= visitor already gets — rooms
+        # nobody has ever reached still show '???', but "who specifically" no longer gates it.
         discovered_ids: set[str] | None = None
-        discover_for = player_id
-        if spectate_prefix:
-            row = c.execute(
-                "SELECT player_id FROM character WHERE campaign_id=? AND player_id LIKE ?",
-                (campaign_id, spectate_prefix + "%"),
-            ).fetchone()
-            discover_for = row["player_id"] if row else None
-        if discover_for:
+        if player_id and not spectate_prefix:
             discovered_ids = {row["to_id"] for row in c.execute(
                 "SELECT to_id FROM edges WHERE from_type='character' AND from_id=?"
-                " AND to_type='room' AND edge_type='discovered'", (discover_for,)
+                " AND to_type='room' AND edge_type='discovered'", (player_id,)
             ).fetchall()}
+
+        # Resolve the spectated character's own full row (name/klass/hp/inventory) so the
+        # page's Character panel can show WHO you're watching instead of just leaving the
+        # viewer's own (or no) character sitting there while spectating someone else —
+        # confirmed live (2026-07-03): watching Ethan while the panel still said "Ethan" read
+        # as broken, not as "you're still you." Same player_id-never-leaves-the-server
+        # treatment as `char` below (popped before the response goes out).
+        spectated_character = None
+        if spectate_prefix:
+            spec_row = c.execute(
+                "SELECT * FROM character WHERE campaign_id=? AND player_id LIKE ?",
+                (campaign_id, spectate_prefix + "%"),
+            ).fetchone()
+            if spec_row:
+                spectated_character = dict(spec_row)
+                spectated_character["inventory"] = json.loads(spectated_character["inventory"] or "[]")
+                spectated_character.pop("player_id", None)
 
         rooms = []
         for r in c.execute("SELECT * FROM rooms WHERE campaign_id=?", (campaign_id,)).fetchall():
@@ -2613,7 +2663,7 @@ def state(request: Request) -> JSONResponse:
         ).fetchone()[0]
         return JSONResponse({"rooms": rooms, "players": players, "character": char,
                              "you": char, "current_room": (dict(cur) if cur else None), "log": log,
-                             "quests": quests,
+                             "spectated_character": spectated_character, "quests": quests,
                              "flash_calls": flash_calls, "campaign": campaign,
                              "flash_status": _flash_status,
                              "server_version": SERVER_VERSION})

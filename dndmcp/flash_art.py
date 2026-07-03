@@ -137,14 +137,15 @@ async def worker_status() -> dict:
 
 async def maybe_warm() -> dict:
     """Self-debouncing warm trigger, safe to call from every page load/interaction: only
-    actually pays for a real warm() generation (real GPU spend) if this endpoint currently
-    has ZERO workers up. See flash_llm.maybe_warm for the full rationale -- same pattern."""
+    actually pays for a real warm() generation (real GPU spend) when nothing's already usable
+    or coming up. See flash_llm.maybe_warm for the full state-based rationale -- same
+    pattern, same shared cache."""
     if not enabled():
         return {"skipped": "disabled"}
     endpoint_id = await ensure()
     status = await flash_llm._cached_health(endpoint_id)  # noqa: SLF001
-    if status.get("workers"):
-        return {"skipped": "already warm", "workers": status["workers"]}
+    if status["state"] in ("active", "starting"):
+        return {"skipped": f"already {status['state']}"}
     return await warm()
 
 

@@ -179,11 +179,22 @@ def _health_sync(endpoint_id: str) -> dict:
 
 
 async def _cached_health(endpoint_id: str) -> dict:
-    """Worker-count check via /health -- no GPU spend (unlike generate/warm), so safe to call
+    """Worker STATE check via /health -- no GPU spend (unlike generate/warm), so safe to call
     on every page load or /state poll. Cached a few seconds so a burst of callers (multiple
     open tabs, both maybe_warm() trigger points firing at once) collapses to one real HTTP
-    call, not one each. Returns {"workers": <total alive/starting count>} or {"workers": None,
-    "error": ...} if the health call itself fails (endpoint doesn't exist yet, network blip)."""
+    call, not one each.
+
+    Returns {"state": "active" | "starting" | "cold" | "error", ...}. Deliberately NOT just a
+    worker count -- a worker existing doesn't mean the endpoint can actually serve a request:
+    /health's "idle"/"ready" overlap (same workers double-counted under both keys, confirmed
+    live: idle=3,ready=3,running=0 was a real 3-worker endpoint, not 6), and workers can be
+    present but "throttled"/"unhealthy" (genuinely unusable despite showing up in the count).
+    "active": at least one worker can serve RIGHT NOW (idle/ready/running), regardless of any
+    throttled/unhealthy ones sitting alongside it. "starting": nothing usable yet, but a
+    worker is initializing (a warm-up is already in flight -- don't trigger another). "cold":
+    zero workers of any kind, next request would eat a from-zero cold start. "error": the
+    health call itself failed, OR workers exist but every single one is throttled/unhealthy
+    (nothing usable, nothing starting either) -- a real problem, not just "cold\""""
     cached = _HEALTH_CACHE.get(endpoint_id)
     now = time.time()
     if cached and now - cached[0] < _HEALTH_TTL_S:
@@ -191,17 +202,21 @@ async def _cached_health(endpoint_id: str) -> dict:
     loop = asyncio.get_running_loop()
     try:
         health = await loop.run_in_executor(None, _health_sync, endpoint_id)
-        workers = health.get("workers", {})
-        # /health's "idle" and "ready" overlap -- an idle worker is ALSO counted under
-        # "ready" (confirmed live: idle=3,ready=3,running=0 for a real 3-worker endpoint,
-        # not 6) -- naively summing all four double-counts. max(idle, ready) collapses that
-        # overlap regardless of which key happens to be the larger one; initializing/running
-        # are genuinely distinct worker states, so those stay additive.
-        total = (max(workers.get("idle", 0), workers.get("ready", 0))
-                + workers.get("initializing", 0) + workers.get("running", 0))
-        status = {"workers": total}
+        w = health.get("workers", {})
+        usable = max(w.get("idle", 0), w.get("ready", 0)) + w.get("running", 0)
+        starting = w.get("initializing", 0)
+        bad = w.get("throttled", 0) + w.get("unhealthy", 0)
+        if usable > 0:
+            state = "active"
+        elif starting > 0:
+            state = "starting"
+        elif bad > 0:
+            state = "error"  # workers exist but none of them can serve -- worse than "cold"
+        else:
+            state = "cold"
+        status = {"state": state, "usable": usable, "starting": starting, "bad": bad}
     except Exception as exc:
-        status = {"workers": None, "error": str(exc)}
+        status = {"state": "error", "error": str(exc)}
     _HEALTH_CACHE[endpoint_id] = (now, status)
     return status
 
@@ -214,15 +229,16 @@ async def worker_status() -> dict:
 
 async def maybe_warm() -> dict:
     """Self-debouncing warm trigger, safe to call from every page load/interaction: only
-    actually pays for a real warm() generation if the endpoint currently has ZERO workers up
-    (a genuine scale-to-zero cold state). If a worker's already idle/starting/running, this
-    is just one cached /health read and returns immediately without spending anything."""
+    actually pays for a real warm() generation when there's nothing already usable or coming
+    up ("cold" or "error" state -- see _cached_health). If a worker's already active, or one's
+    already initializing (a warm-up already in flight), this is just one cached /health read
+    and returns immediately without spending anything."""
     if not ENABLED:
         return {"skipped": "disabled"}
     endpoint_id = await ensure()
     status = await _cached_health(endpoint_id)
-    if status.get("workers"):
-        return {"skipped": "already warm", "workers": status["workers"]}
+    if status["state"] in ("active", "starting"):
+        return {"skipped": f"already {status['state']}"}
     return await warm()
 
 
