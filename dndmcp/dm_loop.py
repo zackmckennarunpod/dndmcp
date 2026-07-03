@@ -683,7 +683,7 @@ TOOL_HANDLERS: dict[str, Callable[..., Any]] = {
 
 
 # --- the OpenAI-compatible chat call ---------------------------------------------------------
-def _chat_sync(messages: list[dict], tools: list[dict]) -> dict:
+def _chat_sync(messages: list[dict], tools: list[dict], *, temperature: float = TEMPERATURE) -> dict:
     """One POST to <base>/chat/completions — urllib in a thread executor, exactly
     flash_llm._chat_sync's proven shape (no new deps: no `openai`/`requests` package), which
     is what makes this loop work against ANY OpenAI-compatible host by just changing
@@ -691,9 +691,13 @@ def _chat_sync(messages: list[dict], tools: list[dict]) -> dict:
     tool_calls verbatim to drive itself, not just the text half flash_llm.generate() returns.
     An empty `tools` list (bot_player.py's plain-text "what does the character do next" call,
     which never needs tool-calling) omits tools/tool_choice entirely rather than sending an
-    empty array — some OpenAI-compatible servers reject tool_choice="auto" with no tools."""
+    empty array — some OpenAI-compatible servers reject tool_choice="auto" with no tools.
+
+    `temperature` is overridable per-call (default TEMPERATURE, the DM's own resolution
+    temperature) so bot_player.py's player-persona decision can run hotter than the DM without
+    touching the DM's own tool-calling reliability — see PLAYER_TEMPERATURE there."""
     body = {"model": DND_DM_MODEL, "messages": messages,
-            "max_tokens": MAX_TOKENS, "temperature": TEMPERATURE}
+            "max_tokens": MAX_TOKENS, "temperature": temperature}
     if tools:
         body["tools"] = tools
         body["tool_choice"] = "auto"
@@ -706,9 +710,9 @@ def _chat_sync(messages: list[dict], tools: list[dict]) -> dict:
     return data["choices"][0]["message"]
 
 
-async def _chat(messages: list[dict], tools: list[dict]) -> dict:
+async def _chat(messages: list[dict], tools: list[dict], *, temperature: float = TEMPERATURE) -> dict:
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, _chat_sync, messages, tools)
+    return await loop.run_in_executor(None, lambda: _chat_sync(messages, tools, temperature=temperature))
 
 
 def _truncate_history(messages: list[dict]) -> list[dict]:

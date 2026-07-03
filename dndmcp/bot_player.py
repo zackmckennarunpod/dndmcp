@@ -51,6 +51,15 @@ TURN_TIMEOUT_S = 240      # generous enough for a cold-started Flash endpoint pl
 MAX_PLAYER_HISTORY = 16   # a plain chat history (no tool_calls to keep paired, unlike
                           # dm_loop's own _truncate_history), so a trailing slice is safe
 
+# Deliberately hotter than dm_loop.TEMPERATURE (0.6): that value is tuned for the DM staying
+# coherent and tool-calling reliably, which this call never does (plain text, no tools — see
+# _decide_action). Confirmed live (2026-07-03): sharing the DM's 0.6 left a small model with no
+# reason to pick anything but the single most-likely next line, and once the obvious plot
+# thread ran dry (a book read, a compartment found, herbs used) it started re-picking an
+# action verbatim from its own recent history instead of inventing a new one — a real stuck
+# loop, not a display bug (see bd remember dndmcp-bot-repetition-loop-2026-07-03).
+PLAYER_TEMPERATURE = 1.0
+
 PLAYER_SYSTEM_PROMPT = """You are playing a character in a live tabletop RPG, entirely on \
 your own — there is no human telling you what to do. Every message you receive is either \
 "begin" (you have no character yet) or the Dungeon Master's narration of what just happened. \
@@ -65,17 +74,30 @@ the narration just named something by name — an item, a switch, a door, a pers
 with THAT specific thing rather than standing back and observing it. Never ask a question, \
 never narrate an outcome yourself, and don't default to repeating "look around" turn after \
 turn — you already know what's here from the last narration; act on it instead of \
-re-examining it. If the DM says you're dead, reply with a one-line wish to start over as a \
-new character in a different invented theme."""
+re-examining it.
+
+Play this character like they have real appetites and impulses, not just a checklist to \
+clear — a little reckless, a little strange, genuinely surprising sometimes. Given a vial of \
+strange herbs, a methodical character applies them to the spell like the book says; a vivid \
+one might just as easily eat one out of curiosity, or refuse to touch them at all. Let mood, \
+whim, and personality drive some choices, not only the "obvious next step."
+
+Never repeat or lightly reword an action you already took — check your own last few lines \
+above before answering, and if the obvious next move is something you've already done, do \
+something genuinely different instead: try a different exit, a different item, pick a fight, \
+start or advance a quest, rest, or abandon the current thread entirely for a new one. If the \
+DM says you're dead, reply with a one-line wish to start over as a new character in a \
+different invented theme."""
 
 
 async def _decide_action(history: list[dict]) -> str:
     """One call to the SAME Flash endpoint dm_loop.py's DM uses, no tools — just a short
     plain-text decision. Reuses dm_loop's own proven request plumbing instead of a second
-    bespoke HTTP client."""
+    bespoke HTTP client. Runs at PLAYER_TEMPERATURE (hotter than the DM's own dm_loop.
+    TEMPERATURE) — see that constant's comment for why."""
     messages = [{"role": "system", "content": PLAYER_SYSTEM_PROMPT}] + history
     try:
-        message = await dm_loop._chat(messages, tools=[])
+        message = await dm_loop._chat(messages, tools=[], temperature=PLAYER_TEMPERATURE)
     except Exception:
         logger.exception("bot_player._decide_action: chat completion failed")
         return "I wait and watch, uncertain what to do next."
