@@ -2923,9 +2923,12 @@ def _evals_enabled() -> bool:
     return admin_flags.enabled("evals_enabled", default=False)
 
 
-async def _run_eval_tracked() -> None:
+_EVAL_CONFIG_SLOTS = 4  # how many editable rows the picker form renders
+
+
+async def _run_eval_tracked(configs: list[evals.ModelConfig]) -> None:
     try:
-        await evals.run_eval(_EVAL_CONFIGS)
+        await evals.run_eval(configs)
     except Exception:
         logger.exception("web._run_eval_tracked: eval run failed")
     finally:
@@ -2936,9 +2939,27 @@ async def _run_eval_tracked() -> None:
 async def evals_run(request: Request) -> Response:
     if not _evals_enabled():
         return JSONResponse({"error": "evals are currently disabled"}, status_code=503)
+    # Config picker (evals_page renders _EVAL_CONFIG_SLOTS rows, pre-filled with
+    # _EVAL_CONFIGS by default): any row where label/endpoint/model are ALL filled in becomes
+    # a ModelConfig to compare -- lets a run target a different/new endpoint entirely without
+    # a code change, not just the two hardcoded defaults. Falls back to _EVAL_CONFIGS only if
+    # the form is missing entirely (e.g. a bare POST with no body).
+    try:
+        form = await request.form()
+    except Exception:
+        form = {}
+    configs = []
+    for i in range(_EVAL_CONFIG_SLOTS):
+        label = str(form.get(f"label_{i}", "")).strip()
+        endpoint_id = str(form.get(f"endpoint_{i}", "")).strip()
+        model = str(form.get(f"model_{i}", "")).strip()
+        if label and endpoint_id and model:
+            configs.append(evals.ModelConfig(label, endpoint_id, model))
+    if not configs:
+        configs = _EVAL_CONFIGS
     if not _eval_run_state["running"]:
         _eval_run_state["running"] = True
-        _track(asyncio.create_task(_run_eval_tracked()))
+        _track(asyncio.create_task(_run_eval_tracked(configs)))
     return Response(status_code=303, headers={"Location": "/evals"})
 
 
@@ -3001,6 +3022,39 @@ def evals_page(request: Request) -> str:
     banner = '<div class=banner>⏳ Eval run in progress — reload this page in a bit.</div>' if running else ""
     last_run_note = (f'last run: {datetime.datetime.fromtimestamp(run["finished_at"]).strftime("%Y-%m-%d %H:%M:%S")}'
                      if run and run.get("finished_at") else "no run yet")
+
+    # Config picker: _EVAL_CONFIG_SLOTS editable rows, the first len(_EVAL_CONFIGS) pre-filled
+    # with the current defaults so "just hit run" still reproduces today's comparison -- the
+    # rest start blank (a row only becomes a ModelConfig server-side if ALL three fields are
+    # filled in, see evals_run). Lets a run target any endpoint/model pair, not just the two
+    # hardcoded defaults, without a code change.
+    if can_run:
+        defaults = _EVAL_CONFIGS
+        picker_rows = ""
+        for i in range(_EVAL_CONFIG_SLOTS):
+            d = defaults[i] if i < len(defaults) else None
+            picker_rows += (
+                f'<div class=picker-row>'
+                f'<input class=label name=label_{i} placeholder="label" value="{esc(d.label) if d else ""}">'
+                f'<input class=endpoint name=endpoint_{i} placeholder="endpoint id" value="{esc(d.endpoint_id) if d else ""}">'
+                f'<input class=model name=model_{i} placeholder="model name" value="{esc(d.model) if d else ""}">'
+                f'</div>')
+        picker_html = (
+            f'<form method=post action=/evals/run class=picker>'
+            f'<div class=meta style="margin-bottom:8px">Models to compare (fill all three fields in a row to include it):</div>'
+            f'{picker_rows}'
+            f'<button {"disabled" if running else ""} style="margin-top:6px">'
+            f'{"running…" if running else "▶ run new eval"}</button>'
+            f'</form>')
+    else:
+        picker_html = '<div class=picker>evals are currently disabled</div>'
+
+    recent_rows = "".join(
+        f'<div class=row><a href="/evals?run={esc(r["run_id"])}">'
+        f'{esc(datetime.datetime.fromtimestamp(r["finished_at"]).strftime("%Y-%m-%d %H:%M") if r.get("finished_at") else "?")}</a>'
+        f' — {esc(", ".join(r["configs"]))}</div>'
+        for r in evals.list_runs()[:5]
+    )
     return f"""<!doctype html><html><head><meta charset=utf-8><title>Model evals</title>
 <link rel=icon href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🧪</text></svg>">
 <style>
@@ -3030,17 +3084,26 @@ td.err{{color:var(--bad)}}
 .col p{{margin:6px 0;font-size:12px;line-height:1.5}}
 .raw{{white-space:pre-wrap;font-size:11px;color:var(--muted)}}
 .empty{{color:var(--muted);padding:20px}}
+.picker{{margin:14px 20px;padding:12px 14px;background:var(--panel);border:1px solid var(--border);border-radius:8px}}
+.picker-row{{display:flex;gap:8px;margin-bottom:6px}}
+.picker input{{background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:5px;
+  padding:5px 8px;font:11.5px 'IBM Plex Mono',monospace}}
+.picker input.label{{flex:1.2}}
+.picker input.endpoint{{flex:1}}
+.picker input.model{{flex:1.5}}
+.recent{{margin:14px 20px;font-size:12px}}
+.recent a{{color:var(--ghost-bright)}}
+.recent .row{{padding:5px 0;border-bottom:1px solid var(--border-soft)}}
 </style></head><body>
 <header><h1>🧪 Model evals</h1><span class=count>{esc(last_run_note)}</span>
-<a href=/evals/history style="color:var(--ghost-bright);text-decoration:underline dotted">📜 history</a>
-{f'<form method=post action=/evals/run style="margin-left:auto"><button {"disabled" if running else ""}>'
-  f'{"running…" if running else "▶ run new eval"}</button></form>' if can_run
-  else '<span class=count style="margin-left:auto">evals are currently disabled</span>'}
+<a href=/evals/history style="color:var(--ghost-bright);text-decoration:underline dotted">📜 full history</a>
 </header>
 {banner}
 <main>
+{picker_html}
+<div class=recent><b style="color:var(--warm-bright)">Recent runs</b> {recent_rows or '<span class=empty>none yet</span>'}</div>
 <h2>Tool-calling reliability ({len(configs)} models × {len(run["scenarios"]) if run else 0} scenarios)</h2>
-{f'<table><tr><td></td>{"".join(f"<td>{esc(c)}</td>" for c in configs)}</tr>{scenario_rows}</table>' if run else '<div class=empty>No run yet — hit "run new eval" above.</div>'}
+{f'<table><tr><td></td>{"".join(f"<td>{esc(c)}</td>" for c in configs)}</tr>{scenario_rows}</table>' if run else '<div class=empty>No run yet — configure models above and hit "run new eval".</div>'}
 <h2>Room-generation coherence (not auto-graded — read and judge)</h2>
 {room_gen_blocks or '<div class=empty>No run yet.</div>'}
 </main>
