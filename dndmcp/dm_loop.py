@@ -811,7 +811,7 @@ async def _resolve_endpoint() -> tuple[str, str]:
 
 # --- the OpenAI-compatible chat call ---------------------------------------------------------
 def _chat_sync(base_url: str, model: str, messages: list[dict], tools: list[dict], *,
-              temperature: float = TEMPERATURE) -> dict:
+              temperature: float = TEMPERATURE, force_tool: str | None = None) -> dict:
     """One POST to <base>/chat/completions — urllib in a thread executor, exactly
     flash_llm._chat_sync's proven shape (no new deps: no `openai`/`requests` package), which
     is what makes this loop work against ANY OpenAI-compatible host by just changing
@@ -823,12 +823,21 @@ def _chat_sync(base_url: str, model: str, messages: list[dict], tools: list[dict
 
     `temperature` is overridable per-call (default TEMPERATURE, the DM's own resolution
     temperature) so bot_player.py's player-persona decision can run hotter than the DM without
-    touching the DM's own tool-calling reliability — see PLAYER_TEMPERATURE there."""
+    touching the DM's own tool-calling reliability — see PLAYER_TEMPERATURE there.
+
+    `force_tool`: name of a tool to REQUIRE via tool_choice (not just suggest via "auto") --
+    a structural guarantee, not an instruction the model can ignore. Confirmed live
+    (2026-07-04): a plain-text retry nudge still let the model just narrate past an
+    unresolvable "attack" again (the spectral-wolf incident) -- only forcing tool_choice to a
+    specific function makes the API itself require that call. Only safe for tools with no
+    REQUIRED arguments (attack takes none) -- forcing a tool with required args guarantees the
+    call happens but not that its arguments are valid."""
     body = {"model": model, "messages": messages,
             "max_tokens": MAX_TOKENS, "temperature": temperature}
     if tools:
         body["tools"] = tools
-        body["tool_choice"] = "auto"
+        body["tool_choice"] = ({"type": "function", "function": {"name": force_tool}}
+                               if force_tool else "auto")
     body = json.dumps(body).encode()
     url = f"{base_url.rstrip('/')}/chat/completions"
     req = urllib.request.Request(url, data=body, method="POST", headers={
@@ -838,11 +847,13 @@ def _chat_sync(base_url: str, model: str, messages: list[dict], tools: list[dict
     return data["choices"][0]["message"]
 
 
-async def _chat(messages: list[dict], tools: list[dict], *, temperature: float = TEMPERATURE) -> dict:
+async def _chat(messages: list[dict], tools: list[dict], *, temperature: float = TEMPERATURE,
+                force_tool: str | None = None) -> dict:
     base_url, model = await _resolve_endpoint()
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
-        None, lambda: _chat_sync(base_url, model, messages, tools, temperature=temperature))
+        None, lambda: _chat_sync(base_url, model, messages, tools, temperature=temperature,
+                                 force_tool=force_tool))
 
 
 def _truncate_history(messages: list[dict]) -> list[dict]:
@@ -875,6 +886,29 @@ def _truncate_history(messages: list[dict]) -> list[dict]:
         if budget <= 0:
             break
     return system + kept
+
+
+# Confirmed live (2026-07-04, the "spectral wolf" incident): a plain nudge wasn't enough to
+# stop the model from repeatedly narrating an attack-flavored action as failing/passing
+# through a monster without ever calling attack -- no dice, no HP change, an unresolvable
+# combat loop the character could never escape. This is the narrow, high-confidence case
+# where forcing tool_choice (see _chat_sync's force_tool) is worth the structural rigidity:
+# an obvious combat verb, aimed at a room that genuinely has a live monster in it right now.
+_COMBAT_VERBS = re.compile(
+    r'\b(attack|swing|strike|stab|slash|hit|punch|kick|charge|shoot|fire|bash|smash)\b',
+    re.IGNORECASE)
+
+
+def _room_has_live_monster(session: DMSession) -> bool:
+    if not session.player_id:
+        return False
+    ch = server.world.character(session.player_id)
+    if not ch:
+        return False
+    room = server.world.room(ch.location_id)
+    if not room:
+        return False
+    return any(c.get("type") == "monster" and c.get("hp", 0) > 0 for c in room.contents)
 
 
 def _needs_theme_question(session: DMSession) -> bool:
@@ -1040,9 +1074,16 @@ async def handle_message(session: DMSession, user_text: str) -> AsyncIterator[di
         # pollute history the model reads on later turns.
         if not tool_calls and not in_intake and tool_call_count == 0 and not no_tool_retry_used:
             no_tool_retry_used = True
+            # High-confidence case: an obvious combat verb aimed at a room that genuinely has
+            # a live monster right now. Force tool_choice instead of just nudging -- see
+            # _chat_sync's force_tool docstring for why a plain nudge wasn't enough (the
+            # spectral-wolf incident narrated the same "attack" failing/passing through for
+            # three turns straight with zero dice, zero HP change, an unresolvable loop).
+            force_attack = bool(_COMBAT_VERBS.search(user_text)) and _room_has_live_monster(session)
             logger.info("dm_loop.handle_message: zero tool calls on first attempt "
-                       "(player_id=%s, action=%r) -- retrying with nudge",
-                       session.player_id, user_text[:100])
+                       "(player_id=%s, action=%r) -- retrying with %s",
+                       session.player_id, user_text[:100],
+                       "forced attack" if force_attack else "nudge")
             nudge = {"role": "system", "content": (
                 "[SERVER STATE] You just replied with no tool call at all. If the player's "
                 "message described an action — moving, attacking, searching, picking "
@@ -1050,7 +1091,8 @@ async def handle_message(session: DMSession, user_text: str) -> AsyncIterator[di
                 "instead of narrating in prose. If it was genuinely just a question or chat "
                 "with no action to resolve, you may reply in plain text.")}
             try:
-                message = await _chat(call_messages + [nudge], tools)
+                message = await _chat(call_messages + [nudge], tools,
+                                      force_tool="attack" if force_attack else None)
             except Exception:
                 logger.exception("dm_loop.handle_message: no-tool-call retry failed "
                                 "(player_id=%s)", session.player_id)
