@@ -59,12 +59,91 @@ logger = logging.getLogger(__name__)
 DND_DM_BASE_URL = os.environ.get(
     "DND_DM_BASE_URL", "https://api.runpod.ai/v2/q1ruzcnbog3oz1/openai/v1")
 DND_DM_MODEL = os.environ.get("DND_DM_MODEL", "Qwen/Qwen2.5-7B-Instruct")
+DND_DM_ENDPOINT_NAME = os.environ.get("DND_DM_ENDPOINT", "dnd-dm-vllm")
+DND_DM_IMAGE = "runpod/worker-v1-vllm:v2.22.4"
 
 MAX_TOOL_CALLS_PER_TURN = 6   # hard cap — a stuck/looping model must not hang a player's turn
 MAX_HISTORY_MESSAGES = 24     # excluding the system message; see _truncate_history
 MAX_TOKENS = 350
 TEMPERATURE = 0.6
 _CHAT_TIMEOUT_S = 120         # cold start on a scaled-to-zero Flash endpoint can take ~90s
+
+# Self-heal via the Flash SDK, same ensure()-by-name pattern already proven in flash_llm.py/
+# flash_art.py — this endpoint already exists (created once, previously only ever referenced
+# by the hardcoded id baked into DND_DM_BASE_URL above), so in NORMAL operation this only ever
+# hits the resolve-by-name branch below and returns instantly. The construct+deploy branch is
+# a pure safety net: if this endpoint is ever deleted, the next _chat call recreates it with
+# this exact config instead of the DM silently staying broken until someone notices and
+# redeploys by hand. DND_DM_BASE_URL stays as an explicit override escape hatch (e.g. pointing
+# at a different host entirely for local testing) — set it and this whole resolution path
+# never runs.
+_DM_ENDPOINT_STATE: dict[str, str | None] = {"endpoint_id": None}
+_DM_ENDPOINT_LOCK = asyncio.Lock()
+
+
+async def _resolve_dm_endpoint_by_name(client) -> str | None:
+    r = await client._execute_graphql("query { myself { endpoints { id name } } }", {})  # noqa: SLF001
+    for e in r["myself"]["endpoints"]:
+        if e["name"] == DND_DM_ENDPOINT_NAME:
+            return e["id"]
+    return None
+
+
+async def ensure_dm_endpoint() -> str:
+    """Resolve (or, only if it's ever gone, re-mint) the DM chat endpoint by name via the
+    Flash SDK. Returns its id — callers build the OpenAI-compatible base URL from that,
+    same shape DND_DM_BASE_URL's hardcoded default already used."""
+    if _DM_ENDPOINT_STATE["endpoint_id"]:
+        return _DM_ENDPOINT_STATE["endpoint_id"]
+    async with _DM_ENDPOINT_LOCK:
+        if _DM_ENDPOINT_STATE["endpoint_id"]:
+            return _DM_ENDPOINT_STATE["endpoint_id"]
+        os.environ.setdefault("RUNPOD_API_BASE_URL", "https://api.runpod.io")
+        os.environ.setdefault("RUNPOD_ENDPOINT_BASE_URL", "https://api.runpod.ai/v2")
+        _api_key()
+        from runpod_flash.core.api import RunpodGraphQLClient
+
+        client = RunpodGraphQLClient()
+        try:
+            existing_id = await _resolve_dm_endpoint_by_name(client)
+        finally:
+            await client.close()
+        if existing_id:
+            logger.info("dm_loop.ensure_dm_endpoint: %s already deployed -> %s (skipped re-trigger)",
+                       DND_DM_ENDPOINT_NAME, existing_id)
+            _DM_ENDPOINT_STATE["endpoint_id"] = existing_id
+            return existing_id
+
+        from runpod_flash import CudaVersion, Endpoint, GpuGroup, PodTemplate
+
+        # Mirrors the live endpoint's actual deployed config exactly (verified via
+        # mcp__runpod__list-endpoints 2026-07-03) so a self-heal re-deploy behaves identically
+        # to what's there today, not a differently-configured replacement.
+        ep = Endpoint(
+            name=DND_DM_ENDPOINT_NAME, image=DND_DM_IMAGE, gpu=GpuGroup.ADA_24,
+            workers=(1, 3), idle_timeout=300, template=PodTemplate(containerDiskInGb=50),
+            min_cuda_version=CudaVersion.V13_0,
+            env={"MODEL_NAME": DND_DM_MODEL, "MAX_MODEL_LEN": "16384", "GPU_MEMORY_UTILIZATION": "0.90",
+                 "ENABLE_AUTO_TOOL_CHOICE": "true", "TOOL_CALL_PARSER": "hermes"},
+        )
+        try:
+            await asyncio.wait_for(ep.run({"input": {}}), timeout=10)
+        except Exception:
+            pass  # expected -- this throwaway call only exists to trigger first deploy
+
+        client = RunpodGraphQLClient()
+        try:
+            for _ in range(10):
+                resolved_id = await _resolve_dm_endpoint_by_name(client)
+                if resolved_id:
+                    logger.info("dm_loop.ensure_dm_endpoint: resolved endpoint %s -> %s",
+                               DND_DM_ENDPOINT_NAME, resolved_id)
+                    _DM_ENDPOINT_STATE["endpoint_id"] = resolved_id
+                    return resolved_id
+                await asyncio.sleep(2)
+            raise RuntimeError(f"{DND_DM_ENDPOINT_NAME!r} not found after deploy")
+        finally:
+            await client.close()
 
 
 def _api_key() -> str:
@@ -682,12 +761,33 @@ TOOL_HANDLERS: dict[str, Callable[..., Any]] = {
 }
 
 
+_DND_DM_BASE_URL_OVERRIDE = os.environ.get("DND_DM_BASE_URL")  # None unless explicitly set
+
+
+async def _resolve_base_url() -> str:
+    """Prefer the Flash-resolved endpoint id (self-heals if this endpoint is ever recreated
+    under the same name with a different id) — DND_DM_BASE_URL is both an explicit override
+    escape hatch when actually SET (e.g. pointing at a different host for local testing) and
+    the fallback if Flash resolution itself fails for any reason. A GraphQL hiccup must never
+    take the whole DM down over what used to be a plain hardcoded URL."""
+    if _DND_DM_BASE_URL_OVERRIDE:
+        return _DND_DM_BASE_URL_OVERRIDE
+    try:
+        endpoint_id = await ensure_dm_endpoint()
+        return f"https://api.runpod.ai/v2/{endpoint_id}/openai/v1"
+    except Exception:
+        logger.exception("dm_loop._resolve_base_url: Flash resolution failed, "
+                        "falling back to hardcoded default")
+        return DND_DM_BASE_URL
+
+
 # --- the OpenAI-compatible chat call ---------------------------------------------------------
-def _chat_sync(messages: list[dict], tools: list[dict], *, temperature: float = TEMPERATURE) -> dict:
+def _chat_sync(base_url: str, messages: list[dict], tools: list[dict], *,
+              temperature: float = TEMPERATURE) -> dict:
     """One POST to <base>/chat/completions — urllib in a thread executor, exactly
     flash_llm._chat_sync's proven shape (no new deps: no `openai`/`requests` package), which
     is what makes this loop work against ANY OpenAI-compatible host by just changing
-    DND_DM_BASE_URL. Returns the raw `message` dict (content + tool_calls) — the loop needs
+    base_url. Returns the raw `message` dict (content + tool_calls) — the loop needs
     tool_calls verbatim to drive itself, not just the text half flash_llm.generate() returns.
     An empty `tools` list (bot_player.py's plain-text "what does the character do next" call,
     which never needs tool-calling) omits tools/tool_choice entirely rather than sending an
@@ -702,7 +802,7 @@ def _chat_sync(messages: list[dict], tools: list[dict], *, temperature: float = 
         body["tools"] = tools
         body["tool_choice"] = "auto"
     body = json.dumps(body).encode()
-    url = f"{DND_DM_BASE_URL.rstrip('/')}/chat/completions"
+    url = f"{base_url.rstrip('/')}/chat/completions"
     req = urllib.request.Request(url, data=body, method="POST", headers={
         "Authorization": f"Bearer {_api_key()}", "Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=_CHAT_TIMEOUT_S) as resp:  # cold start ~90s worst case
@@ -711,8 +811,10 @@ def _chat_sync(messages: list[dict], tools: list[dict], *, temperature: float = 
 
 
 async def _chat(messages: list[dict], tools: list[dict], *, temperature: float = TEMPERATURE) -> dict:
+    base_url = await _resolve_base_url()
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, lambda: _chat_sync(messages, tools, temperature=temperature))
+    return await loop.run_in_executor(
+        None, lambda: _chat_sync(base_url, messages, tools, temperature=temperature))
 
 
 def _truncate_history(messages: list[dict]) -> list[dict]:
