@@ -196,6 +196,9 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
   --ghost:#4fd8c4; --ghost-bright:#8ff0e0; /* current room / "you" */
   --visited:#8072e0; --unvisited:#1c1630; /* explored vs fog-of-war */
   --link:#3c3160;
+  --danger:#c1445f; /* monster pips only -- muted wine-red, not a pure alarm color, so it
+                        still reads as part of this violet-black world rather than a generic
+                        UI-kit error red. */
 }
  body{margin:0;background:var(--bg);color:var(--text);font:13px 'IBM Plex Mono',ui-monospace,Menlo,monospace}
  header{padding:12px 18px;border-bottom:1px solid var(--border);display:flex;gap:12px;align-items:baseline;
@@ -223,15 +226,58 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
     sidebar, 560 started feeling cramped/cut-off for how much is usually happening at once. */
  #map{width:100%;height:640px;overflow:hidden;position:relative;
    background:radial-gradient(ellipse at 50% 40%,#1a1330 0%,var(--panel) 70%)}
+ /* max-width matters more now than it used to (requirement 7's richer multi-line content,
+    not just a bare room name): an absolutely-positioned auto-width box near the right/bottom
+    edge of #map otherwise gets squeezed by the browser's own shrink-to-fit sizing into an
+    unreadably narrow, tall sliver -- confirmed live. Fixed width + line-height keeps it
+    readable regardless of where in the map it opens; moveTooltip() (JS) flips which side of
+    the cursor it renders on so it also never runs past #map's own edge. */
  #nodeTooltip{position:absolute;pointer-events:none;background:#1c1433;border:1px solid var(--link);
-   border-radius:6px;padding:4px 9px;font-size:12px;color:var(--text);display:none;z-index:10;
-   box-shadow:0 4px 16px rgba(0,0,0,.5)}
+   border-radius:6px;padding:5px 9px;font-size:12px;line-height:1.5;color:var(--text);
+   display:none;z-index:10;max-width:210px;box-shadow:0 4px 16px rgba(0,0,0,.5)}
  /* Same "custom div, not a native tooltip" reasoning as #nodeTooltip (native title/SVG-title
     tooltips are slow/inconsistent across browsers) — position:fixed so it works anywhere on
     the page, not just inside #map's own coordinate space. */
  #itemTooltip{position:fixed;pointer-events:none;background:#1c1433;border:1px solid var(--link);
    border-radius:6px;padding:6px 10px;font-size:12px;color:var(--text);display:none;z-index:50;
    box-shadow:0 4px 16px rgba(0,0,0,.5);max-width:240px}
+ /* Graph enrichment (art medallions / contents pips / player ghosts / LOD) -- everything
+    here only changes how a node is DRAWN, never the force-layout model itself (see
+    renderGraph's own comments). .full-detail is toggled per-node by applyLOD() -- either the
+    zoom level cleared the LOD threshold, or the node is "always full" (your own room / the
+    selected room). Below it, art/pips/ghost-name-labels fade to keep a zoomed-out view from
+    turning into soup; the plain colored circle + ghost dots (still fully opaque) are enough
+    to orient by. */
+ .node .art,.node .pips,.node .ghostLabel,.node .label{transition:opacity .2s}
+ .node:not(.full-detail) .art{opacity:0}
+ .node:not(.full-detail) .pips{opacity:0;pointer-events:none}
+ .node:not(.full-detail) .ghostLabel{opacity:0}
+ /* Room-name labels (requirement 5): only "your room" / the selected node ever carry
+    .full-detail regardless of zoom (see applyLOD) -- every other node's label (a real name
+    for discovered rooms, "???" for undiscovered ones) fades with everything else below the
+    LOD threshold, leaving just the plain dots + ghost dots to orient by. */
+ .node:not(.full-detail) .label{opacity:0}
+ .node .pip{cursor:help}
+ .node .ghost{cursor:default}
+ /* Floating in-map room card (click a discovered node) -- absolutely positioned INSIDE #map
+    (not the sidebar) so it reads as "this is about the node you just clicked," anchored to
+    whichever top corner is farther from that node's on-screen position (see showRoomCard)
+    so it never sits on top of the thing it's describing. */
+ #roomCard{position:absolute;top:12px;width:250px;max-height:calc(100% - 24px);overflow-y:auto;
+   background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:10px 12px;
+   box-shadow:0 8px 28px rgba(0,0,0,.55);display:none;z-index:8;font-size:12px;color:var(--text)}
+ #roomCard.anchor-left{left:12px}
+ #roomCard.anchor-right{right:12px}
+ #roomCard img{width:100%;border-radius:6px;image-rendering:pixelated;margin-bottom:8px;display:block}
+ #roomCard b{color:var(--ghost-bright);font-size:13px}
+ #roomCard .roomCardKind{color:var(--muted);font-size:10.5px;text-transform:uppercase;
+   letter-spacing:.06em;margin:2px 0 6px}
+ #roomCard .roomCardDesc{color:var(--text);line-height:1.5;margin-bottom:6px}
+ #roomCard .roomCardOcc{margin-top:6px;padding-top:6px;border-top:1px solid var(--border-soft);
+   color:var(--ghost)}
+ #roomCardClose{position:absolute;top:6px;right:8px;background:none;border:none;color:var(--muted);
+   font-size:14px;line-height:1;cursor:pointer;padding:4px}
+ #roomCardClose:hover{color:var(--text)}
  .ch b{color:var(--ghost-bright)}.ch span{color:var(--muted)}
  .ch span.item{cursor:help;border-bottom:1px dotted var(--dim)}
  .log div{color:var(--muted);padding:2px 0;border-bottom:1px solid var(--border-soft);font-size:12px}
@@ -556,8 +602,10 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
   <span style="color:var(--ghost)">●</span> your room &nbsp;
   <span style="color:var(--visited)">●</span> places you've been &nbsp;
   <span style="color:var(--dim)">●</span>&thinsp;??? not yet discovered &nbsp;
-  <b style="color:var(--text)">2</b> = players in that room now</div>
-<div class=sub style="margin-bottom:8px;opacity:.6">scroll + ⌘/Ctrl to zoom · drag to pan · click a room for details</div><div id=map><span id=mapEmpty class=empty>no adventure yet — start one in your agent</span><div id=nodeTooltip></div></div></div>
+  <span style="color:var(--warm)">◆</span> loot &nbsp;
+  <span style="color:var(--danger)">✕</span> monster &nbsp;
+  <span style="color:var(--ghost)">👻</span> a player</div>
+<div class=sub style="margin-bottom:8px;opacity:.6">scroll + ⌘/Ctrl to zoom · drag to pan · click a discovered room to zoom in + open details</div><div id=map><span id=mapEmpty class=empty>no adventure yet — start one in your agent</span><div id=nodeTooltip></div><div id=roomCard><button id=roomCardClose aria-label=close>✕</button><div id=roomCardBody></div></div></div></div>
  <div class=panel>
   <div class=midTabbar>
    <button class=midTabBtn data-miditab=stream>Live world stream</button>
@@ -694,6 +742,12 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
 const params = new URLSearchParams(location.search);
 const playerId = params.get('player');
 const campaignId = params.get('campaign') || 'main';
+// Truncated the same way /state truncates every OTHER player's id (see its own comment) --
+// lets renderGraph's ghost-dot rendering tell "this dot is literally you" apart from "just
+// another player in the same room" without ever needing the server to echo your own full
+// credential back. Only ever set for the BYO-agent share-link flow (?player= in the URL) --
+// browser-chat sessions (cookie-only) fall back to a name+room heuristic, see ghostIsMine().
+const myTruncId = playerId ? playerId.slice(0, 6) : null;
 
 // Map title copy (e0b.12): main gets the "this is the real shared world" explainer; any other
 // world keeps the plain title -- its own [world: <id>] tag already shows up in #whereInMap
@@ -1047,6 +1101,10 @@ const svg = d3.select('#map').append('svg').attr('width','100%').attr('height','
 // see them (browser scroll does nothing for SVG content — it just clips). Real pan/zoom via
 // d3-zoom instead: scroll wheel to zoom, drag to pan, applied to one wrapper group so the
 // force simulation's own coordinates never need to change.
+// One <clipPath> per discovered room with art (see renderGraph's enter block) lives here --
+// a single shared <defs>, not one per node group, since SVG clipPath ids just need to be
+// unique document-wide, not nested inside the node they clip.
+const defs = svg.append('defs');
 const zoomLayer = svg.append('g');
 const linkLayer = zoomLayer.append('g');
 const frontierLayer = zoomLayer.append('g');
@@ -1090,6 +1148,11 @@ const STREAM_FILTER_MODES = {
   npc:      {title: 'NPC talk', sub: 'conversations with NPCs', kindPrefix: 'npc.'},
 };
 let streamFilterMode = 'all';
+// Level-of-detail threshold (requirement 5): below this scale, medallions/pips/ghost-name
+// labels fade out via the .full-detail CSS class (see applyLOD) so a zoomed-out view of a
+// big world stays readable instead of turning into soup — only your own room and whichever
+// node is currently selected stay at full detail regardless of zoom.
+const LOD_ZOOM_THRESHOLD = 0.7;
 const zoomBehavior = d3.zoom().scaleExtent([0.25, 4])
   // Plain mouse-wheel over the SVG used to always zoom, which d3 implements by calling
   // preventDefault() on the wheel event — that's what trapped page scroll the instant the
@@ -1100,6 +1163,7 @@ const zoomBehavior = d3.zoom().scaleExtent([0.25, 4])
   .on('zoom', (event) => {
     zoomLayer.attr('transform', event.transform);
     if(event.sourceEvent) userInteracted = true;
+    applyLOD();
   });
 svg.call(zoomBehavior);
 
@@ -1117,13 +1181,39 @@ function fitToView(nodes){
   svg.transition().duration(400).call(zoomBehavior.transform, t);
 }
 
-// Click a node -> center the view on it (keeping current zoom level) and show its details
-// in the "Selected room" panel. Discovered rooms show real content; undiscovered ones stay
-// "???" here too (a click can't reveal what you haven't actually been to).
-function centerOn(d){
-  const k = d3.zoomTransform(svg.node()).k;
+// Click a node -> center the view on it and show its details in the "Selected room" panel
+// (and, for a discovered room, the in-map card — see showRoomCard). Discovered rooms show
+// real content; undiscovered ones stay "???" here too (a click can't reveal what you haven't
+// actually been to). `boostZoom` (requirement 8) additionally raises the zoom level to at
+// least LOD_ZOOM_THRESHOLD*~2 so the click always lands ABOVE the LOD threshold — the node's
+// full detail (medallion/pips/ghosts) and the card appear together, never a detailed card
+// floating over a low-detail dot. Never lowers an already-higher zoom level.
+function centerOn(d, boostZoom){
+  let k = d3.zoomTransform(svg.node()).k;
+  if(boostZoom && k < 1.6) k = 1.6;
   const t = d3.zoomIdentity.translate(W/2 - d.x*k, H/2 - d.y*k).scale(k);
   svg.transition().duration(500).call(zoomBehavior.transform, t);
+}
+// Shared building blocks for room detail rendering (requirement 8's floating card reuses the
+// SAME data/markup shape as the sidebar's "Selected room" panel — see showRoomCard below —
+// rather than duplicating the feature/monster/loot list logic a second time).
+function roomOccupantsOf(d){ return d.occupants || []; }
+function roomDetailInnerHtml(d, imgAttrs){
+  const img = d.image_ref
+    ? `<img src="/art/${encodeURIComponent(d.image_ref)}.png" ${imgAttrs||''} onerror="this.style.display='none'">`
+    : '';
+  const kind = d.kind ? `<div class="roomCardKind">${esc(d.kind)}</div>` : '';
+  const feats = (d.features||[]).map(f => `<div>• ${esc(f)}</div>`).join('');
+  const monsters = (d.contents||[]).filter(c=>c.type==='monster')
+    .map(c => `<div>✕ ${esc(c.name)} (HP ${c.hp})</div>`).join('');
+  const loot = (d.contents||[]).filter(c=>c.type==='loot')
+    .map(c => `<div>◆ ${esc(c.name)}</div>`).join('');
+  // Bot names already carry their own 🤖 prefix server-side (see World.mark_bot) -- only
+  // add the 👻 ghost marker for a non-bot, so a bot never reads "👻 🤖 Kex-7".
+  const occ = roomOccupantsOf(d).map(p =>
+    `<div>${p.is_bot ? '' : '👻 '}${esc(p.name)}</div>`).join('');
+  return `${img}<b>${esc(d.name)}</b>${kind}<br><span>${esc(d.description||'')}</span>`
+    + feats + monsters + loot + (occ ? `<div class="roomCardOcc">${occ}</div>` : '');
 }
 let _roomInfoOpenId = null;  // guards the async regen callback below against a stale write
                               // if the player clicks a DIFFERENT room before it resolves
@@ -1131,15 +1221,7 @@ function showRoomInfo(d){
   _roomInfoOpenId = d.id;
   const el = document.getElementById('roomInfo');
   if(!d.discovered){ el.innerHTML = '<span class=empty>??? — not discovered yet</span>'; return; }
-  const img = d.image_ref
-    ? `<img src="/art/${encodeURIComponent(d.image_ref)}.png" style="width:100%;border-radius:6px;image-rendering:pixelated">`
-    : '';
-  const feats = (d.features||[]).map(f => `<div>• ${esc(f)}</div>`).join('');
-  const monsters = (d.contents||[]).filter(c=>c.type==='monster')
-    .map(c => `<div>⚔ ${esc(c.name)} (HP ${c.hp})</div>`).join('');
-  const loot = (d.contents||[]).filter(c=>c.type==='loot')
-    .map(c => `<div>✦ ${esc(c.name)}</div>`).join('');
-  el.innerHTML = `${img}<b>${esc(d.name)}</b><br><span>${esc(d.description||'')}</span>${feats}${monsters}${loot}`;
+  el.innerHTML = roomDetailInnerHtml(d, 'style="width:100%;border-radius:6px;image-rendering:pixelated"');
   // On-demand backstop: art otherwise only ever generates once, at room creation — if that
   // one speculative attempt transiently fails (observed live: a brief GPU-allocation hiccup
   // can silently drop a room's art forever), nothing else ever revisits it. Safe to fire on
@@ -1151,16 +1233,49 @@ function showRoomInfo(d){
         if(res.image_ref && _roomInfoOpenId === d.id){
           d.image_ref = res.image_ref;
           showRoomInfo(d);
+          if(roomCardOpenId === d.id) showRoomCard(d);
         }
       }).catch(()=>{});
   }
 }
 
+// Floating in-map room card (requirement 8) — the PRIMARY detail surface for a click now;
+// the sidebar "Selected room" panel (showRoomInfo above) stays in sync alongside it rather
+// than being replaced. Only ever opened for a DISCOVERED node (see the node click handler).
+let roomCardOpenId = null;
+function showRoomCard(d){
+  roomCardOpenId = d.id;
+  const el = document.getElementById('roomCard');
+  const body = document.getElementById('roomCardBody');
+  // Anchor to whichever top corner is farther from the clicked node's current ON-SCREEN
+  // position (not its raw simulation x/y — those don't account for pan/zoom), so the card
+  // never lands on top of the node it's describing.
+  const t = d3.zoomTransform(svg.node());
+  const screenX = t.applyX(d.x);
+  el.classList.toggle('anchor-right', screenX < W/2);
+  el.classList.toggle('anchor-left', screenX >= W/2);
+  body.innerHTML = roomDetailInnerHtml(d, '');
+  el.style.display = 'block';
+}
+function hideRoomCard(){
+  roomCardOpenId = null;
+  document.getElementById('roomCard').style.display = 'none';
+}
+document.getElementById('roomCardClose').addEventListener('click', hideRoomCard);
+document.addEventListener('keydown', (e) => { if(e.key === 'Escape') hideRoomCard(); });
+// Click empty map space (the svg background, not a node) to dismiss — node clicks call
+// event.stopPropagation() specifically so opening the card doesn't immediately close itself.
+svg.on('click', () => hideRoomCard());
+
 const simulation = d3.forceSimulation()
   .force('charge', d3.forceManyBody().strength(-220))
   .force('link', d3.forceLink().id(d=>d.id).distance(90))
   .force('center', d3.forceCenter(W/2, H/2))
-  .force('collide', d3.forceCollide(24))
+  // Bumped 24 -> 36 (requirement 6): discovered nodes now carry an art medallion, up to 3
+  // rim pips, and a small fan of ghost dots+labels — the same layout MODEL (still plain
+  // forceCollide, just a larger radius), sized for that bigger visual footprint so two
+  // adjacent discovered rooms' decorations don't overlap.
+  .force('collide', d3.forceCollide(36))
   .on('tick', ticked)
   // Fit once the simulation actually settles (alpha decays below its minimum), not on a
   // guessed timeout — a fixed delay went stale because the reheated sim keeps drifting
@@ -1185,6 +1300,166 @@ new ResizeObserver(entries => {
 
 let nodesById = {};
 let lastSignature = '';
+// Real room name -> id, rebuilt every renderGraph — lets the event-pulse handler (requirement
+// 4) resolve a log line that NAMES a room into the node to pulse, the same underlying
+// knowledge highlightKnown() already carries for the text stream, just keyed for a direct
+// lookup instead of a regex sweep.
+let roomNameToId = {};
+
+// Shared hover tooltip (requirement 7's richer per-node/per-pip content) — one div, reused
+// by the node itself, its loot/monster pips, and the "+n" overflow marker. innerHTML is safe
+// here because every caller passes already-esc()'d text.
+const tooltip = document.getElementById('nodeTooltip');
+function showTooltip(html){ tooltip.innerHTML = html; tooltip.style.display = 'block'; }
+function moveTooltip(event){
+  const rect = document.getElementById('map').getBoundingClientRect();
+  const x = event.clientX - rect.left, y = event.clientY - rect.top;
+  // Flip to the LEFT/ABOVE the cursor once there isn't roughly a tooltip's worth of room on
+  // the right/below -- otherwise an auto-width box positioned near #map's own edge gets
+  // squeezed by the browser's shrink-to-fit sizing into an unreadable narrow sliver
+  // (confirmed live once tooltip content grew past a single short line -- see the CSS
+  // max-width comment). #map itself clips overflow, so there's no native scroll to rely on.
+  tooltip.style.left = (x + 224 > rect.width ? x - 224 : x + 14) + 'px';
+  tooltip.style.top = (y + 120 > rect.height ? y - 110 : y + 10) + 'px';
+}
+function hideTooltip(){ tooltip.style.display = 'none'; }
+
+// SVG ids can't contain ':' safely everywhere a raw room id (e.g. "r0:north:east") would put
+// one -- used for each discovered room's own <clipPath> id (see the enter block below).
+function domId(id){ return 'clip-' + String(id).replace(/[^a-zA-Z0-9_-]/g, '_'); }
+// Undiscovered rooms stay small and dim ("visually quieter" — requirement 1); discovered
+// ones (medallion or plain fill) get the original full size.
+function radiusFor(d){ return d.discovered ? 16 : 8; }
+
+// Requirement 7: room name (+ kind, if the room has one), a one-line contents summary, and
+// who's standing there — all in the existing #nodeTooltip, kept small/instant (a glance, not
+// a card — the floating room CARD, requirement 8, is the deep-dive surface).
+function nodeTooltipHtml(d){
+  if(!d.discovered) return '???';
+  let html = `<b>${esc(d.name)}</b>`;
+  if(d.kind) html += `<br><span style="color:var(--muted)">${esc(d.kind)}</span>`;
+  const contents = d.contents || [];
+  const lootN = contents.filter(c => c.type === 'loot').length;
+  const monsters = contents.filter(c => c.type === 'monster');
+  const bits = [];
+  if(lootN) bits.push(`◆ ${lootN} item${lootN === 1 ? '' : 's'}`);
+  if(monsters.length) bits.push(`✕ ${monsters.map(m => esc(m.name)).join(', ')}`);
+  if(bits.length) html += `<br><span>${bits.join(' · ')}</span>`;
+  // See roomDetailInnerHtml's identical comment: bot names already carry their own 🤖 prefix.
+  const occ = d.occupants || [];
+  if(occ.length) html += `<br><span>${occ.map(p => (p.is_bot ? '' : '👻 ') + esc(p.name)).join(', ')}</span>`;
+  return html;
+}
+
+// Requirement 3: is this occupant dot literally YOU? The BYO-agent share-link flow carries
+// your real (truncated) id client-side (myTruncId) for an exact match; the cookie-based
+// browser-play flow never exposes that id to the client (see /state's own comment on why),
+// so it falls back to a name match against your own character sheet -- good enough at this
+// scale (one shared world, no real anonymity pressure on character names).
+function ghostIsMine(o, you){
+  if(myTruncId) return o.player_id === myTruncId;
+  return !!(you && o.name === you.name);
+}
+
+// Requirement 2: up to 3 contents pips fanned along the node's lower rim -- amber diamond
+// per loot, danger-red tick per monster -- plus a "+n" overflow marker. Contents are only
+// ever drawn for DISCOVERED rooms (the underlying /state payload ships contents regardless
+// of discovery, same as it always has for showRoomInfo's sidebar card -- this just adds the
+// same discovered-gate to the new on-graph rendering, not a new leak).
+function renderPips(nodeSel){
+  nodeSel.each(function(d){
+    const pg = d3.select(this).select('g.pips');
+    const contents = d.discovered ? (d.contents || []) : [];
+    pg.style('display', contents.length ? null : 'none');
+    const shown = contents.slice(0, 3);
+    const overflowN = contents.length - shown.length;
+    const pipSel = pg.selectAll('g.pip').data(shown, (c, i) => (c.id || c.name || '') + ':' + i);
+    pipSel.exit().remove();
+    const pipEnter = pipSel.enter().append('g').attr('class', c => 'pip pip-' + (c.type || 'loot'));
+    pipEnter.append('path');
+    const pipMerged = pipEnter.merge(pipSel);
+    const n = shown.length;
+    pipMerged.attr('transform', (c, i) => {
+      const startDeg = 100, endDeg = 260;
+      const deg = n === 1 ? 180 : startDeg + i * (endDeg - startDeg) / (n - 1);
+      const rad = deg * Math.PI / 180, r = 18;
+      return `translate(${Math.cos(rad) * r},${Math.sin(rad) * r})`;
+    });
+    pipMerged.select('path')
+      .attr('d', c => c.type === 'monster' ? 'M-3,-3 L3,3 M3,-3 L-3,3' : 'M0,-4 L4,0 L0,4 L-4,0 Z')
+      .attr('fill', c => c.type === 'monster' ? 'none' : 'var(--warm)')
+      .attr('stroke', c => c.type === 'monster' ? 'var(--danger)' : 'none')
+      .attr('stroke-width', 1.6).attr('stroke-linecap', 'round');
+    pipMerged.on('mouseenter', (event, c) =>
+        showTooltip(c.type === 'monster' ? `${esc(c.name)} — ${c.hp} HP` : esc(c.name)))
+      .on('mousemove', (event) => moveTooltip(event))
+      .on('mouseleave', () => showTooltip(nodeTooltipHtml(d)));
+    let ov = pg.select('text.pipOverflow');
+    if(overflowN > 0){
+      if(ov.empty()) ov = pg.append('text').attr('class', 'pipOverflow')
+        .attr('font-size', 8).attr('fill', 'var(--muted)').attr('text-anchor', 'middle');
+      const restNames = contents.slice(3).map(c => c.name).join(', ');
+      ov.attr('transform', 'translate(19,19)').text('+' + overflowN)
+        .on('mouseenter', () => showTooltip(esc(restNames)))
+        .on('mousemove', (event) => moveTooltip(event))
+        .on('mouseleave', () => showTooltip(nodeTooltipHtml(d)));
+    } else if(!ov.empty()){ ov.remove(); }
+  });
+}
+
+// Requirement 3: replaces the old numeric occupant-count badge with small teal ghost dots
+// (one per player in the room) stacked vertically just outside the node so labels never
+// overlap, each with a tiny name label; your own character glows brighter, bots get a 🤖
+// prefix. Capped at 4 dots + a "+n more" row, same soup-avoidance cap as the contents pips.
+function renderGhosts(nodeSel, you){
+  nodeSel.each(function(d){
+    const g = d3.select(this).select('g.ghosts');
+    const all = d.occupants || [];
+    const shown = all.slice(0, 4);
+    const overflowN = all.length - shown.length;
+    const rowCount = shown.length + (overflowN > 0 ? 1 : 0);
+    const sel = g.selectAll('g.ghost').data(shown, o => o.player_id);
+    sel.exit().remove();
+    const enter = sel.enter().append('g').attr('class', 'ghost');
+    enter.append('circle').attr('class', 'ghostDot').attr('r', 3.5)
+      .attr('stroke', '#0a0713').attr('stroke-width', 1);
+    enter.append('text').attr('class', 'ghostLabel').attr('font-size', 7.5)
+      .attr('x', 6).attr('dy', 2.5);
+    const merged = enter.merge(sel);
+    merged.attr('transform', (o, i) => `translate(18, ${(i - (rowCount - 1) / 2) * 10})`);
+    merged.select('circle.ghostDot')
+      .attr('fill', o => ghostIsMine(o, you) ? '#8ff0e0' : 'var(--ghost)')
+      .style('filter', o => ghostIsMine(o, you) ? 'drop-shadow(0 0 4px #8ff0e0)' : null);
+    merged.select('text.ghostLabel')
+      .attr('fill', o => ghostIsMine(o, you) ? '#8ff0e0' : 'var(--ghost)')
+      // Bot names already carry their own 🤖 prefix server-side (World.mark_bot) -- no
+      // second prefix added here.
+      .text(o => o.name);
+    let ov = g.select('text.ghostOverflow');
+    if(overflowN > 0){
+      if(ov.empty()) ov = g.append('text').attr('class', 'ghostOverflow')
+        .attr('font-size', 7.5).attr('fill', 'var(--muted)').attr('x', 18).attr('dy', 2.5);
+      ov.attr('transform', `translate(18, ${(shown.length - (rowCount - 1) / 2) * 10})`)
+        .text('+' + overflowN + ' more');
+    } else if(!ov.empty()){ ov.remove(); }
+  });
+}
+
+// Requirement 4: a one-shot expanding, fading ring on whichever node a just-arrived stream
+// event named — see the 'world-event' handler below for how the target room id is resolved
+// (subject_type/subject_id when present, else a roomNameToId text match). Purely decorative;
+// never touches the simulation/layout, just an extra SVG element that removes itself.
+function pulseNode(roomId){
+  const sel = nodeLayer.selectAll('g.node').filter(d => d.id === roomId);
+  sel.each(function(){
+    const ring = d3.select(this).insert('circle', ':first-child')
+      .attr('class', 'pulseRing').attr('r', 16).attr('fill', 'none')
+      .attr('stroke', 'var(--ghost)').attr('stroke-width', 2.5).style('opacity', 0.85);
+    ring.transition().duration(900).ease(d3.easeCubicOut)
+      .attr('r', 42).style('opacity', 0)
+      .on('end', function(){ d3.select(this).remove(); });
+  });
+}
 
 function ticked(){
  linkLayer.selectAll('line').attr('x1',d=>d.source.x).attr('y1',d=>d.source.y)
@@ -1197,15 +1472,37 @@ function ticked(){
  nodeLayer.selectAll('g.node').attr('transform', d=>`translate(${d.x},${d.y})`);
 }
 
-// Only the selected node ever gets its name drawn on the map (undiscovered nodes still show
-// "???" so clicking one doesn't silently confirm there's nothing there) — bound to the live
-// data already on each g.node datum, so this is cheap enough to call on every click without
-// waiting for the next poll's full renderGraph.
+// Undiscovered nodes always show "???" (so clicking one doesn't silently confirm there's
+// nothing there) at any zoom the label itself is visible at. Discovered nodes: your own
+// room and whichever node is selected always show their real name; every OTHER discovered
+// room now ALSO shows a small persistent label, but only once zoomed in past the LOD
+// threshold (requirement 5) — below it, .full-detail is only set on the always-full nodes,
+// and the CSS opacity rule (not this function) fades the rest out, same mechanism as
+// pips/ghost-name labels. Bound to the live data already on each g.node datum, so this stays
+// cheap enough to call on every click/zoom without waiting for the next poll's full
+// renderGraph.
 function updateLabels(){
+ // Text/color/weight are set unconditionally here; ACTUAL visibility below the LOD
+ // threshold is entirely the CSS ".node:not(.full-detail) .label{opacity:0}" rule above,
+ // keyed off the class applyLOD toggles — so this never has to duplicate that per-zoom
+ // decision itself, and always-full nodes (mine/selected already carry .full-detail
+ // regardless of zoom, see applyLOD) fall out of the same single mechanism for free.
  nodeLayer.selectAll('g.node').select('text.label')
-   .text(d=> !d.discovered ? '???' : (d.id === selectedRoomId ? d.name : ''))
-   .attr('fill', d=> (d.discovered && d.id === selectedRoomId) ? '#8ff0e0' : '#8d7fae')
-   .attr('font-weight', d=> (d.discovered && d.id === selectedRoomId) ? '600' : '400');
+   .text(d=> !d.discovered ? '???' : d.name)
+   .attr('fill', d=> (d.discovered && (d.id === selectedRoomId || d.mine)) ? '#8ff0e0' : '#8d7fae')
+   .attr('font-weight', d=> (d.discovered && (d.id === selectedRoomId || d.mine)) ? '600' : '400');
+}
+
+// Level-of-detail (requirement 5): toggles the .full-detail class that the CSS above keys
+// off of for art/pips/ghost-name-label opacity. A node is full-detail if the CURRENT zoom is
+// past the threshold, OR it's your own room, OR it's the currently-selected node — those two
+// always render fully regardless of zoom (also what lets a click's boosted zoom-in and the
+// room card, requirement 8, always appear together at full detail).
+function applyLOD(){
+ const k = d3.zoomTransform(svg.node()).k;
+ const fullDetailGlobal = k >= LOD_ZOOM_THRESHOLD;
+ nodeLayer.selectAll('g.node')
+   .classed('full-detail', d => fullDetailGlobal || d.mine || d.id === selectedRoomId);
 }
 
 function renderGraph(rooms, players, you){
@@ -1233,24 +1530,28 @@ function renderGraph(rooms, players, you){
  // up fresh from THIS poll's players list every render, so the highlight tracks them live as
  // they actually move, the same way "mine" tracks your own character.
  const spectateTarget = spectateId ? players.find(p=>p.player_id===spectateId) : null;
+ roomNameToId = {};
  for(const r of rooms){
    const n = nodesById[r.id];
    n.name = r.name; n.visited = r.visited; n.discovered = r.discovered;
    n.description = r.description; n.features = r.features; n.contents = r.contents;
-   n.image_ref = r.image_ref;
+   n.image_ref = r.image_ref; n.kind = r.kind || '';
    n.mine = you && r.id===you.location_id;
    n.spectating = !!(spectateTarget && r.id===spectateTarget.location_id);
-   n.count = (occupants[r.id]||[]).length;
+   // Requirement 3: full occupant objects now (not just a count) -- ghost dots + their name
+   // labels are drawn straight off this list, see renderGhosts.
+   n.occupants = occupants[r.id] || [];
+   roomNameToId[r.name] = r.id;
  }
  const nodes = rooms.map(r => nodesById[r.id]);
 
- // No persistent name labels on the graph — declutters it into a real "fog of war" map.
- // Discovered rooms reveal their name on HOVER (custom tooltip div, not native SVG <title> --
- // that's unreliable across browsers) and full details on CLICK; undiscovered rooms show
- // "???" outright either way, since there's no secret being protected, just "you haven't
- // been here yet." "You are here" is already conveyed by the gold node color + the header's
- // "You are in: ..." line, so the graph node itself doesn't need its own always-visible label.
- const tooltip = document.getElementById('nodeTooltip');
+ // Undiscovered rooms reveal only "???" everywhere (node label, tooltip, sidebar, card) --
+ // there's no secret being protected, just "you haven't been here yet." Discovered rooms now
+ // show a real medallion (art if generated, plain colored fill otherwise), rim pips for
+ // loot/monsters, ghost dots for whoever's standing there, and (once zoomed in past
+ // LOD_ZOOM_THRESHOLD, or if this is your own/the selected room) a persistent name label --
+ // see applyLOD/updateLabels. "You are here" still gets its own teal glow ring on top of all
+ // of that.
  const nodeSel = nodeLayer.selectAll('g.node').data(nodes, d=>d.id)
    .join(enter => {
      const g = enter.append('g').attr('class','node').style('cursor','pointer');
@@ -1258,41 +1559,86 @@ function renderGraph(rooms, players, you){
      // into existence right now. r=0 -> full size with a bouncy overshoot, so a freshly
      // Flash-generated room visibly POPS in rather than appearing already-rendered. Fill/
      // stroke color still gets set normally right after (below) — only the radius animates.
-     g.append('circle').attr('r',0).attr('stroke-width',2)
-       .transition().duration(650).ease(d3.easeBackOut.overshoot(1.8)).attr('r',16);
+     // UNTOUCHED by this enrichment pass other than the final radius now depending on
+     // discovered state (radiusFor) instead of a flat 16.
+     g.append('circle').attr('class','bg').attr('r',0).attr('stroke-width',2)
+       .transition().duration(650).ease(d3.easeBackOut.overshoot(1.8)).attr('r', d=>radiusFor(d));
+     // Art medallion (requirement 1): a per-node <clipPath> circle in the shared <defs>,
+     // referenced by this node's own <image>. Slightly smaller than the bg circle's radius
+     // so the bg circle's own stroke still reads as a ring around the art. href/visibility
+     // are set on every render below (not gated by structureChanged) since a room's
+     // image_ref can appear on an EXISTING node without the room graph's shape changing.
+     g.each(function(d){
+       defs.select('#' + domId(d.id)).remove();  // guard against a stale dupe if this id ever re-enters
+       defs.append('clipPath').attr('id', domId(d.id)).append('circle').attr('r', 14);
+     });
+     g.append('image').attr('class','art').attr('x',-14).attr('y',-14).attr('width',28).attr('height',28)
+       .attr('preserveAspectRatio','xMidYMid slice').attr('clip-path', d=>`url(#${domId(d.id)})`)
+       .style('opacity', 0)
+       // Fallback (requirement 1): image_ref set but the file 404s / hasn't rendered yet --
+       // hide the <image> so the plain circle underneath shows through, same "always have
+       // SOMETHING sensible on screen" convention as showRoomInfo's own art.
+       .on('error', function(){ d3.select(this).style('display','none'); });
+     g.append('g').attr('class','pips');
+     g.append('g').attr('class','ghosts');
      g.append('text').attr('class','label').attr('y',30).attr('text-anchor','middle')
        .attr('fill','#8d7fae').attr('font-size',10);
-     g.append('text').attr('class','count').attr('y',4).attr('text-anchor','middle')
-       .attr('fill','#0a0713').attr('font-size',10).attr('font-weight','bold');
      // Custom hover tooltip, not a native SVG <title> — native SVG title tooltips are
      // unreliable across browsers (inconsistent/missing in Chrome in particular). A plain
-     // positioned div driven by mouse events works everywhere.
+     // positioned div driven by mouse events works everywhere. Content is now the richer
+     // nodeTooltipHtml (requirement 7) instead of a bare name.
      g.on('mouseenter', function(event, d){
-       tooltip.textContent = d.discovered ? d.name : '???';
-       tooltip.style.display = 'block';
+       showTooltip(nodeTooltipHtml(d));
      }).on('mousemove', function(event){
-       const rect = document.getElementById('map').getBoundingClientRect();
-       tooltip.style.left = (event.clientX - rect.left + 14) + 'px';
-       tooltip.style.top = (event.clientY - rect.top + 10) + 'px';
+       moveTooltip(event);
      }).on('mouseleave', function(){
-       tooltip.style.display = 'none';
+       hideTooltip();
      }).on('click', function(event, d){
+       // stopPropagation: the svg-level background click listener (see hideRoomCard wiring
+       // above) would otherwise immediately close the card this same click just opened.
+       event.stopPropagation();
        selectedRoomId = d.id;
        updateLabels();
-       centerOn(d);
+       applyLOD();
+       if(d.discovered){
+         // Requirement 8: zoom in (landing above the LOD threshold, so the medallion/pips/
+         // ghosts render at full detail together with the card) and open the in-map card.
+         centerOn(d, true);
+         showRoomCard(d);
+       } else {
+         // Undiscovered: select + center only, same as before -- a click can't reveal what
+         // you haven't actually been to, so no card, no forced zoom-in.
+         centerOn(d, false);
+         hideRoomCard();
+       }
        showRoomInfo(d);
      });
      return g;
+   }, update => update, exit => {
+     // Each node owns one <clipPath> in the shared <defs> (for its art medallion) that lives
+     // OUTSIDE the <g class=node> the default exit.remove() would clean up on its own -- do
+     // that cleanup explicitly so a room that somehow drops out of the graph doesn't leak one
+     // forever.
+     exit.each(function(d){ defs.select('#' + domId(d.id)).remove(); });
+     return exit.remove();
    });
- nodeSel.select('circle')
+ nodeSel.select('circle.bg')
+   .attr('r', d=>radiusFor(d))
    .attr('fill', d=> d.mine ? '#4fd8c4' : (d.spectating ? '#e8b339' : (d.visited ? '#8072e0' : '#1c1630')))
-   .attr('stroke', d=> d.mine ? '#8ff0e0' : (d.spectating ? '#f5cc66' : '#453a6b'))
+   .attr('stroke', d=> d.mine ? '#8ff0e0' : (d.spectating ? '#f5cc66' : (d.discovered && d.image_ref ? '#8072e0' : '#453a6b')))
+   .attr('stroke-width', d=> (d.discovered && d.image_ref && !d.mine && !d.spectating) ? 1.5 : 2)
    // A soft glow on your own current room (teal) or whoever you're spectating (amber) — you're
    // a ghost too; these are the only nodes genuinely "alive" right now, everything else is
    // just trace/memory. `mine` wins if somehow both are true (you spectating yourself).
    .style('filter', d=> d.mine ? 'drop-shadow(0 0 7px #4fd8c4)' : (d.spectating ? 'drop-shadow(0 0 7px #e8b339)' : null));
+ nodeSel.select('image.art')
+   .attr('href', d => (d.discovered && d.image_ref) ? `/art/${encodeURIComponent(d.image_ref)}.png` : null)
+   .style('display', d => (d.discovered && d.image_ref) ? null : 'none')
+   .style('opacity', d => (d.discovered && d.image_ref) ? 1 : 0);
+ renderPips(nodeSel);
+ renderGhosts(nodeSel, you);
+ applyLOD();
  updateLabels();
- nodeSel.select('text.count').text(d=> d.count ? d.count : '');
 
  // IMPORTANT: link objects' source/target start as plain id STRINGS. d3-force only rewrites
  // them in place into resolved node-object references (what makes `d.source.x` work in
@@ -1348,6 +1694,7 @@ function renderGraph(rooms, players, you){
    lastMineRoomId = you.location_id;
    selectedRoomId = you.location_id;
    updateLabels();
+   applyLOD();
    const mine = nodesById[you.location_id];
    if(mine) showRoomInfo(mine);
  }
@@ -1653,6 +2000,21 @@ function connectStream(){
     // "recent ~20" mode) means a visitor who opens the wizard right after someone joined
     // still sees it, not just joins from this exact moment forward.
     if (ev.kind === 'adventure.started') addJoinFeedEvent(ev);
+    // Event pulse (requirement 4): reuse the same "which room is this event about" knowledge
+    // as highlightKnown() -- subject_type/subject_id (log.py's stigmergic-trace pair) is the
+    // precise case, populated for combat/item-pickup events; free-text room-name matching via
+    // roomNameToId is the fallback for everything else that happens to name a known room.
+    // Skipped during the initial backfill burst (streamCaughtUp false) so opening/reconnecting
+    // the stream doesn't light up the whole map at once.
+    if (streamCaughtUp) {
+      let pulseRoomId = (ev.subject_type === 'room' && ev.subject_id) ? ev.subject_id : null;
+      if (!pulseRoomId && ev.text) {
+        for (const name in roomNameToId) {
+          if (name && ev.text.includes(name)) { pulseRoomId = roomNameToId[name]; break; }
+        }
+      }
+      if (pulseRoomId) pulseNode(pulseRoomId);
+    }
   });
   es.onerror = () => { streamDot.style.background = '#ef4444'; };
   es.onopen = () => {
@@ -2586,7 +2948,7 @@ def state(request: Request) -> JSONResponse:
                           "features": json.loads(r["features"] or "[]"),
                           "contents": json.loads(r["contents"] or "[]"),
                           "visited": bool(r["visited"]), "discovered": discovered,
-                          "image_ref": r["image_ref"],
+                          "image_ref": r["image_ref"], "kind": r["kind"] or "",
                           "exits": exits_by_room.get(r["id"], {})})  # {direction: dest_room_id}
         # player_id IS the game's bearer credential -- server.py trusts it directly as the
         # only auth for move/attack/drop_item/delete_world/etc, no separate token or session.
