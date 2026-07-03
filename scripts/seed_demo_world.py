@@ -56,25 +56,31 @@ def main() -> None:
                 "traits": [], "attack_bonus": 3, "damage_dice": "1d6", "attack_name": "claw"}
 
     rooms = [
+        # category/danger are set explicitly on a handful of rooms below (r0, r1, r2, r4, r8)
+        # to exercise the real stored-value path end to end (worldgen.ROOM_CATEGORIES + a
+        # 0-3 danger rating -- see state.upsert_room/worldgen.py). The rest are left at their
+        # default "" / 0 on purpose, so /state's fallback derivation (worldgen.derive_category
+        # keyword-matching kind+name, worldgen.fallback_danger flooring to 1 whenever a live
+        # monster is present) also gets exercised, same as it would for pre-migration rows.
         dict(room_id="r0", name="Sundered Atrium", kind="atrium",
              description="A vaulted entry hall, its brass dome cracked open to the grey sky.",
              features=["a fallen chandelier of fused gears", "moss climbing the support struts"],
              exits={"north": "r1", "east": "r2", "south": "r6"},
              contents=[loot("a cracked brass compass")],
-             image_ref="r0", visited=True),
+             image_ref="r0", visited=True, category="chamber", danger=0),
         dict(room_id="r1", name="Cracked Observatory", kind="observatory",
              description="A shattered glass dome once used to track something no longer in the sky.",
              features=["a bent brass telescope"],
              exits={"south": "r0", "north": "r3"},
              contents=[monster("Rust Wraith", 14, 11)],
-             image_ref=None, visited=True),
+             image_ref=None, visited=True, category="open-air", danger=1),
         dict(room_id="r2", name="Rusted Forge", kind="forge",
              description="Cold furnaces line the walls, their bellows long since seized shut.",
              features=["a cold anvil", "scattered tongs"],
              exits={"west": "r0", "east": "r4"},
              contents=[loot("a tarnished gearwheel"), loot("a vial of oil"),
                        monster("Cog Sentinel", 20, 14)],
-             image_ref="r2", visited=True),
+             image_ref="r2", visited=True, category="industrial", danger=2),
         dict(room_id="r3", name="Collapsed Archive", kind="archive",
              description="Shelves of waterlogged scrolls slump against a caved-in far wall.",
              features=["a locked iron cabinet"],
@@ -87,7 +93,7 @@ def main() -> None:
              features=["a bank of dead furnace-hearts"],
              exits={"west": "r2", "south": "r5"},
              contents=[monster("Ashfall Hound", 16, 13), loot("a warm ember stone")],
-             image_ref="r4", visited=True),
+             image_ref="r4", visited=True, category="sacred", danger=2),
         dict(room_id="r5", name="Buried Reliquary", kind="reliquary",
              description="Not yet discovered.",
              features=["something ticking, faintly, under the rubble"],
@@ -111,7 +117,7 @@ def main() -> None:
              features=["a dais of interlocking brass rings"],
              exits={"west": "r3", "north": "r9"},
              contents=[monster("Gearwork Sentinel", 30, 16), loot("a cog-shaped amulet")],
-             image_ref="r8", visited=True),
+             image_ref="r8", visited=True, category="lair", danger=3),
         dict(room_id="r9", name="Sundering Threshold", kind="threshold",
              description="The last intact doorway before the ruin gives out entirely into fog.",
              features=["a threshold rune, still faintly lit"],
