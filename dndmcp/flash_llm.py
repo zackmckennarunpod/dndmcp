@@ -192,7 +192,13 @@ async def _cached_health(endpoint_id: str) -> dict:
     try:
         health = await loop.run_in_executor(None, _health_sync, endpoint_id)
         workers = health.get("workers", {})
-        total = sum(workers.get(k, 0) for k in ("idle", "initializing", "ready", "running"))
+        # /health's "idle" and "ready" overlap -- an idle worker is ALSO counted under
+        # "ready" (confirmed live: idle=3,ready=3,running=0 for a real 3-worker endpoint,
+        # not 6) -- naively summing all four double-counts. max(idle, ready) collapses that
+        # overlap regardless of which key happens to be the larger one; initializing/running
+        # are genuinely distinct worker states, so those stay additive.
+        total = (max(workers.get("idle", 0), workers.get("ready", 0))
+                + workers.get("initializing", 0) + workers.get("running", 0))
         status = {"workers": total}
     except Exception as exc:
         status = {"workers": None, "error": str(exc)}
