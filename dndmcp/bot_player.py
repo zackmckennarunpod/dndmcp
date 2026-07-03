@@ -47,9 +47,12 @@ logger = logging.getLogger(__name__)
 SUPERVISOR_POLL_S = 15    # how often the supervisor reconciles desired vs running bots
 BOT_TURN_INTERVAL_S = 20  # pacing between one bot's actions — real GPU work each turn, and
                           # shouldn't drown a small world in activity
-TURN_TIMEOUT_S = 240      # generous enough for a cold-started Flash endpoint plus dm_loop's
-                          # own up-to-6-tool-call turn (each individually bounded by
-                          # dm_loop._CHAT_TIMEOUT_S=120s) — but no turn waits forever
+TURN_TIMEOUT_S = 320      # must stay above dm_loop._CHAT_TIMEOUT_S (280s) plus real margin --
+                          # a turn is _decide_action (one chat call) + dm_loop's own up-to-6-
+                          # tool-call turn, and this outer wrapper must never fire before an
+                          # inner call that's still legitimately cold-starting gets a chance to
+                          # finish, or every first turn on a cold worker gets cancelled here
+                          # instead of succeeding slowly
 MAX_PLAYER_HISTORY = 16   # a plain chat history (no tool_calls to keep paired, unlike
                           # dm_loop's own _truncate_history), so a trailing slice is safe
 

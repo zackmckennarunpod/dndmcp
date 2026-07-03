@@ -77,7 +77,12 @@ MAX_TOOL_CALLS_PER_TURN = 6   # hard cap — a stuck/looping model must not hang
 MAX_HISTORY_MESSAGES = 24     # excluding the system message; see _truncate_history
 MAX_TOKENS = 350
 TEMPERATURE = 0.6
-_CHAT_TIMEOUT_S = 120         # cold start on a scaled-to-zero Flash endpoint can take ~90s
+_CHAT_TIMEOUT_S = 280         # covers cold start on EITHER tier -- the 7B endpoint's is ~60-90s,
+                              # but the 14B endpoint's (ADA_48_PRO, bigger checkpoint) measured
+                              # ~225s live (2026-07-04); 120s meant every first call on a cold
+                              # 14B worker failed outright before the model ever responded --
+                              # confirmed live as bot_player's "I wait and watch, uncertain what
+                              # to do next" fallback firing on turn 1 of a fresh world
 
 
 def current_dm_tier() -> str:
