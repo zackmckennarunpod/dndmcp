@@ -251,10 +251,12 @@ def _call_room_gen_sync(endpoint_id: str, model: str, scenario: RoomGenScenario,
 async def run_eval(configs: list[ModelConfig]) -> dict:
     """Run every SCENARIO + every ROOM_GEN_SCENARIO against every ModelConfig, sequentially
     (shared Runpod account -- no reason to hammer multiple endpoints at once for a demo eval).
-    Persists to DNDMCP_STATE_DIR/evals_last_run.json on completion; see load_last_run()."""
+    Persists as its own entry in the run HISTORY on completion (DNDMCP_STATE_DIR/evals_runs/),
+    not just overwriting a single "last run" -- see list_runs()/load_run()."""
     loop = asyncio.get_running_loop()
-    run: dict = {"started_at": time.time(), "configs": [c.label for c in configs],
-                "scenarios": [], "room_gen": []}
+    started_at = time.time()
+    run: dict = {"run_id": _run_id(started_at), "started_at": started_at,
+                "configs": [c.label for c in configs], "scenarios": [], "room_gen": []}
     for scenario in SCENARIOS:
         row: dict = {"label": scenario.label, "category": scenario.category,
                     "state_line": scenario.state_line, "action": scenario.action, "results": {}}
@@ -290,24 +292,94 @@ async def run_eval(configs: list[ModelConfig]) -> dict:
     return run
 
 
-def _results_path() -> Path:
+def _run_id(started_at: float) -> str:
+    """Millisecond-precision int as a string -- sorts correctly as text, safe as a filename,
+    unique enough for anything this demo could realistically run back to back."""
+    return str(int(started_at * 1000))
+
+
+def _runs_dir() -> Path:
     state_dir = Path(os.environ.get("DNDMCP_STATE_DIR", os.path.expanduser("~/.dndmcp")))
-    return state_dir / "evals_last_run.json"
+    d = state_dir / "evals_runs"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _run_path(run_id: str) -> Path:
+    return _runs_dir() / f"{run_id}.json"
 
 
 def _save_run(run: dict) -> None:
+    """Every completed run gets its OWN file, keyed by run_id -- a real history, not a single
+    slot that overwrites itself. Confirmed live (2026-07-03): a single evals_last_run.json
+    meant every new run erased the previous one, so there was nothing to compare across runs
+    or look back at once you'd moved on."""
     try:
-        _results_path().write_text(json.dumps(run, indent=2))
+        _run_path(run["run_id"]).write_text(json.dumps(run, indent=2))
     except Exception:
-        logger.exception("evals._save_run: failed to persist")
+        logger.exception("evals._save_run: failed to persist run %s", run.get("run_id"))
 
 
-def load_last_run() -> dict | None:
-    p = _results_path()
+def _pass_rate(run: dict, config_label: str) -> str | None:
+    scenarios = run.get("scenarios") or []
+    if not scenarios:
+        return None
+    graded = [s["results"].get(config_label) for s in scenarios]
+    graded = [r for r in graded if r is not None]
+    if not graded:
+        return None
+    correct = sum(1 for r in graded if r.get("correct"))
+    return f"{correct}/{len(graded)}"
+
+
+def list_runs(*, model_filter: str | None = None) -> list[dict]:
+    """Lightweight summaries for the history/index view -- run_id, timestamps, configs, and
+    each config's tool-calling pass rate -- WITHOUT loading every run's full scenario/room-gen
+    payload (that can be a few hundred KB each once raw model output piles up). Newest first.
+    `model_filter`: case-insensitive substring match against any config label in that run --
+    the search/filter the /evals history page offers."""
+    runs = []
+    for p in sorted(_runs_dir().glob("*.json"), reverse=True):
+        try:
+            run = json.loads(p.read_text())
+        except Exception:
+            logger.exception("evals.list_runs: failed to read %s", p)
+            continue
+        configs = run.get("configs", [])
+        if model_filter and not any(model_filter.lower() in c.lower() for c in configs):
+            continue
+        runs.append({
+            "run_id": run.get("run_id", p.stem),
+            "started_at": run.get("started_at"),
+            "finished_at": run.get("finished_at"),
+            "configs": configs,
+            "scenario_count": len(run.get("scenarios") or []),
+            "room_gen_count": len(run.get("room_gen") or []),
+            "pass_rates": {c: _pass_rate(run, c) for c in configs},
+        })
+    return runs
+
+
+def load_run(run_id: str) -> dict | None:
+    p = _run_path(run_id)
     if not p.exists():
         return None
     try:
         return json.loads(p.read_text())
     except Exception:
-        logger.exception("evals.load_last_run: failed to read")
+        logger.exception("evals.load_run: failed to read %s", run_id)
+        return None
+
+
+def load_last_run() -> dict | None:
+    """Most recent run by filename (run_id sorts correctly as a millisecond-timestamp
+    string) -- kept as the simple "just show me the latest" entry point /evals defaults to;
+    list_runs()/load_run() are the history/search/filter surface."""
+    paths = sorted(_runs_dir().glob("*.json"), reverse=True)
+    if not paths:
+        return None
+    try:
+        return json.loads(paths[0].read_text())
+    except Exception:
+        logger.exception("evals.load_last_run: failed to read %s", paths[0])
         return None

@@ -2937,15 +2937,17 @@ async def evals_run(request: Request) -> Response:
 
 @app.get("/evals", response_class=HTMLResponse)
 def evals_page(request: Request) -> str:
-    """Renders the LAST completed run (evals.load_last_run) plus a button to kick off a new
-    one -- never re-runs on page load, since every load would otherwise cost real GPU spend
-    across every configured model. Two tracks, per evals.py's own split: `scenarios` (tool-
-    calling correctness, auto-graded pass/fail) and `room_gen` (architectural/thematic
-    coherence, NOT auto-graded -- raw output shown side by side for a human to judge). The
-    "run" button itself is gated by _evals_enabled() (an SSH-only admin_flags toggle, off by
-    default) -- see that function's docstring for why a public, unauthenticated page can't be
-    allowed to trigger real GPU spend on its own."""
-    run = evals.load_last_run()
+    """Renders one run -- ?run=<run_id> if given (from the history page), else the most
+    recent (evals.load_last_run) -- plus a button to kick off a new one. Never re-runs on
+    page load, since every load would otherwise cost real GPU spend across every configured
+    model. Two tracks, per evals.py's own split: `scenarios` (tool-calling correctness,
+    auto-graded pass/fail) and `room_gen` (architectural/thematic coherence, NOT auto-graded
+    -- raw output shown side by side for a human to judge). The "run" button itself is gated
+    by _evals_enabled() (an SSH-only admin_flags toggle, off by default) -- see that
+    function's docstring for why a public, unauthenticated page can't be allowed to trigger
+    real GPU spend on its own."""
+    run_id = request.query_params.get("run")
+    run = evals.load_run(run_id) if run_id else evals.load_last_run()
     running = _eval_run_state["running"]
     can_run = _evals_enabled()
     configs = run["configs"] if run else [c.label for c in _EVAL_CONFIGS]
@@ -3023,6 +3025,7 @@ td.err{{color:var(--bad)}}
 .empty{{color:var(--muted);padding:20px}}
 </style></head><body>
 <header><h1>🧪 Model evals</h1><span class=count>{esc(last_run_note)}</span>
+<a href=/evals/history style="color:var(--ghost-bright);text-decoration:underline dotted">📜 history</a>
 {f'<form method=post action=/evals/run style="margin-left:auto"><button {"disabled" if running else ""}>'
   f'{"running…" if running else "▶ run new eval"}</button></form>' if can_run
   else '<span class=count style="margin-left:auto">evals are currently disabled</span>'}
@@ -3033,6 +3036,59 @@ td.err{{color:var(--bad)}}
 {f'<table><tr><td></td>{"".join(f"<td>{esc(c)}</td>" for c in configs)}</tr>{scenario_rows}</table>' if run else '<div class=empty>No run yet — hit "run new eval" above.</div>'}
 <h2>Room-generation coherence (not auto-graded — read and judge)</h2>
 {room_gen_blocks or '<div class=empty>No run yet.</div>'}
+</main>
+</body></html>"""
+
+
+@app.get("/evals/history", response_class=HTMLResponse)
+def evals_history_page(request: Request) -> str:
+    """Every past run, newest first -- lightweight summaries only (evals.list_runs), each
+    linking to /evals?run=<id> for the full scenario/room-gen detail. ?model=<substring>
+    filters to runs whose configs mention that string (case-insensitive) -- the search/filter
+    surface asked for once a single "last run" stopped being enough to look back across."""
+    model_filter = request.query_params.get("model") or ""
+    runs = evals.list_runs(model_filter=model_filter or None)
+
+    def esc(s: object) -> str:
+        return html.escape(str(s))
+
+    def row_html(r: dict) -> str:
+        when = (datetime.datetime.fromtimestamp(r["finished_at"]).strftime("%Y-%m-%d %H:%M:%S")
+               if r.get("finished_at") else "?")
+        rates = " · ".join(f"{esc(c)}: {esc(r['pass_rates'].get(c) or '—')}" for c in r["configs"])
+        return (f'<tr><td><a href="/evals?run={esc(r["run_id"])}">{esc(when)}</a></td>'
+               f'<td>{esc(", ".join(r["configs"]))}</td><td>{rates}</td>'
+               f'<td>{r["scenario_count"]} / {r["room_gen_count"]}</td></tr>')
+
+    rows_html = "".join(row_html(r) for r in runs) or '<tr><td colspan=4 class=empty>No runs yet.</td></tr>'
+    return f"""<!doctype html><html><head><meta charset=utf-8><title>Eval history</title>
+<link rel=icon href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>📜</text></svg>">
+<style>
+:root{{--bg:#0a0713;--panel:#150f24;--border:#2b2145;--border-soft:#221a38;--text:#e7e1f5;
+  --muted:#8d7fae;--warm:#e8b339;--warm-bright:#f5cc66;--ghost:#4fd8c4;--ghost-bright:#8ff0e0}}
+body{{margin:0;background:var(--bg);color:var(--text);font:13px 'IBM Plex Mono',ui-monospace,Menlo,monospace}}
+header{{padding:14px 20px;border-bottom:1px solid var(--border);display:flex;gap:14px;align-items:baseline;flex-wrap:wrap}}
+h1{{font-size:16px;margin:0;color:var(--warm-bright)}}
+a{{color:var(--ghost-bright)}}
+main{{padding:14px 20px}}
+input{{background:var(--panel);color:var(--text);border:1px solid var(--border);border-radius:5px;
+  padding:5px 8px;font:12px 'IBM Plex Mono',monospace}}
+button{{background:var(--warm);color:#1a1225;border:none;border-radius:6px;padding:5px 12px;
+  font:12px 'IBM Plex Mono',monospace;cursor:pointer}}
+table{{width:100%;border-collapse:collapse;margin-top:14px}}
+td,th{{border-bottom:1px solid var(--border-soft);padding:8px 10px;text-align:left;font-size:12px}}
+th{{color:var(--muted);text-transform:uppercase;font-size:10.5px;letter-spacing:.04em}}
+.empty{{color:var(--muted);padding:20px;text-align:center}}
+</style></head><body>
+<header><h1>📜 Eval history</h1><a href=/evals>← back to latest</a></header>
+<main>
+<form method=get action=/evals/history>
+  <input type=text name=model placeholder="filter by model name..." value="{esc(model_filter)}">
+  <button>filter</button>
+  {f'<a href=/evals/history style="margin-left:8px">clear</a>' if model_filter else ''}
+</form>
+<table><tr><th>finished</th><th>configs</th><th>tool-calling pass rate</th><th>scenarios / rooms</th></tr>
+{rows_html}</table>
 </main>
 </body></html>"""
 
