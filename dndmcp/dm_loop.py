@@ -804,9 +804,36 @@ def _state_line(session: DMSession) -> str:
     camp = server.world.campaign(session.campaign_id)
     world_note = (f" in the world \"{camp.theme}\" ({session.campaign_id})"
                  if camp and session.campaign_id != MAIN_CAMPAIGN_ID else "")
+    # A live monster's presence otherwise only ever enters the model's context ONCE, in
+    # whatever tool result first described the room — and ages out of _truncate_history's
+    # window after a few combat rounds (each round burns 2+ messages: the assistant's
+    # tool_calls, plus the result). Confirmed live (2026-07-04): once that happened, the model
+    # kept narrating swings/strikes in prose WITHOUT ever calling attack again — no dice, no
+    # damage, no combat.resolved event, just flavor text pretending a fight was happening.
+    # Re-asserting it here, fresh every turn like HP/room already are, means it can never
+    # silently fall out of context mid-fight.
+    monster_note = ""
+    if room:
+        live = [c for c in room.contents if c.get("type") == "monster" and c.get("hp", 0) > 0]
+        if live:
+            names = ", ".join(f"{m['name']} ({m['hp']}/{m.get('max_hp', m['hp'])} HP)" for m in live)
+            monster_note = (f" A live monster is in this room right now: {names} — call attack "
+                            f"if the player's action is aggressive toward it; never narrate a "
+                            f"hit, miss, or its death without that tool's result.")
+    # Same "re-assert every turn, never rely on it surviving truncation" fix as monster_note
+    # above, for the exact same reason — confirmed live (2026-07-04): a character sat in the
+    # SAME room for a dozen+ turns of increasingly elaborate narration (a fight, a pedestal, a
+    # chest, a journal) because "what exits exist here" had scrolled out of the truncated
+    # history and the model had nothing concrete left to call move against, so it just kept
+    # improvising more content for the room it was already in instead.
+    exit_note = ""
+    if room and room.exits:
+        descs = server.world.room_exit_descriptions(room.id)
+        labels = [descs.get(d, d) for d in room.exits]
+        exit_note = f" Exits from here: {', '.join(labels)}."
     return (f"[SERVER STATE] Playing {ch.name} the {ch.klass}, HP {ch.hp}/{ch.max_hp}, "
-            f"currently in {where}{world_note}. Narrate ONLY from tool results, never from "
-            f"memory of rooms not returned by a tool this session.")
+            f"currently in {where}{world_note}.{monster_note}{exit_note} Narrate ONLY from "
+            f"tool results, never from memory of rooms not returned by a tool this session.")
 
 
 async def handle_message(session: DMSession, user_text: str) -> AsyncIterator[dict]:
@@ -840,6 +867,7 @@ async def handle_message(session: DMSession, user_text: str) -> AsyncIterator[di
     session.messages.append({"role": "user", "content": user_text})
     tool_call_count = 0
     malformed_count = 0
+    no_tool_retry_used = False
 
     while True:
         session.messages = _truncate_history(session.messages)
@@ -869,6 +897,43 @@ async def handle_message(session: DMSession, user_text: str) -> AsyncIterator[di
 
         tool_calls = message.get("tool_calls") or []
         content = (message.get("content") or "").strip()
+
+        # A zero-tool-call response on the FIRST attempt of a turn means the model just
+        # narrated in prose without resolving anything against real game state — confirmed
+        # live (2026-07-04): a character sat in one room for a dozen+ turns of increasingly
+        # elaborate hallucinated content (a fight, a chest, a journal) because the model kept
+        # choosing to just narrate instead of calling move/attack/etc, and nothing ever
+        # corrected it mid-session. One retry with an explicit nudge, not a silent accept — if
+        # the SECOND attempt is also tool-free, it really was just conversation/a question with
+        # nothing to resolve, so accept it rather than looping forever. Nudge is transient
+        # (only sent on this one retry call, never persisted to session.messages) so it can't
+        # pollute history the model reads on later turns.
+        if not tool_calls and not in_intake and tool_call_count == 0 and not no_tool_retry_used:
+            no_tool_retry_used = True
+            logger.info("dm_loop.handle_message: zero tool calls on first attempt "
+                       "(player_id=%s, action=%r) -- retrying with nudge",
+                       session.player_id, user_text[:100])
+            nudge = {"role": "system", "content": (
+                "[SERVER STATE] You just replied with no tool call at all. If the player's "
+                "message described an action — moving, attacking, searching, picking "
+                "something up, talking to someone, resting — call the matching tool now "
+                "instead of narrating in prose. If it was genuinely just a question or chat "
+                "with no action to resolve, you may reply in plain text.")}
+            try:
+                message = await _chat(call_messages + [nudge], tools)
+            except Exception:
+                logger.exception("dm_loop.handle_message: no-tool-call retry failed "
+                                "(player_id=%s)", session.player_id)
+            else:
+                tool_calls = message.get("tool_calls") or []
+                content = (message.get("content") or "").strip()
+                if tool_calls:
+                    logger.info("dm_loop.handle_message: retry recovered %d tool call(s) "
+                               "(player_id=%s)", len(tool_calls), session.player_id)
+                else:
+                    logger.warning("dm_loop.handle_message: still zero tool calls after nudge "
+                                  "-- accepting as a real no-action turn (player_id=%s)",
+                                  session.player_id)
 
         if not tool_calls or tool_call_count >= MAX_TOOL_CALLS_PER_TURN:
             session.messages.append({"role": "assistant", "content": content})

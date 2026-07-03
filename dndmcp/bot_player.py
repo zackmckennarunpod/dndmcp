@@ -31,9 +31,11 @@ scripts/pod_bot_status.sh without needing to inspect the running process directl
 from __future__ import annotations
 
 import asyncio
+import difflib
 import json
 import logging
 import os
+import re
 import time
 from pathlib import Path
 
@@ -63,7 +65,11 @@ PLAYER_TEMPERATURE = 1.0
 PLAYER_SYSTEM_PROMPT = """You are playing a character in a live tabletop RPG, entirely on \
 your own — there is no human telling you what to do. Every message you receive is either \
 "begin" (you have no character yet) or the Dungeon Master's narration of what just happened. \
-Reply with ONE short, first-person sentence describing your NEXT action.
+Reply with ONE short, first-person sentence stating ONLY your own INTENDED action — never \
+how the world responds to it. "I speak the phrase and the runes glow brighter" is NOT your \
+line to write — the runes glowing (or not) is the DM's job to narrate from a real result you \
+haven't seen yet. Stop the instant you've stated what you're doing; the DM's reply is a \
+separate message you get NEXT turn, never something to write for them.
 
 Be decisive, not hesitant — never "I consider whether...", "I try to determine if...", or \
 "I gaze at ___, wondering...". Vague/hedging actions like that don't map to anything real in \
@@ -102,6 +108,25 @@ async def _decide_action(history: list[dict]) -> str:
         logger.exception("bot_player._decide_action: chat completion failed")
         return "I wait and watch, uncertain what to do next."
     return (message.get("content") or "").strip() or "I press onward."
+
+
+_SENTENCE_SPLIT_RE = re.compile(r'(?<=[.!?])\s+')
+
+
+def _drop_echoed_lead_in(action: str, narration: str) -> str:
+    """Strip a leading sentence that's just the player's own action restated in second
+    person ("I leap back..." -> "You leap back...") — dm_loop's own DM prompt already tells
+    it not to do this (SYSTEM_PROMPT rule 1), but a small 7B model doesn't reliably comply for
+    plain actions with no obvious consequence, and the result showed up live (2026-07-04) as
+    two near-duplicate stream lines back to back. Only trims the FIRST sentence, not the whole
+    narration: confirmed live the DM often echoes the opening then adds something real after
+    ("...The creature is clearly injured but far from defeated...") — dropping the whole thing
+    would throw that added detail away along with the echo. Returns "" if nothing but the echo
+    was left, signaling the caller to skip logging bot.narrated entirely that turn."""
+    sentences = _SENTENCE_SPLIT_RE.split(narration.strip(), maxsplit=1)
+    lead_in, rest = sentences[0], (sentences[1] if len(sentences) > 1 else "")
+    ratio = difflib.SequenceMatcher(None, action.strip().lower(), lead_in.strip().lower()).ratio()
+    return narration if ratio <= 0.6 else rest.strip()
 
 
 def _snippet(text: str, limit: int = 140) -> str:
@@ -198,7 +223,9 @@ async def _run_one_turn(slot: str, session: dm_loop.DMSession, history: list[dic
         name = ch.name if ch else "The bot"
         if narration:
             server.world.log("bot.said", f'{name}: "{action}"', player_id=session.player_id)
-            server.world.log("bot.narrated", _snippet(narration), player_id=session.player_id)
+            trimmed = _drop_echoed_lead_in(action, narration)
+            if trimmed:
+                server.world.log("bot.narrated", _snippet(trimmed), player_id=session.player_id)
         # Full, untruncated narration lives HERE (bot_status.json), not in the shared log —
         # this is the "somewhere else" for people who actually want to follow one character
         # closely (the spectate card, via /state), separate from the terse shared stream.
