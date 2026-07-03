@@ -676,8 +676,12 @@ _NPC_PERSONA_JSON = ('{"name": an individual proper name or title fitting this c
                      '"attack_flavor": a short NOUN PHRASE naming their weapon/attack, 2-4 '
                      'words, NOT a sentence and no period — it slots directly into '
                      '"<name>\'s <attack_flavor> hits you", so it must read like a weapon name '
-                     '(e.g. "a static-charged prod", "twin rusted cleavers", "crackling claws"), '
-                     'never a description of an action. Ground it in THIS world\'s theme, never '
+                     '(e.g. "a static-charged prod", "a bone-carved hook", "crackling claws"), '
+                     'never a description of an action. These are pattern illustrations, not '
+                     'vocabulary to imitate — do not reach for rust/ash/ember-family words just '
+                     'because one showed up here (confirmed elsewhere in this file: exactly this '
+                     'kind of fixed example anchored every output toward the same word regardless '
+                     'of premise). Ground it in THIS world\'s theme, never '
                      'a generic medieval weapon unless the world genuinely is that kind of '
                      'place}')
 
