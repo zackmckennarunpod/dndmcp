@@ -2901,9 +2901,19 @@ main li{{margin:0 0 6px 18px}}
 # with a cold start on a scaled-to-zero test endpoint).
 _EVAL_CONFIGS = [
     evals.ModelConfig("Qwen2.5-7B (live dnd-dm-vllm)", "q1ruzcnbog3oz1", "Qwen/Qwen2.5-7B-Instruct"),
-    evals.ModelConfig("Qwen2.5-14B (dnd-dm-vllm-14b-test)", "vllm-symcq20v3vy90y", "Qwen/Qwen2.5-14B-Instruct"),
+    evals.ModelConfig("Qwen2.5-14B (dnd-dm-vllm-14b)", "vllm-symcq20v3vy90y", "Qwen/Qwen2.5-14B-Instruct"),
 ]
 _eval_run_state = {"running": False}
+
+
+def _evals_enabled() -> bool:
+    """Off by default, SSH-only toggle (scripts/pod_set_flag.sh evals_enabled 1) -- same
+    kill-switch shape as bots_enabled. This page is public and unauthenticated like the rest
+    of the site; unlike browsing/playing, hitting "run" here mints/wakes a real GPU endpoint
+    and burns real spend across every configured model on every press. Default OFF means a
+    stray visitor (or a bookmarked link) can't rack up cost -- an admin has to deliberately
+    open the window over SSH first."""
+    return admin_flags.enabled("evals_enabled", default=False)
 
 
 async def _run_eval_tracked() -> None:
@@ -2917,6 +2927,9 @@ async def _run_eval_tracked() -> None:
 
 @app.post("/evals/run")
 async def evals_run(request: Request) -> Response:
+    if not _evals_enabled():
+        return JSONResponse({"error": "evals are disabled -- enable via "
+                             "scripts/pod_set_flag.sh evals_enabled 1"}, status_code=503)
     if not _eval_run_state["running"]:
         _eval_run_state["running"] = True
         _track(asyncio.create_task(_run_eval_tracked()))
@@ -2929,9 +2942,13 @@ def evals_page(request: Request) -> str:
     one -- never re-runs on page load, since every load would otherwise cost real GPU spend
     across every configured model. Two tracks, per evals.py's own split: `scenarios` (tool-
     calling correctness, auto-graded pass/fail) and `room_gen` (architectural/thematic
-    coherence, NOT auto-graded -- raw output shown side by side for a human to judge)."""
+    coherence, NOT auto-graded -- raw output shown side by side for a human to judge). The
+    "run" button itself is gated by _evals_enabled() (an SSH-only admin_flags toggle, off by
+    default) -- see that function's docstring for why a public, unauthenticated page can't be
+    allowed to trigger real GPU spend on its own."""
     run = evals.load_last_run()
     running = _eval_run_state["running"]
+    can_run = _evals_enabled()
     configs = run["configs"] if run else [c.label for c in _EVAL_CONFIGS]
 
     def esc(s: object) -> str:
@@ -3007,8 +3024,10 @@ td.err{{color:var(--bad)}}
 .empty{{color:var(--muted);padding:20px}}
 </style></head><body>
 <header><h1>🧪 Model evals</h1><span class=count>{esc(last_run_note)}</span>
-<form method=post action=/evals/run style="margin-left:auto"><button {"disabled" if running else ""}>
-{"running…" if running else "▶ run new eval"}</button></form></header>
+{f'<form method=post action=/evals/run style="margin-left:auto"><button {"disabled" if running else ""}>'
+  f'{"running…" if running else "▶ run new eval"}</button></form>' if can_run
+  else '<span class=count style="margin-left:auto">evals disabled — enable via SSH: scripts/pod_set_flag.sh evals_enabled 1</span>'}
+</header>
 {banner}
 <main>
 <h2>Tool-calling reliability ({len(configs)} models × {len(run["scenarios"]) if run else 0} scenarios)</h2>
