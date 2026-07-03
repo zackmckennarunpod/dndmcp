@@ -2213,6 +2213,11 @@ const chatForm = document.getElementById('chatForm');
 const chatInput = document.getElementById('chatInput');
 const chatSendBtn = document.getElementById('chatSendBtn');
 let chatTurnInFlight = false;
+// Fix 6: true while the "session gone -- Start again" prompt is showing. Blocks the submit
+// handler's own `finally` from silently re-enabling the input as if the turn just succeeded
+// (see showSessionExpired and the finally block below) -- the whole point of this fix is that
+// a dead session must never look like a normal, working input again on its own.
+let chatSessionExpired = false;
 
 function chatScrollToBottom(){ chatLog.scrollTop = chatLog.scrollHeight; }
 function clearChatEmptyState(){
@@ -2237,6 +2242,34 @@ function addChatBreadcrumb(name, summary){
   div.textContent = `⚙ ${name}${summary ? ' — 🎲 ' + summary : ''}`;
   chatLog.appendChild(div);
   chatScrollToBottom();
+}
+// Fix 6: the ONE recovery path for "this session/character is gone" -- a clear inline system
+// message plus a real "Start again" button, and the input disabled WITH a reason (not just
+// silently stuck) instead of looking like an ordinary, working chat that happens to not be
+// responding. The button reuses chatResetBtn's own handler verbatim (POST /chat/reset + reset
+// the pane) rather than reimplementing that flow a second time here.
+function showSessionExpired(text){
+  chatSessionExpired = true;
+  addChatMessage('system', text || "This character's session here has ended.");
+  const div = document.createElement('div');
+  div.style.margin = '2px 2px 6px';
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'choiceBtn';
+  btn.textContent = '▶ Start again';
+  btn.addEventListener('click', () => {
+    chatSessionExpired = false;
+    chatInput.disabled = false;
+    chatSendBtn.disabled = false;
+    chatInput.placeholder = 'say "start an adventure" to begin';
+    document.getElementById('chatResetBtn').click();
+  });
+  div.appendChild(btn);
+  chatLog.appendChild(div);
+  chatScrollToBottom();
+  chatInput.disabled = true;
+  chatSendBtn.disabled = true;
+  chatInput.placeholder = 'session ended — hit "Start again" above to continue';
 }
 
 // "New character": sever this browser's identity server-side (POST /chat/reset rotates the
@@ -2317,7 +2350,13 @@ chatForm.addEventListener('submit', async (e) => {
       // 429 (per-IP rate limit or per-session lifetime cap, e0b.4) is routine traffic-shaping,
       // not a failure -- render it as a dim system line, same as a tool breadcrumb, not the
       // alarmed error-red used for actual failures (409 in-flight, 413 too long, 503 disabled).
+      // Fix 6: a 400 "no world with id ... exists" (see POST /chat's campaign_exists check) is
+      // ANOTHER session-is-gone shape -- this tab's own world was deleted/never existed out
+      // from under it -- same dead-end-for-the-player as dm_loop's session_expired event
+      // below, so it gets the identical "Start again" treatment rather than a plain red line
+      // the player has no obvious next step for.
       if(r.status === 429) addChatMessage('system', err.error || 'please slow down a moment.');
+      else if(r.status === 400 && /no world with id/.test(err.error || '')) showSessionExpired(err.error);
       else addChatMessage('error', err.error || `error ${r.status}`);
       return;
     }
@@ -2343,6 +2382,10 @@ chatForm.addEventListener('submit', async (e) => {
         try{ ev = JSON.parse(line); } catch(parseErr){ continue; }
         if(ev.type === 'tool') addChatBreadcrumb(ev.name, ev.summary);
         else if(ev.type === 'text') addChatMessage('dm', ev.text);
+        // Fix 6: dm_loop.handle_message's own session-death guard -- the character behind
+        // this session no longer exists server-side (world reset, redeploy race, etc). Skips
+        // straight to the same "Start again" recovery the 400-unknown-world branch above uses.
+        else if(ev.type === 'session_expired') showSessionExpired(ev.text);
         // New-world flow (e0b.10): this turn's start_adventure just minted a brand-new world
         // (session.campaign_id no longer matches the page we're on) -- tell the player, then
         // redirect once the whole turn (including its final narration) has actually arrived.
@@ -2358,9 +2401,14 @@ chatForm.addEventListener('submit', async (e) => {
     addChatMessage('error', 'connection trouble — try again?');
   }finally{
     chatTurnInFlight = false;
-    chatInput.disabled = false;
-    chatSendBtn.disabled = false;
-    chatInput.focus();
+    // Fix 6: don't undo showSessionExpired's disable-with-reason -- a dead session must stay
+    // visibly dead until "Start again" is actually clicked, not silently look normal again
+    // the instant this turn's stream finishes.
+    if(!chatSessionExpired){
+      chatInput.disabled = false;
+      chatSendBtn.disabled = false;
+      chatInput.focus();
+    }
   }
   // A turn can mint a brand-new character (start_adventure) or move an existing one -- either
   // way, the very next /state poll (tick() already runs every 1.5s) now resolves "you" from
