@@ -412,7 +412,8 @@ async def start_adventure(theme: str = "gothic horror", character_name: str = "W
         world.upsert_room(room_id=start_id, campaign_id=target_id, name=gen["name"],
                           description=gen["description"], exits=gen["exits"],
                           contents=gen["contents"], features=gen.get("features"),
-                          kind=gen.get("kind", ""), exit_descriptions=gen.get("exit_descriptions"))
+                          kind=gen.get("kind", ""), exit_descriptions=gen.get("exit_descriptions"),
+                          category=gen.get("category", ""), danger=gen.get("danger"))
     room = _require_room(camp.start_room)
     ch = game.new_character(character_name, character_class)
     # Theme-grounded identity: the procedural kit is one hardcoded torch/dagger/rations set
@@ -643,7 +644,8 @@ async def _generate_and_link(dest_id: str, theme: str, campaign_id: str, salt: s
                       description=new_room["description"], exits=new_room["exits"],
                       contents=new_room["contents"], features=new_room.get("features"),
                       kind=new_room.get("kind", ""),
-                      exit_descriptions=new_room.get("exit_descriptions"))
+                      exit_descriptions=new_room.get("exit_descriptions"),
+                      category=new_room.get("category", ""), danger=new_room.get("danger"))
     # subject_type="room"/subject_id=dest_id — the one obviously-correct tag this was
     # missing (art.generated a few lines below already tags itself this way for the SAME
     # room). Without it, nothing can ever answer "which rooms has player X actually

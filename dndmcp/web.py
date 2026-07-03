@@ -196,6 +196,9 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
   --ghost:#4fd8c4; --ghost-bright:#8ff0e0; /* current room / "you" */
   --visited:#8072e0; --unvisited:#1c1630; /* explored vs fog-of-war */
   --link:#3c3160;
+  --danger:#c1445f; /* monster pips only -- muted wine-red, not a pure alarm color, so it
+                        still reads as part of this violet-black world rather than a generic
+                        UI-kit error red. */
 }
  body{margin:0;background:var(--bg);color:var(--text);font:13px 'IBM Plex Mono',ui-monospace,Menlo,monospace}
  header{padding:12px 18px;border-bottom:1px solid var(--border);display:flex;gap:12px;align-items:baseline;
@@ -223,15 +226,64 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
     sidebar, 560 started feeling cramped/cut-off for how much is usually happening at once. */
  #map{width:100%;height:640px;overflow:hidden;position:relative;
    background:radial-gradient(ellipse at 50% 40%,#1a1330 0%,var(--panel) 70%)}
+ /* Fix 7: a real invitation (a line + two actions), not a dead-end sentence. display:flex is
+    the DEFAULT here (not an inline style) specifically so renderGraph's own
+    `empty.style.display=''` toggle (clearing just the inline style) falls back to this rule
+    instead of a bare block layout -- see renderGraph's own comment on that toggle. */
+ #mapEmpty{display:flex;flex-direction:column;align-items:center;justify-content:center;
+   height:100%;gap:14px;text-align:center;padding:0 32px;box-sizing:border-box}
+ /* max-width matters more now than it used to (requirement 7's richer multi-line content,
+    not just a bare room name): an absolutely-positioned auto-width box near the right/bottom
+    edge of #map otherwise gets squeezed by the browser's own shrink-to-fit sizing into an
+    unreadably narrow, tall sliver -- confirmed live. Fixed width + line-height keeps it
+    readable regardless of where in the map it opens; moveTooltip() (JS) flips which side of
+    the cursor it renders on so it also never runs past #map's own edge. */
  #nodeTooltip{position:absolute;pointer-events:none;background:#1c1433;border:1px solid var(--link);
-   border-radius:6px;padding:4px 9px;font-size:12px;color:var(--text);display:none;z-index:10;
-   box-shadow:0 4px 16px rgba(0,0,0,.5)}
+   border-radius:6px;padding:5px 9px;font-size:12px;line-height:1.5;color:var(--text);
+   display:none;z-index:10;max-width:210px;box-shadow:0 4px 16px rgba(0,0,0,.5)}
  /* Same "custom div, not a native tooltip" reasoning as #nodeTooltip (native title/SVG-title
     tooltips are slow/inconsistent across browsers) — position:fixed so it works anywhere on
     the page, not just inside #map's own coordinate space. */
  #itemTooltip{position:fixed;pointer-events:none;background:#1c1433;border:1px solid var(--link);
    border-radius:6px;padding:6px 10px;font-size:12px;color:var(--text);display:none;z-index:50;
    box-shadow:0 4px 16px rgba(0,0,0,.5);max-width:240px}
+ /* Graph enrichment (art medallions / contents pips / player ghosts / LOD) -- everything
+    here only changes how a node is DRAWN, never the force-layout model itself (see
+    renderGraph's own comments). .full-detail is toggled per-node by applyLOD() -- either the
+    zoom level cleared the LOD threshold, or the node is "always full" (your own room / the
+    selected room). Below it, art/pips/ghost-name-labels fade to keep a zoomed-out view from
+    turning into soup; the plain colored circle + ghost dots (still fully opaque) are enough
+    to orient by. */
+ .node .art,.node .pips,.node .ghostLabel,.node .label{transition:opacity .2s}
+ .node:not(.full-detail) .art{opacity:0}
+ .node:not(.full-detail) .pips{opacity:0;pointer-events:none}
+ .node:not(.full-detail) .ghostLabel{opacity:0}
+ /* Room-name labels (requirement 5): only "your room" / the selected node ever carry
+    .full-detail regardless of zoom (see applyLOD) -- every other node's label (a real name
+    for discovered rooms, "???" for undiscovered ones) fades with everything else below the
+    LOD threshold, leaving just the plain dots + ghost dots to orient by. */
+ .node:not(.full-detail) .label{opacity:0}
+ .node .pip{cursor:help}
+ .node .ghost{cursor:default}
+ /* Floating in-map room card (click a discovered node) -- absolutely positioned INSIDE #map
+    (not the sidebar) so it reads as "this is about the node you just clicked," anchored to
+    whichever top corner is farther from that node's on-screen position (see showRoomCard)
+    so it never sits on top of the thing it's describing. */
+ #roomCard{position:absolute;top:12px;width:250px;max-height:calc(100% - 24px);overflow-y:auto;
+   background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:10px 12px;
+   box-shadow:0 8px 28px rgba(0,0,0,.55);display:none;z-index:8;font-size:12px;color:var(--text)}
+ #roomCard.anchor-left{left:12px}
+ #roomCard.anchor-right{right:12px}
+ #roomCard img{width:100%;border-radius:6px;image-rendering:pixelated;margin-bottom:8px;display:block}
+ #roomCard b{color:var(--ghost-bright);font-size:13px}
+ #roomCard .roomCardKind{color:var(--muted);font-size:10.5px;text-transform:uppercase;
+   letter-spacing:.06em;margin:2px 0 6px}
+ #roomCard .roomCardDesc{color:var(--text);line-height:1.5;margin-bottom:6px}
+ #roomCard .roomCardOcc{margin-top:6px;padding-top:6px;border-top:1px solid var(--border-soft);
+   color:var(--ghost)}
+ #roomCardClose{position:absolute;top:6px;right:8px;background:none;border:none;color:var(--muted);
+   font-size:14px;line-height:1;cursor:pointer;padding:4px}
+ #roomCardClose:hover{color:var(--text)}
  .ch b{color:var(--ghost-bright)}.ch span{color:var(--muted)}
  .ch span.item{cursor:help;border-bottom:1px dotted var(--dim)}
  .log div{color:var(--muted);padding:2px 0;border-bottom:1px solid var(--border-soft);font-size:12px}
@@ -241,14 +293,14 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
     sentence. Reuses the same palette meaning the graph already established (violet=rooms,
     teal=ghosts/actors) rather than inventing a fourth unrelated color language. */
  .hl-room{color:var(--visited);font-weight:600}
- .hl-actor{color:var(--ghost);font-weight:600}
+ .hl-actor{color:var(--ghost);font-weight:600;cursor:pointer}
  .hl-item{color:var(--warm);font-weight:600}
 #flashcount{color:var(--warm);font-weight:600;margin-left:auto;transition:transform .15s}
 #flashcount.pulse{transform:scale(1.3);color:var(--warm-bright)}
 #flashStatus{font-size:.85em;letter-spacing:.05em;white-space:nowrap;cursor:default}
-#metricsLink{color:var(--ghost);cursor:pointer;font-weight:600}
+#metricsLink{color:var(--ghost);cursor:pointer;font-weight:600;text-decoration:none}
 #metricsLink:hover{color:var(--ghost-bright)}
-#evalsLink{color:var(--ghost);cursor:pointer;font-weight:600}
+#evalsLink{color:var(--ghost);cursor:pointer;font-weight:600;text-decoration:none}
 #evalsLink:hover{color:var(--ghost-bright)}
 #staleBanner{display:none;background:var(--warm);color:#1a1206;font-weight:600;font-size:12.5px;
   padding:7px 18px;text-align:center}
@@ -278,8 +330,10 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
  #stream div{color:var(--muted);padding:6px 0;border-bottom:1px solid var(--border-soft);
    font-size:12px;line-height:1.5}
  #stream div.new{animation:flash .8s ease-out}
- #stream .who{color:var(--warm)}
  #stream .evts{color:var(--muted);margin-right:5px;font-size:11px;opacity:.8}
+ /* Fix 2: replaces the old literal "(flash)" text suffix on Flash-generated log lines --
+    small enough to read as a badge, not shout over the sentence it's attached to. */
+ .flashGlyph{color:var(--warm);cursor:help}
  @keyframes flash{from{background:#4fd8c433}to{background:transparent}}
  #streamDot{width:8px;height:8px;border-radius:50%;background:var(--ghost);display:inline-block;
    margin-right:6px;box-shadow:0 0 6px var(--ghost)}
@@ -438,14 +492,14 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
   #flashcount{margin-left:0}
  }
 </style></head><body>
-<div id=staleBanner>⟳ This tab is running an older version of the page — <a href="#" onclick="location.reload();return false">refresh to update</a></div>
+<div id=staleBanner>⟳ This tab is running an older version of the page — <a href="#" onclick="location.reload();return false">refresh to update</a> (safe anytime — your game is saved on the server)</div>
 <div id=itemTooltip></div>
 <header><h1>⚔ DNDMCP</h1><span class=sub id=where>—</span>
  <button id=playBtn type=button title="Start here — the wizard walks you through every way to play">▶ Play</button>
  <span id=flashStatus title="Flash GPU worker status — art can cold-start from zero (up to a few minutes); a page visit already nudged it awake"></span>
- <span id=flashcount>⚡ 0 Flash calls</span>
- <span id=metricsLink title="Click to see system-wide metrics for this world">📊 Metrics</span>
- <span id=evalsLink title="Click to compare model performance (tool-calling reliability + room-gen coherence)">🧪 Evals</span>
+ <span id=flashcount title="Rooms, art, and NPC dialogue generated live on GPU">⚡ 0 Flash calls</span>
+ <a id=metricsLink href="/metrics" target=_blank rel=noopener title="Click to see system-wide metrics for this world">📊 Metrics</a>
+ <a id=evalsLink href="/evals" target=_blank rel=noopener title="Click to compare model performance (tool-calling reliability + room-gen coherence)">🧪 Evals</a>
  <button id=shareBtn title="Copies instructions to paste into your agent (Claude Code/Desktop) running dndmcp">🔗 Share</button></header>
 <div id=tagline>A world that doesn't exist until you step into it — Flash generates every room, item, NPC, and image in real time as you explore.</div>
 <!-- Onboarding wizard (e0b.12) — a modal stepper that owns ALL onboarding now: replaces the
@@ -457,6 +511,8 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
      page, not a separate view. -->
 <div id=wizardOverlay class=wizardOverlay>
  <div id=wizardModal class=panel role=dialog aria-modal=true aria-label="Onboarding wizard">
+  <span id=wizStepIndicator style="position:absolute;top:14px;right:40px;color:var(--muted);
+    font:600 10.5px 'IBM Plex Mono',monospace;letter-spacing:.04em"></span>
   <button id=wizardCloseBtn type=button title="Close (Esc)">✕</button>
   <div id=wizStep1 class=wizStep>
    <h2>How do you want to play?</h2>
@@ -551,13 +607,21 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
   </div>
 </div>
 <main style="margin-top:16px">
- <div class=panel><h2 id=mapTitle>World map (shared, live)</h2><div class=sub id=mapExplainer style="display:none;margin-bottom:2px">one persistent world everyone shares — other players' ghosts have already passed through it</div><div class=sub id=whereInMap style="margin-bottom:2px">—</div>
+ <div class=panel><h2 id=mapTitle>World map (shared, live)</h2><div class=sub id=mapExplainer style="display:none;margin-bottom:2px">one persistent world everyone shares — other players' ghosts have already passed through it</div>
 <div class=sub style="margin-bottom:4px;opacity:.85">
   <span style="color:var(--ghost)">●</span> your room &nbsp;
   <span style="color:var(--visited)">●</span> places you've been &nbsp;
   <span style="color:var(--dim)">●</span>&thinsp;??? not yet discovered &nbsp;
-  <b style="color:var(--text)">2</b> = players in that room now</div>
-<div class=sub style="margin-bottom:8px;opacity:.6">scroll + ⌘/Ctrl to zoom · drag to pan · click a room for details</div><div id=map><span id=mapEmpty class=empty>no adventure yet — start one in your agent</span><div id=nodeTooltip></div></div></div>
+  <span style="color:var(--warm)">◆</span> loot &nbsp;
+  <span style="color:var(--danger)">✕</span> monster &nbsp;
+  <span style="color:var(--ghost)">👻</span> a player</div>
+<div class=sub style="margin-bottom:8px;opacity:.6">scroll + ⌘/Ctrl to zoom · drag to pan · click a discovered room to zoom in + open details</div><div id=map><div id=mapEmpty class=empty>
+  <div>Nothing here yet — be the first to step into this world, or see what's happening elsewhere.</div>
+  <div style="display:flex;gap:8px">
+   <button id=mapEmptyPlayBtn type=button class=choiceBtn>▶ Play</button>
+   <button id=mapEmptyBrowseBtn type=button class=choiceBtn>🌍 Browse other worlds</button>
+  </div>
+ </div><div id=nodeTooltip></div><div id=roomCard><button id=roomCardClose aria-label=close>✕</button><div id=roomCardBody></div></div></div></div>
  <div class=panel>
   <div class=midTabbar>
    <button class=midTabBtn data-miditab=stream>Live world stream</button>
@@ -575,9 +639,9 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
     <span id=streamSub>every player, every session</span>
     <select id=streamFilterSelect style="margin-left:auto;background:var(--link);color:var(--text);border:1px solid var(--border);border-radius:5px;padding:3px 6px;font:11.5px 'IBM Plex Mono',monospace">
      <option value=all>All events</option>
-     <option value=flash>⚡ Flash calls only</option>
+     <option value=flash>⚡ Generation only</option>
      <option id=streamFilterSpectateOpt value=spectate disabled>👀 Spectating only</option>
-     <option value=bot_chat>🤖 Bot chat only</option>
+     <option value=bot_chat>🤖 Bot players only</option>
      <option value=combat>⚔ Combat only</option>
      <option value=movement>🚶 Movement only</option>
      <option value=items>🎒 Items only</option>
@@ -694,10 +758,19 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
 const params = new URLSearchParams(location.search);
 const playerId = params.get('player');
 const campaignId = params.get('campaign') || 'main';
+// Truncated the same way /state truncates every OTHER player's id (see its own comment) --
+// lets renderGraph's ghost-dot rendering tell "this dot is literally you" apart from "just
+// another player in the same room" without ever needing the server to echo your own full
+// credential back. Only ever set for the BYO-agent share-link flow (?player= in the URL) --
+// browser-chat sessions (cookie-only) fall back to a name+room heuristic, see ghostIsMine().
+const myTruncId = playerId ? playerId.slice(0, 6) : null;
 
 // Map title copy (e0b.12): main gets the "this is the real shared world" explainer; any other
-// world keeps the plain title -- its own [world: <id>] tag already shows up in #whereInMap
-// every tick() (see the worldTag logic below), so it doesn't need a second static label here.
+// world keeps the plain title -- its own [world: <id>] tag already shows up in the header's
+// #where status line every tick() (see the worldTag logic below; the map panel used to
+// duplicate that same line into #whereInMap, which just meant the same sentence appeared
+// twice on screen -- #where is now the single identity/status line, the map panel only ever
+// carries its own legend + controls hint).
 if (campaignId === 'main') {
   document.getElementById('mapTitle').textContent = 'World map — the main shared world';
   document.getElementById('mapExplainer').style.display = '';
@@ -735,6 +808,10 @@ const WIZARD_DISMISSED_KEY = 'dndmcp_wizard_dismissed';
 
 function showWizStep(id){
   WIZ_STEPS.forEach(s => { document.getElementById(s).style.display = (s === id) ? 'block' : 'none'; });
+  // Subtle "1 / 2" progress -- step 1 is "how do you want to play", everything past it
+  // (2a/2b/2c: which world / connect your agent / build your world) is sub-steps of the
+  // same logical "step 2", not a deep multi-step flow worth counting further.
+  document.getElementById('wizStepIndicator').textContent = id === 'wizStep1' ? '1 / 2' : '2 / 2';
 }
 function openWizard(step){
   document.getElementById('wizardOverlay').style.display = 'flex';
@@ -749,7 +826,21 @@ function closeWizard(){
   // browser, per the task's own "no dismissal remembered... remember in localStorage" note.
   try{ localStorage.setItem(WIZARD_DISMISSED_KEY, '1'); }catch(e){}
 }
-document.getElementById('playBtn').addEventListener('click', () => openWizard('wizStep1'));
+// hasLiveCharacter (fix 5): true once tick() has seen a current_room for this page -- i.e.
+// the header already says "Playing as X". Once that's true, #playBtn stops being an
+// onboarding entry point (there's nothing left to onboard) and becomes a plain "reopen my
+// chat" shortcut -- restarting the wizard from step 1 for someone already playing was
+// confirmed-live confusing (looked like it wanted to abandon the character and start over).
+let hasLiveCharacter = false;
+document.getElementById('playBtn').addEventListener('click', () => {
+  if (hasLiveCharacter) {
+    showMidTab('chat');
+    const input = document.getElementById('chatInput');
+    if (input) input.focus();
+    return;
+  }
+  openWizard('wizStep1');
+});
 document.getElementById('wizardCloseBtn').addEventListener('click', () => closeWizard());
 document.getElementById('wizardOverlay').addEventListener('click', (e) => {
   if (e.target.id === 'wizardOverlay') closeWizard();  // click on the backdrop, not the modal card
@@ -851,6 +942,16 @@ function showTab(name){
   document.querySelectorAll('.tabBody').forEach(el => el.classList.toggle('active', el.id === 'tab-' + name));
 }
 document.querySelectorAll('.tabBtn').forEach(b => b.addEventListener('click', () => showTab(b.dataset.tab)));
+
+// Fix 7: the empty-map state's two actions -- Play opens the same onboarding wizard #playBtn
+// does; Browse jumps to the existing bottom Browse tab (real content already exists there,
+// this just surfaces it from the dead-end empty state instead of leaving "start one in your
+// agent" as the only, agent-only, path in).
+document.getElementById('mapEmptyPlayBtn').addEventListener('click', () => openWizard('wizStep1'));
+document.getElementById('mapEmptyBrowseBtn').addEventListener('click', () => {
+  showTab('browse');
+  document.querySelector('.tabBtn[data-tab=browse]').scrollIntoView({behavior: 'smooth', block: 'center'});
+});
 
 // Middle panel's OWN tab group (Live world stream / Play here) — deliberately separate
 // function/classes from showTab() above (see the .midTabBtn CSS comment for why reusing
@@ -983,6 +1084,23 @@ document.getElementById('shareBtn').addEventListener('click', async () => {
   }
 });
 function esc(s){ return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+// Fix 2: server-side log text sometimes ends with a literal " (flash)" marker (see server.py's
+// various world.log() calls, e.g. "art for X (flash)" / "Y appeared in Z (flash)."). That raw
+// substring is also what /state's flash-call counter and /stream/events' flash_only filter
+// grep for server-side (text LIKE '%(flash)%'), so the STORED text has to keep saying it --
+// this only changes how a line is DISPLAYED: strip the suffix (keeping any trailing period)
+// and show a small ⚡ glyph instead, so it reads as story text with a subtle GPU badge, not
+// "...(flash)." shouted as an implementation detail.
+const FLASH_SUFFIX_RE = / \\(flash\\)(\\.?)$/;
+function formatLogText(text){
+  const m = FLASH_SUFFIX_RE.exec(text);
+  if(!m) return {clean: text, isFlash: false};
+  return {clean: text.slice(0, m.index) + m[1], isFlash: true};
+}
+function flashGlyphHtml(isFlash){
+  return isFlash
+    ? ' <span class=flashGlyph title="generated live on GPU (Runpod Flash)">⚡</span>' : '';
+}
 function escRegex(s){ return s.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&'); }
 // Relative "Xs/m/h/d ago" for stream events -- ev.ts is already a bare epoch-seconds float
 // from the log table (see /stream/events), just never rendered. Coarse buckets on purpose:
@@ -1009,6 +1127,11 @@ setInterval(() => {
 // one flat gray sentence. Accumulates across the whole session (never resets) so older log
 // lines mentioning a room/monster that's since left the current snapshot stay highlighted.
 const highlightClassOf = {};
+// Fix 9: a real player's name -> their (truncated) player_id, so clicking their highlighted
+// name in the stream can spectate them (see the streamEl click-delegation handler below) --
+// only ever populated for actual players, never monsters (also 'hl-actor', but not
+// spectatable), so a click on a monster's name safely no-ops via the lookup miss.
+const actorPlayerIdByName = {};
 let highlightTerms = [];
 let highlightRegex = null;
 function noteHighlightTerm(name, cls){
@@ -1020,7 +1143,10 @@ function noteHighlightTerm(name, cls){
 function rebuildHighlightIndex(state){
   const before = highlightTerms.length;
   (state.rooms||[]).forEach(r => noteHighlightTerm(r.name, 'hl-room'));
-  (state.players||[]).forEach(p => noteHighlightTerm(p.name, 'hl-actor'));
+  (state.players||[]).forEach(p => {
+    noteHighlightTerm(p.name, 'hl-actor');
+    if(p.name) actorPlayerIdByName[p.name.trim()] = p.player_id;
+  });
   (state.rooms||[]).forEach(r => (r.contents||[]).forEach(c =>
     noteHighlightTerm(c.name, c.type==='monster' ? 'hl-actor' : 'hl-item')));
   if(highlightTerms.length === before) return;  // nothing new -> keep the existing regex
@@ -1047,6 +1173,10 @@ const svg = d3.select('#map').append('svg').attr('width','100%').attr('height','
 // see them (browser scroll does nothing for SVG content — it just clips). Real pan/zoom via
 // d3-zoom instead: scroll wheel to zoom, drag to pan, applied to one wrapper group so the
 // force simulation's own coordinates never need to change.
+// One <clipPath> per discovered room with art (see renderGraph's enter block) lives here --
+// a single shared <defs>, not one per node group, since SVG clipPath ids just need to be
+// unique document-wide, not nested inside the node they clip.
+const defs = svg.append('defs');
 const zoomLayer = svg.append('g');
 const linkLayer = zoomLayer.append('g');
 const frontierLayer = zoomLayer.append('g');
@@ -1081,15 +1211,20 @@ const SPECTATE_ACTIVE_WINDOW_S = 600;  // "active now" = acted in the last 10 mi
 // filtering the existing connection by player_id rather than opening a second one.
 const STREAM_FILTER_MODES = {
   all:      {title: 'Live world stream', sub: 'every player, every session'},
-  flash:    {title: 'Flash calls', sub: 'every GPU generation call this world has made', flashOnly: true},
+  flash:    {title: 'Generation', sub: 'every GPU generation call this world has made', flashOnly: true},
   spectate: {title: 'Spectating', sub: "only the character you're watching above"},
-  bot_chat: {title: 'Bot chat', sub: 'what the self-playing characters are doing', kindPrefix: 'bot.'},
+  bot_chat: {title: 'Bot players', sub: 'what the self-playing characters are doing', kindPrefix: 'bot.'},
   combat:   {title: 'Combat', sub: 'every fight, this world', kindPrefix: 'combat.'},
   movement: {title: 'Movement', sub: 'who went where', kindPrefix: 'player.'},
   items:    {title: 'Items', sub: 'picked up, dropped, given', kindPrefix: 'item.'},
   npc:      {title: 'NPC talk', sub: 'conversations with NPCs', kindPrefix: 'npc.'},
 };
 let streamFilterMode = 'all';
+// Level-of-detail threshold (requirement 5): below this scale, medallions/pips/ghost-name
+// labels fade out via the .full-detail CSS class (see applyLOD) so a zoomed-out view of a
+// big world stays readable instead of turning into soup — only your own room and whichever
+// node is currently selected stay at full detail regardless of zoom.
+const LOD_ZOOM_THRESHOLD = 0.7;
 const zoomBehavior = d3.zoom().scaleExtent([0.25, 4])
   // Plain mouse-wheel over the SVG used to always zoom, which d3 implements by calling
   // preventDefault() on the wheel event — that's what trapped page scroll the instant the
@@ -1100,6 +1235,7 @@ const zoomBehavior = d3.zoom().scaleExtent([0.25, 4])
   .on('zoom', (event) => {
     zoomLayer.attr('transform', event.transform);
     if(event.sourceEvent) userInteracted = true;
+    applyLOD();
   });
 svg.call(zoomBehavior);
 
@@ -1117,13 +1253,55 @@ function fitToView(nodes){
   svg.transition().duration(400).call(zoomBehavior.transform, t);
 }
 
-// Click a node -> center the view on it (keeping current zoom level) and show its details
-// in the "Selected room" panel. Discovered rooms show real content; undiscovered ones stay
-// "???" here too (a click can't reveal what you haven't actually been to).
-function centerOn(d){
-  const k = d3.zoomTransform(svg.node()).k;
+// Click a node -> center the view on it and show its details in the "Selected room" panel
+// (and, for a discovered room, the in-map card — see showRoomCard). Discovered rooms show
+// real content; undiscovered ones stay "???" here too (a click can't reveal what you haven't
+// actually been to). `boostZoom` (requirement 8) additionally raises the zoom level to at
+// least LOD_ZOOM_THRESHOLD*~2 so the click always lands ABOVE the LOD threshold — the node's
+// full detail (medallion/pips/ghosts) and the card appear together, never a detailed card
+// floating over a low-detail dot. Never lowers an already-higher zoom level.
+function centerOn(d, boostZoom){
+  let k = d3.zoomTransform(svg.node()).k;
+  if(boostZoom && k < 1.6) k = 1.6;
   const t = d3.zoomIdentity.translate(W/2 - d.x*k, H/2 - d.y*k).scale(k);
   svg.transition().duration(500).call(zoomBehavior.transform, t);
+}
+// Shared building blocks for room detail rendering (requirement 8's floating card reuses the
+// SAME data/markup shape as the sidebar's "Selected room" panel — see showRoomCard below —
+// rather than duplicating the feature/monster/loot list logic a second time).
+function roomOccupantsOf(d){ return d.occupants || []; }
+// Fix 12: "vault · underground · danger ▲▲" -- kind (specific, e.g. "vault") + category
+// (broad, e.g. "underground", see worldgen.ROOM_CATEGORIES) + a danger tick count, each part
+// only included when it adds something (category dropped when it's redundant with kind;
+// danger dropped entirely at 0 -- a "safe" badge on every ordinary room would just be noise).
+// Shared by both the hover tooltip and the in-map/sidebar room card so the two surfaces never
+// drift out of sync on what "danger" means visually.
+function roomKindLine(d){
+  const parts = [];
+  if(d.kind) parts.push(d.kind);
+  if(d.category && d.category !== d.kind) parts.push(d.category);
+  let line = parts.join(' · ');
+  const danger = d.danger || 0;
+  if(danger > 0) line += (line ? ' · ' : '') + 'danger ' + '▲'.repeat(danger);
+  return line;
+}
+function roomDetailInnerHtml(d, imgAttrs){
+  const img = d.image_ref
+    ? `<img src="/art/${encodeURIComponent(d.image_ref)}.png" ${imgAttrs||''} onerror="this.style.display='none'">`
+    : '';
+  const kindLine = roomKindLine(d);
+  const kind = kindLine ? `<div class="roomCardKind">${esc(kindLine)}</div>` : '';
+  const feats = (d.features||[]).map(f => `<div>• ${esc(f)}</div>`).join('');
+  const monsters = (d.contents||[]).filter(c=>c.type==='monster')
+    .map(c => `<div>✕ ${esc(c.name)} (HP ${c.hp})</div>`).join('');
+  const loot = (d.contents||[]).filter(c=>c.type==='loot')
+    .map(c => `<div>◆ ${esc(c.name)}</div>`).join('');
+  // Bot names already carry their own 🤖 prefix server-side (see World.mark_bot) -- only
+  // add the 👻 ghost marker for a non-bot, so a bot never reads "👻 🤖 Kex-7".
+  const occ = roomOccupantsOf(d).map(p =>
+    `<div>${p.is_bot ? '' : '👻 '}${esc(p.name)}</div>`).join('');
+  return `${img}<b>${esc(d.name)}</b>${kind}<br><span>${esc(d.description||'')}</span>`
+    + feats + monsters + loot + (occ ? `<div class="roomCardOcc">${occ}</div>` : '');
 }
 let _roomInfoOpenId = null;  // guards the async regen callback below against a stale write
                               // if the player clicks a DIFFERENT room before it resolves
@@ -1131,15 +1309,7 @@ function showRoomInfo(d){
   _roomInfoOpenId = d.id;
   const el = document.getElementById('roomInfo');
   if(!d.discovered){ el.innerHTML = '<span class=empty>??? — not discovered yet</span>'; return; }
-  const img = d.image_ref
-    ? `<img src="/art/${encodeURIComponent(d.image_ref)}.png" style="width:100%;border-radius:6px;image-rendering:pixelated">`
-    : '';
-  const feats = (d.features||[]).map(f => `<div>• ${esc(f)}</div>`).join('');
-  const monsters = (d.contents||[]).filter(c=>c.type==='monster')
-    .map(c => `<div>⚔ ${esc(c.name)} (HP ${c.hp})</div>`).join('');
-  const loot = (d.contents||[]).filter(c=>c.type==='loot')
-    .map(c => `<div>✦ ${esc(c.name)}</div>`).join('');
-  el.innerHTML = `${img}<b>${esc(d.name)}</b><br><span>${esc(d.description||'')}</span>${feats}${monsters}${loot}`;
+  el.innerHTML = roomDetailInnerHtml(d, 'style="width:100%;border-radius:6px;image-rendering:pixelated"');
   // On-demand backstop: art otherwise only ever generates once, at room creation — if that
   // one speculative attempt transiently fails (observed live: a brief GPU-allocation hiccup
   // can silently drop a room's art forever), nothing else ever revisits it. Safe to fire on
@@ -1151,16 +1321,49 @@ function showRoomInfo(d){
         if(res.image_ref && _roomInfoOpenId === d.id){
           d.image_ref = res.image_ref;
           showRoomInfo(d);
+          if(roomCardOpenId === d.id) showRoomCard(d);
         }
       }).catch(()=>{});
   }
 }
 
+// Floating in-map room card (requirement 8) — the PRIMARY detail surface for a click now;
+// the sidebar "Selected room" panel (showRoomInfo above) stays in sync alongside it rather
+// than being replaced. Only ever opened for a DISCOVERED node (see the node click handler).
+let roomCardOpenId = null;
+function showRoomCard(d){
+  roomCardOpenId = d.id;
+  const el = document.getElementById('roomCard');
+  const body = document.getElementById('roomCardBody');
+  // Anchor to whichever top corner is farther from the clicked node's current ON-SCREEN
+  // position (not its raw simulation x/y — those don't account for pan/zoom), so the card
+  // never lands on top of the node it's describing.
+  const t = d3.zoomTransform(svg.node());
+  const screenX = t.applyX(d.x);
+  el.classList.toggle('anchor-right', screenX < W/2);
+  el.classList.toggle('anchor-left', screenX >= W/2);
+  body.innerHTML = roomDetailInnerHtml(d, '');
+  el.style.display = 'block';
+}
+function hideRoomCard(){
+  roomCardOpenId = null;
+  document.getElementById('roomCard').style.display = 'none';
+}
+document.getElementById('roomCardClose').addEventListener('click', hideRoomCard);
+document.addEventListener('keydown', (e) => { if(e.key === 'Escape') hideRoomCard(); });
+// Click empty map space (the svg background, not a node) to dismiss — node clicks call
+// event.stopPropagation() specifically so opening the card doesn't immediately close itself.
+svg.on('click', () => hideRoomCard());
+
 const simulation = d3.forceSimulation()
   .force('charge', d3.forceManyBody().strength(-220))
   .force('link', d3.forceLink().id(d=>d.id).distance(90))
   .force('center', d3.forceCenter(W/2, H/2))
-  .force('collide', d3.forceCollide(24))
+  // Bumped 24 -> 36 (requirement 6): discovered nodes now carry an art medallion, up to 3
+  // rim pips, and a small fan of ghost dots+labels — the same layout MODEL (still plain
+  // forceCollide, just a larger radius), sized for that bigger visual footprint so two
+  // adjacent discovered rooms' decorations don't overlap.
+  .force('collide', d3.forceCollide(36))
   .on('tick', ticked)
   // Fit once the simulation actually settles (alpha decays below its minimum), not on a
   // guessed timeout — a fixed delay went stale because the reheated sim keeps drifting
@@ -1185,6 +1388,181 @@ new ResizeObserver(entries => {
 
 let nodesById = {};
 let lastSignature = '';
+// Real room name -> id, rebuilt every renderGraph — lets the event-pulse handler (requirement
+// 4) resolve a log line that NAMES a room into the node to pulse, the same underlying
+// knowledge highlightKnown() already carries for the text stream, just keyed for a direct
+// lookup instead of a regex sweep.
+let roomNameToId = {};
+
+// Shared hover tooltip (requirement 7's richer per-node/per-pip content) — one div, reused
+// by the node itself, its loot/monster pips, and the "+n" overflow marker. innerHTML is safe
+// here because every caller passes already-esc()'d text.
+const tooltip = document.getElementById('nodeTooltip');
+function showTooltip(html){ tooltip.innerHTML = html; tooltip.style.display = 'block'; }
+function moveTooltip(event){
+  const rect = document.getElementById('map').getBoundingClientRect();
+  const x = event.clientX - rect.left, y = event.clientY - rect.top;
+  // Flip to the LEFT/ABOVE the cursor once there isn't roughly a tooltip's worth of room on
+  // the right/below -- otherwise an auto-width box positioned near #map's own edge gets
+  // squeezed by the browser's shrink-to-fit sizing into an unreadable narrow sliver
+  // (confirmed live once tooltip content grew past a single short line -- see the CSS
+  // max-width comment). #map itself clips overflow, so there's no native scroll to rely on.
+  tooltip.style.left = (x + 224 > rect.width ? x - 224 : x + 14) + 'px';
+  tooltip.style.top = (y + 120 > rect.height ? y - 110 : y + 10) + 'px';
+}
+function hideTooltip(){ tooltip.style.display = 'none'; }
+
+// SVG ids can't contain ':' safely everywhere a raw room id (e.g. "r0:north:east") would put
+// one -- used for each discovered room's own <clipPath> id (see the enter block below).
+function domId(id){ return 'clip-' + String(id).replace(/[^a-zA-Z0-9_-]/g, '_'); }
+// Undiscovered rooms stay small and dim ("visually quieter" — requirement 1); discovered
+// ones (medallion or plain fill) get the original full size.
+function radiusFor(d){ return d.discovered ? 16 : 8; }
+// Fix 11: danger 1/2 reuse the SAME amber as loot/spectate (--warm) rather than inventing new
+// hex steps, just at rising opacity (faint -> strong) so it stays a tint, not a beacon; danger
+// 3 promotes to the actual monster-pip red (--danger), full opacity -- "this is a real
+// threat," not just "watch out." Undiscovered rooms never show it (nothing to warn about
+// yet); mine/spectating always win over it (see the stroke/opacity wiring below), same as
+// they already win over the plain discovered/image_ref stroke.
+function dangerRingColor(d){
+  if(!d.discovered || !d.danger) return null;
+  return d.danger >= 3 ? 'var(--danger)' : 'var(--warm)';
+}
+function dangerRingOpacity(d){
+  if(!d.discovered || !d.danger) return 1;
+  return d.danger >= 2 ? 0.9 : 0.4;
+}
+
+// Requirement 7: room name (+ kind, if the room has one), a one-line contents summary, and
+// who's standing there — all in the existing #nodeTooltip, kept small/instant (a glance, not
+// a card — the floating room CARD, requirement 8, is the deep-dive surface).
+function nodeTooltipHtml(d){
+  if(!d.discovered) return '???';
+  let html = `<b>${esc(d.name)}</b>`;
+  const kindLine = roomKindLine(d);
+  if(kindLine) html += `<br><span style="color:var(--muted)">${esc(kindLine)}</span>`;
+  const contents = d.contents || [];
+  const lootN = contents.filter(c => c.type === 'loot').length;
+  const monsters = contents.filter(c => c.type === 'monster');
+  const bits = [];
+  if(lootN) bits.push(`◆ ${lootN} item${lootN === 1 ? '' : 's'}`);
+  if(monsters.length) bits.push(`✕ ${monsters.map(m => esc(m.name)).join(', ')}`);
+  if(bits.length) html += `<br><span>${bits.join(' · ')}</span>`;
+  // See roomDetailInnerHtml's identical comment: bot names already carry their own 🤖 prefix.
+  const occ = d.occupants || [];
+  if(occ.length) html += `<br><span>${occ.map(p => (p.is_bot ? '' : '👻 ') + esc(p.name)).join(', ')}</span>`;
+  return html;
+}
+
+// Requirement 3: is this occupant dot literally YOU? The BYO-agent share-link flow carries
+// your real (truncated) id client-side (myTruncId) for an exact match; the cookie-based
+// browser-play flow never exposes that id to the client (see /state's own comment on why),
+// so it falls back to a name match against your own character sheet -- good enough at this
+// scale (one shared world, no real anonymity pressure on character names).
+function ghostIsMine(o, you){
+  if(myTruncId) return o.player_id === myTruncId;
+  return !!(you && o.name === you.name);
+}
+
+// Requirement 2: up to 3 contents pips fanned along the node's lower rim -- amber diamond
+// per loot, danger-red tick per monster -- plus a "+n" overflow marker. Contents are only
+// ever drawn for DISCOVERED rooms (the underlying /state payload ships contents regardless
+// of discovery, same as it always has for showRoomInfo's sidebar card -- this just adds the
+// same discovered-gate to the new on-graph rendering, not a new leak).
+function renderPips(nodeSel){
+  nodeSel.each(function(d){
+    const pg = d3.select(this).select('g.pips');
+    const contents = d.discovered ? (d.contents || []) : [];
+    pg.style('display', contents.length ? null : 'none');
+    const shown = contents.slice(0, 3);
+    const overflowN = contents.length - shown.length;
+    const pipSel = pg.selectAll('g.pip').data(shown, (c, i) => (c.id || c.name || '') + ':' + i);
+    pipSel.exit().remove();
+    const pipEnter = pipSel.enter().append('g').attr('class', c => 'pip pip-' + (c.type || 'loot'));
+    pipEnter.append('path');
+    const pipMerged = pipEnter.merge(pipSel);
+    const n = shown.length;
+    pipMerged.attr('transform', (c, i) => {
+      const startDeg = 100, endDeg = 260;
+      const deg = n === 1 ? 180 : startDeg + i * (endDeg - startDeg) / (n - 1);
+      const rad = deg * Math.PI / 180, r = 18;
+      return `translate(${Math.cos(rad) * r},${Math.sin(rad) * r})`;
+    });
+    pipMerged.select('path')
+      .attr('d', c => c.type === 'monster' ? 'M-3,-3 L3,3 M3,-3 L-3,3' : 'M0,-4 L4,0 L0,4 L-4,0 Z')
+      .attr('fill', c => c.type === 'monster' ? 'none' : 'var(--warm)')
+      .attr('stroke', c => c.type === 'monster' ? 'var(--danger)' : 'none')
+      .attr('stroke-width', 1.6).attr('stroke-linecap', 'round');
+    pipMerged.on('mouseenter', (event, c) =>
+        showTooltip(c.type === 'monster' ? `${esc(c.name)} — ${c.hp} HP` : esc(c.name)))
+      .on('mousemove', (event) => moveTooltip(event))
+      .on('mouseleave', () => showTooltip(nodeTooltipHtml(d)));
+    let ov = pg.select('text.pipOverflow');
+    if(overflowN > 0){
+      if(ov.empty()) ov = pg.append('text').attr('class', 'pipOverflow')
+        .attr('font-size', 8).attr('fill', 'var(--muted)').attr('text-anchor', 'middle');
+      const restNames = contents.slice(3).map(c => c.name).join(', ');
+      ov.attr('transform', 'translate(19,19)').text('+' + overflowN)
+        .on('mouseenter', () => showTooltip(esc(restNames)))
+        .on('mousemove', (event) => moveTooltip(event))
+        .on('mouseleave', () => showTooltip(nodeTooltipHtml(d)));
+    } else if(!ov.empty()){ ov.remove(); }
+  });
+}
+
+// Requirement 3: replaces the old numeric occupant-count badge with small teal ghost dots
+// (one per player in the room) stacked vertically just outside the node so labels never
+// overlap, each with a tiny name label; your own character glows brighter, bots get a 🤖
+// prefix. Capped at 4 dots + a "+n more" row, same soup-avoidance cap as the contents pips.
+function renderGhosts(nodeSel, you){
+  nodeSel.each(function(d){
+    const g = d3.select(this).select('g.ghosts');
+    const all = d.occupants || [];
+    const shown = all.slice(0, 4);
+    const overflowN = all.length - shown.length;
+    const rowCount = shown.length + (overflowN > 0 ? 1 : 0);
+    const sel = g.selectAll('g.ghost').data(shown, o => o.player_id);
+    sel.exit().remove();
+    const enter = sel.enter().append('g').attr('class', 'ghost');
+    enter.append('circle').attr('class', 'ghostDot').attr('r', 3.5)
+      .attr('stroke', '#0a0713').attr('stroke-width', 1);
+    enter.append('text').attr('class', 'ghostLabel').attr('font-size', 7.5)
+      .attr('x', 6).attr('dy', 2.5);
+    const merged = enter.merge(sel);
+    merged.attr('transform', (o, i) => `translate(18, ${(i - (rowCount - 1) / 2) * 10})`);
+    merged.select('circle.ghostDot')
+      .attr('fill', o => ghostIsMine(o, you) ? '#8ff0e0' : 'var(--ghost)')
+      .style('filter', o => ghostIsMine(o, you) ? 'drop-shadow(0 0 4px #8ff0e0)' : null);
+    merged.select('text.ghostLabel')
+      .attr('fill', o => ghostIsMine(o, you) ? '#8ff0e0' : 'var(--ghost)')
+      // Bot names already carry their own 🤖 prefix server-side (World.mark_bot) -- no
+      // second prefix added here.
+      .text(o => o.name);
+    let ov = g.select('text.ghostOverflow');
+    if(overflowN > 0){
+      if(ov.empty()) ov = g.append('text').attr('class', 'ghostOverflow')
+        .attr('font-size', 7.5).attr('fill', 'var(--muted)').attr('x', 18).attr('dy', 2.5);
+      ov.attr('transform', `translate(18, ${(shown.length - (rowCount - 1) / 2) * 10})`)
+        .text('+' + overflowN + ' more');
+    } else if(!ov.empty()){ ov.remove(); }
+  });
+}
+
+// Requirement 4: a one-shot expanding, fading ring on whichever node a just-arrived stream
+// event named — see the 'world-event' handler below for how the target room id is resolved
+// (subject_type/subject_id when present, else a roomNameToId text match). Purely decorative;
+// never touches the simulation/layout, just an extra SVG element that removes itself.
+function pulseNode(roomId){
+  const sel = nodeLayer.selectAll('g.node').filter(d => d.id === roomId);
+  sel.each(function(){
+    const ring = d3.select(this).insert('circle', ':first-child')
+      .attr('class', 'pulseRing').attr('r', 16).attr('fill', 'none')
+      .attr('stroke', 'var(--ghost)').attr('stroke-width', 2.5).style('opacity', 0.85);
+    ring.transition().duration(900).ease(d3.easeCubicOut)
+      .attr('r', 42).style('opacity', 0)
+      .on('end', function(){ d3.select(this).remove(); });
+  });
+}
 
 function ticked(){
  linkLayer.selectAll('line').attr('x1',d=>d.source.x).attr('y1',d=>d.source.y)
@@ -1197,15 +1575,37 @@ function ticked(){
  nodeLayer.selectAll('g.node').attr('transform', d=>`translate(${d.x},${d.y})`);
 }
 
-// Only the selected node ever gets its name drawn on the map (undiscovered nodes still show
-// "???" so clicking one doesn't silently confirm there's nothing there) — bound to the live
-// data already on each g.node datum, so this is cheap enough to call on every click without
-// waiting for the next poll's full renderGraph.
+// Undiscovered nodes always show "???" (so clicking one doesn't silently confirm there's
+// nothing there) at any zoom the label itself is visible at. Discovered nodes: your own
+// room and whichever node is selected always show their real name; every OTHER discovered
+// room now ALSO shows a small persistent label, but only once zoomed in past the LOD
+// threshold (requirement 5) — below it, .full-detail is only set on the always-full nodes,
+// and the CSS opacity rule (not this function) fades the rest out, same mechanism as
+// pips/ghost-name labels. Bound to the live data already on each g.node datum, so this stays
+// cheap enough to call on every click/zoom without waiting for the next poll's full
+// renderGraph.
 function updateLabels(){
+ // Text/color/weight are set unconditionally here; ACTUAL visibility below the LOD
+ // threshold is entirely the CSS ".node:not(.full-detail) .label{opacity:0}" rule above,
+ // keyed off the class applyLOD toggles — so this never has to duplicate that per-zoom
+ // decision itself, and always-full nodes (mine/selected already carry .full-detail
+ // regardless of zoom, see applyLOD) fall out of the same single mechanism for free.
  nodeLayer.selectAll('g.node').select('text.label')
-   .text(d=> !d.discovered ? '???' : (d.id === selectedRoomId ? d.name : ''))
-   .attr('fill', d=> (d.discovered && d.id === selectedRoomId) ? '#8ff0e0' : '#8d7fae')
-   .attr('font-weight', d=> (d.discovered && d.id === selectedRoomId) ? '600' : '400');
+   .text(d=> !d.discovered ? '???' : d.name)
+   .attr('fill', d=> (d.discovered && (d.id === selectedRoomId || d.mine)) ? '#8ff0e0' : '#8d7fae')
+   .attr('font-weight', d=> (d.discovered && (d.id === selectedRoomId || d.mine)) ? '600' : '400');
+}
+
+// Level-of-detail (requirement 5): toggles the .full-detail class that the CSS above keys
+// off of for art/pips/ghost-name-label opacity. A node is full-detail if the CURRENT zoom is
+// past the threshold, OR it's your own room, OR it's the currently-selected node — those two
+// always render fully regardless of zoom (also what lets a click's boosted zoom-in and the
+// room card, requirement 8, always appear together at full detail).
+function applyLOD(){
+ const k = d3.zoomTransform(svg.node()).k;
+ const fullDetailGlobal = k >= LOD_ZOOM_THRESHOLD;
+ nodeLayer.selectAll('g.node')
+   .classed('full-detail', d => fullDetailGlobal || d.mine || d.id === selectedRoomId);
 }
 
 function renderGraph(rooms, players, you){
@@ -1233,24 +1633,29 @@ function renderGraph(rooms, players, you){
  // up fresh from THIS poll's players list every render, so the highlight tracks them live as
  // they actually move, the same way "mine" tracks your own character.
  const spectateTarget = spectateId ? players.find(p=>p.player_id===spectateId) : null;
+ roomNameToId = {};
  for(const r of rooms){
    const n = nodesById[r.id];
    n.name = r.name; n.visited = r.visited; n.discovered = r.discovered;
    n.description = r.description; n.features = r.features; n.contents = r.contents;
-   n.image_ref = r.image_ref;
+   n.image_ref = r.image_ref; n.kind = r.kind || '';
+   n.category = r.category || ''; n.danger = r.danger || 0;  // fixes 11/12 -- danger ring + tooltip/card
    n.mine = you && r.id===you.location_id;
    n.spectating = !!(spectateTarget && r.id===spectateTarget.location_id);
-   n.count = (occupants[r.id]||[]).length;
+   // Requirement 3: full occupant objects now (not just a count) -- ghost dots + their name
+   // labels are drawn straight off this list, see renderGhosts.
+   n.occupants = occupants[r.id] || [];
+   roomNameToId[r.name] = r.id;
  }
  const nodes = rooms.map(r => nodesById[r.id]);
 
- // No persistent name labels on the graph — declutters it into a real "fog of war" map.
- // Discovered rooms reveal their name on HOVER (custom tooltip div, not native SVG <title> --
- // that's unreliable across browsers) and full details on CLICK; undiscovered rooms show
- // "???" outright either way, since there's no secret being protected, just "you haven't
- // been here yet." "You are here" is already conveyed by the gold node color + the header's
- // "You are in: ..." line, so the graph node itself doesn't need its own always-visible label.
- const tooltip = document.getElementById('nodeTooltip');
+ // Undiscovered rooms reveal only "???" everywhere (node label, tooltip, sidebar, card) --
+ // there's no secret being protected, just "you haven't been here yet." Discovered rooms now
+ // show a real medallion (art if generated, plain colored fill otherwise), rim pips for
+ // loot/monsters, ghost dots for whoever's standing there, and (once zoomed in past
+ // LOD_ZOOM_THRESHOLD, or if this is your own/the selected room) a persistent name label --
+ // see applyLOD/updateLabels. "You are here" still gets its own teal glow ring on top of all
+ // of that.
  const nodeSel = nodeLayer.selectAll('g.node').data(nodes, d=>d.id)
    .join(enter => {
      const g = enter.append('g').attr('class','node').style('cursor','pointer');
@@ -1258,41 +1663,91 @@ function renderGraph(rooms, players, you){
      // into existence right now. r=0 -> full size with a bouncy overshoot, so a freshly
      // Flash-generated room visibly POPS in rather than appearing already-rendered. Fill/
      // stroke color still gets set normally right after (below) — only the radius animates.
-     g.append('circle').attr('r',0).attr('stroke-width',2)
-       .transition().duration(650).ease(d3.easeBackOut.overshoot(1.8)).attr('r',16);
+     // UNTOUCHED by this enrichment pass other than the final radius now depending on
+     // discovered state (radiusFor) instead of a flat 16.
+     g.append('circle').attr('class','bg').attr('r',0).attr('stroke-width',2)
+       .transition().duration(650).ease(d3.easeBackOut.overshoot(1.8)).attr('r', d=>radiusFor(d));
+     // Art medallion (requirement 1): a per-node <clipPath> circle in the shared <defs>,
+     // referenced by this node's own <image>. Slightly smaller than the bg circle's radius
+     // so the bg circle's own stroke still reads as a ring around the art. href/visibility
+     // are set on every render below (not gated by structureChanged) since a room's
+     // image_ref can appear on an EXISTING node without the room graph's shape changing.
+     g.each(function(d){
+       defs.select('#' + domId(d.id)).remove();  // guard against a stale dupe if this id ever re-enters
+       defs.append('clipPath').attr('id', domId(d.id)).append('circle').attr('r', 14);
+     });
+     g.append('image').attr('class','art').attr('x',-14).attr('y',-14).attr('width',28).attr('height',28)
+       .attr('preserveAspectRatio','xMidYMid slice').attr('clip-path', d=>`url(#${domId(d.id)})`)
+       .style('opacity', 0)
+       // Fallback (requirement 1): image_ref set but the file 404s / hasn't rendered yet --
+       // hide the <image> so the plain circle underneath shows through, same "always have
+       // SOMETHING sensible on screen" convention as showRoomInfo's own art.
+       .on('error', function(){ d3.select(this).style('display','none'); });
+     g.append('g').attr('class','pips');
+     g.append('g').attr('class','ghosts');
      g.append('text').attr('class','label').attr('y',30).attr('text-anchor','middle')
        .attr('fill','#8d7fae').attr('font-size',10);
-     g.append('text').attr('class','count').attr('y',4).attr('text-anchor','middle')
-       .attr('fill','#0a0713').attr('font-size',10).attr('font-weight','bold');
      // Custom hover tooltip, not a native SVG <title> — native SVG title tooltips are
      // unreliable across browsers (inconsistent/missing in Chrome in particular). A plain
-     // positioned div driven by mouse events works everywhere.
+     // positioned div driven by mouse events works everywhere. Content is now the richer
+     // nodeTooltipHtml (requirement 7) instead of a bare name.
      g.on('mouseenter', function(event, d){
-       tooltip.textContent = d.discovered ? d.name : '???';
-       tooltip.style.display = 'block';
+       showTooltip(nodeTooltipHtml(d));
      }).on('mousemove', function(event){
-       const rect = document.getElementById('map').getBoundingClientRect();
-       tooltip.style.left = (event.clientX - rect.left + 14) + 'px';
-       tooltip.style.top = (event.clientY - rect.top + 10) + 'px';
+       moveTooltip(event);
      }).on('mouseleave', function(){
-       tooltip.style.display = 'none';
+       hideTooltip();
      }).on('click', function(event, d){
+       // stopPropagation: the svg-level background click listener (see hideRoomCard wiring
+       // above) would otherwise immediately close the card this same click just opened.
+       event.stopPropagation();
        selectedRoomId = d.id;
        updateLabels();
-       centerOn(d);
+       applyLOD();
+       if(d.discovered){
+         // Requirement 8: zoom in (landing above the LOD threshold, so the medallion/pips/
+         // ghosts render at full detail together with the card) and open the in-map card.
+         centerOn(d, true);
+         showRoomCard(d);
+       } else {
+         // Undiscovered: select + center only, same as before -- a click can't reveal what
+         // you haven't actually been to, so no card, no forced zoom-in.
+         centerOn(d, false);
+         hideRoomCard();
+       }
        showRoomInfo(d);
      });
      return g;
+   }, update => update, exit => {
+     // Each node owns one <clipPath> in the shared <defs> (for its art medallion) that lives
+     // OUTSIDE the <g class=node> the default exit.remove() would clean up on its own -- do
+     // that cleanup explicitly so a room that somehow drops out of the graph doesn't leak one
+     // forever.
+     exit.each(function(d){ defs.select('#' + domId(d.id)).remove(); });
+     return exit.remove();
    });
- nodeSel.select('circle')
+ nodeSel.select('circle.bg')
+   .attr('r', d=>radiusFor(d))
    .attr('fill', d=> d.mine ? '#4fd8c4' : (d.spectating ? '#e8b339' : (d.visited ? '#8072e0' : '#1c1630')))
-   .attr('stroke', d=> d.mine ? '#8ff0e0' : (d.spectating ? '#f5cc66' : '#453a6b'))
+   // Fix 11: danger ring tint slots in BENEATH mine/spectating (those always win -- a
+   // dangerous room you're standing in still reads as "you are here" first) but ABOVE the
+   // plain discovered/image_ref default.
+   .attr('stroke', d=> d.mine ? '#8ff0e0' : (d.spectating ? '#f5cc66' :
+     (dangerRingColor(d) || (d.discovered && d.image_ref ? '#8072e0' : '#453a6b'))))
+   .attr('stroke-opacity', d=> (d.mine || d.spectating) ? 1 : dangerRingOpacity(d))
+   .attr('stroke-width', d=> (d.discovered && d.image_ref && !d.mine && !d.spectating) ? 1.5 : 2)
    // A soft glow on your own current room (teal) or whoever you're spectating (amber) — you're
    // a ghost too; these are the only nodes genuinely "alive" right now, everything else is
    // just trace/memory. `mine` wins if somehow both are true (you spectating yourself).
    .style('filter', d=> d.mine ? 'drop-shadow(0 0 7px #4fd8c4)' : (d.spectating ? 'drop-shadow(0 0 7px #e8b339)' : null));
+ nodeSel.select('image.art')
+   .attr('href', d => (d.discovered && d.image_ref) ? `/art/${encodeURIComponent(d.image_ref)}.png` : null)
+   .style('display', d => (d.discovered && d.image_ref) ? null : 'none')
+   .style('opacity', d => (d.discovered && d.image_ref) ? 1 : 0);
+ renderPips(nodeSel);
+ renderGhosts(nodeSel, you);
+ applyLOD();
  updateLabels();
- nodeSel.select('text.count').text(d=> d.count ? d.count : '');
 
  // IMPORTANT: link objects' source/target start as plain id STRINGS. d3-force only rewrites
  // them in place into resolved node-object references (what makes `d.source.x` work in
@@ -1348,6 +1803,7 @@ function renderGraph(rooms, players, you){
    lastMineRoomId = you.location_id;
    selectedRoomId = you.location_id;
    updateLabels();
+   applyLOD();
    const mine = nodesById[you.location_id];
    if(mine) showRoomInfo(mine);
  }
@@ -1489,7 +1945,14 @@ async function tick(){
     ? ('Playing as ' + ((s.you && s.you.name) || 'your character') + ' — in ' + (s.current_room.name||''))
     : (playerId ? 'unknown player' : 'Spectating — hit ▶ Play to join, or connect your own agent'));
   document.getElementById('where').textContent = whereText;
-  document.getElementById('whereInMap').textContent = whereText;
+  // Fix 5: flip #playBtn to "Resume" once there's a live character to resume -- see the
+  // button's own click handler above for what hasLiveCharacter changes about its behavior.
+  hasLiveCharacter = !!s.current_room;
+  const playBtn = document.getElementById('playBtn');
+  playBtn.textContent = hasLiveCharacter ? '▶ Resume' : '▶ Play';
+  playBtn.title = hasLiveCharacter
+    ? 'Reopen your chat — jump back in as ' + ((s.you && s.you.name) || 'your character')
+    : 'Start here — the wizard walks you through every way to play';
   // First poll that finds a resumed character while the chat pane still shows its cold
   // "say start an adventure" hint: replace it with an explicit welcome-back so all three
   // panels (header, character card, chat) tell the SAME story about who you are. Direct
@@ -1568,7 +2031,10 @@ async function tick(){
   // esc() FIRST, always -- this was previously raw l.text with no escaping at all, a stored-
   // XSS gap (log_event's free-form agent-authored text would render as live HTML for every
   // viewer). highlightKnown only wraps matches in spans; it never introduces new raw content.
-  document.getElementById('log').innerHTML=(s.log||[]).map(l=>`<div>${highlightKnown(esc(l.text))}</div>`).join('')||'<div class=empty>—</div>';
+  document.getElementById('log').innerHTML=(s.log||[]).map(l=>{
+    const {clean, isFlash} = formatLogText(l.text);
+    return `<div>${highlightKnown(esc(clean))}${flashGlyphHtml(isFlash)}</div>`;
+  }).join('')||'<div class=empty>—</div>';
   const fc = document.getElementById('flashcount');
   const n = s.flash_calls||0;
   if(n !== lastFlashCalls){
@@ -1612,6 +2078,24 @@ const filterSpectateOpt = document.getElementById('streamFilterSpectateOpt');
 let es = null;
 let streamCaughtUp = true;
 
+// Fix 9: playtest observed clicking a highlighted player name (.hl-actor) in the stream
+// opening the Play wizard -- no such wiring exists in this file (the wizard only ever opens
+// via #playBtn/#mapEmptyPlayBtn or the cold-visitor auto-open), but a click on a highlighted
+// name doing NOTHING was also confirmed confusing (it visually reads like a link). Give it a
+// real, narrow, delegated handler instead -- selects/spectates that player, explicitly
+// stops propagation so it can never bubble into some future catch-all, and simply no-ops for
+// a monster's (also .hl-actor) name, which isn't in actorPlayerIdByName at all.
+streamEl.addEventListener('click', (e) => {
+  const el = e.target.closest('.hl-actor');
+  if (!el) return;
+  e.stopPropagation();
+  const pid = actorPlayerIdByName[el.textContent.trim()];
+  if (!pid) return;
+  lastSpectateName = null;
+  selectSpectate(pid);
+  renderSpectateBar(lastPlayers, lastRooms);
+});
+
 function connectStream(){
   if (es) es.close();
   streamEl.innerHTML = '<div class=empty>waiting for the world to move...</div>';
@@ -1635,9 +2119,15 @@ function connectStream(){
     const empty = streamEl.querySelector('.empty');
     if (empty) empty.remove();
     const div = document.createElement('div');
+    // Fix 2: used to lead every row with the raw truncated player-id hex ("b3b6ab Corvin
+    // Ashgrave moved..."), confirmed live as noise -- the name is already highlighted in the
+    // text itself via highlightKnown() below, so the hex added nothing but clutter. Kept as a
+    // (non-rendered) data attribute, not deleted outright -- the actor-name click-to-spectate
+    // handler further down still needs SOME way to resolve a clicked name back to a player_id.
+    if (ev.player_id) div.dataset.playerId = ev.player_id;
     const when = ev.ts ? `<span class=evts data-ts="${ev.ts}">${relTime(ev.ts)}</span> ` : '';
-    const who = ev.player_id ? `<span class=who>${esc(ev.player_id.slice(0,6))}</span> ` : '';
-    div.innerHTML = `${when}${who}${highlightKnown(esc(ev.text))}`;
+    const {clean, isFlash} = formatLogText(ev.text);
+    div.innerHTML = `${when}${highlightKnown(esc(clean))}${flashGlyphHtml(isFlash)}`;
     streamEl.prepend(div);
     while (streamEl.children.length > 50) streamEl.lastChild.remove();
     // backfilled rows arrive all at once on connect (both modes backfill now) — only flash
@@ -1653,6 +2143,21 @@ function connectStream(){
     // "recent ~20" mode) means a visitor who opens the wizard right after someone joined
     // still sees it, not just joins from this exact moment forward.
     if (ev.kind === 'adventure.started') addJoinFeedEvent(ev);
+    // Event pulse (requirement 4): reuse the same "which room is this event about" knowledge
+    // as highlightKnown() -- subject_type/subject_id (log.py's stigmergic-trace pair) is the
+    // precise case, populated for combat/item-pickup events; free-text room-name matching via
+    // roomNameToId is the fallback for everything else that happens to name a known room.
+    // Skipped during the initial backfill burst (streamCaughtUp false) so opening/reconnecting
+    // the stream doesn't light up the whole map at once.
+    if (streamCaughtUp) {
+      let pulseRoomId = (ev.subject_type === 'room' && ev.subject_id) ? ev.subject_id : null;
+      if (!pulseRoomId && ev.text) {
+        for (const name in roomNameToId) {
+          if (name && ev.text.includes(name)) { pulseRoomId = roomNameToId[name]; break; }
+        }
+      }
+      if (pulseRoomId) pulseNode(pulseRoomId);
+    }
   });
   es.onerror = () => { streamDot.style.background = '#ef4444'; };
   es.onopen = () => {
@@ -1701,18 +2206,19 @@ function syncStreamFilterToSpectate(){
 // the header number itself is now server-wide (see /state's flash_calls query), so the page
 // it opens must match that same total, not just this world's.
 document.getElementById('flashcount').style.cursor = 'pointer';
-document.getElementById('flashcount').title = 'Click to see every Flash call this server has ever made, across all worlds';
+document.getElementById('flashcount').title = 'Rooms, art, and NPC dialogue generated live on '
+  + 'GPU — click to see every Flash call this server has ever made, across all worlds';
 document.getElementById('flashcount').addEventListener('click', () => {
   window.open('/flash-calls', '_blank');
 });
 
-document.getElementById('metricsLink').addEventListener('click', () => {
-  window.open('/metrics?campaign='+encodeURIComponent(campaignId), '_blank');
-});
-
-document.getElementById('evalsLink').addEventListener('click', () => {
-  window.open('/evals', '_blank');
-});
+// metricsLink/evalsLink (fix 3): real <a href> now (keyboard/AT-focusable, right-clickable
+// for "open in new tab", not just a JS-only click target) -- target=_blank on the element
+// itself does what the old window.open() call used to. The href still needs a JS assist for
+// metrics though: it must carry THIS page's campaignId, which only exists client-side (PAGE
+// is a static string, not rendered per-request), so the static markup ships a sane
+// all-worlds default (href="/metrics") and this scopes it down once campaignId is known.
+document.getElementById('metricsLink').href = '/metrics?campaign=' + encodeURIComponent(campaignId);
 
 // Item description tooltip: delegated from the never-replaced #char panel div (its innerHTML
 // is rewritten every tick(), so listeners bound directly to .item spans would be lost on the
@@ -1851,6 +2357,11 @@ const chatForm = document.getElementById('chatForm');
 const chatInput = document.getElementById('chatInput');
 const chatSendBtn = document.getElementById('chatSendBtn');
 let chatTurnInFlight = false;
+// Fix 6: true while the "session gone -- Start again" prompt is showing. Blocks the submit
+// handler's own `finally` from silently re-enabling the input as if the turn just succeeded
+// (see showSessionExpired and the finally block below) -- the whole point of this fix is that
+// a dead session must never look like a normal, working input again on its own.
+let chatSessionExpired = false;
 
 function chatScrollToBottom(){ chatLog.scrollTop = chatLog.scrollHeight; }
 function clearChatEmptyState(){
@@ -1875,6 +2386,34 @@ function addChatBreadcrumb(name, summary){
   div.textContent = `⚙ ${name}${summary ? ' — 🎲 ' + summary : ''}`;
   chatLog.appendChild(div);
   chatScrollToBottom();
+}
+// Fix 6: the ONE recovery path for "this session/character is gone" -- a clear inline system
+// message plus a real "Start again" button, and the input disabled WITH a reason (not just
+// silently stuck) instead of looking like an ordinary, working chat that happens to not be
+// responding. The button reuses chatResetBtn's own handler verbatim (POST /chat/reset + reset
+// the pane) rather than reimplementing that flow a second time here.
+function showSessionExpired(text){
+  chatSessionExpired = true;
+  addChatMessage('system', text || "This character's session here has ended.");
+  const div = document.createElement('div');
+  div.style.margin = '2px 2px 6px';
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'choiceBtn';
+  btn.textContent = '▶ Start again';
+  btn.addEventListener('click', () => {
+    chatSessionExpired = false;
+    chatInput.disabled = false;
+    chatSendBtn.disabled = false;
+    chatInput.placeholder = 'say "start an adventure" to begin';
+    document.getElementById('chatResetBtn').click();
+  });
+  div.appendChild(btn);
+  chatLog.appendChild(div);
+  chatScrollToBottom();
+  chatInput.disabled = true;
+  chatSendBtn.disabled = true;
+  chatInput.placeholder = 'session ended — hit "Start again" above to continue';
 }
 
 // "New character": sever this browser's identity server-side (POST /chat/reset rotates the
@@ -1955,7 +2494,13 @@ chatForm.addEventListener('submit', async (e) => {
       // 429 (per-IP rate limit or per-session lifetime cap, e0b.4) is routine traffic-shaping,
       // not a failure -- render it as a dim system line, same as a tool breadcrumb, not the
       // alarmed error-red used for actual failures (409 in-flight, 413 too long, 503 disabled).
+      // Fix 6: a 400 "no world with id ... exists" (see POST /chat's campaign_exists check) is
+      // ANOTHER session-is-gone shape -- this tab's own world was deleted/never existed out
+      // from under it -- same dead-end-for-the-player as dm_loop's session_expired event
+      // below, so it gets the identical "Start again" treatment rather than a plain red line
+      // the player has no obvious next step for.
       if(r.status === 429) addChatMessage('system', err.error || 'please slow down a moment.');
+      else if(r.status === 400 && /no world with id/.test(err.error || '')) showSessionExpired(err.error);
       else addChatMessage('error', err.error || `error ${r.status}`);
       return;
     }
@@ -1981,6 +2526,10 @@ chatForm.addEventListener('submit', async (e) => {
         try{ ev = JSON.parse(line); } catch(parseErr){ continue; }
         if(ev.type === 'tool') addChatBreadcrumb(ev.name, ev.summary);
         else if(ev.type === 'text') addChatMessage('dm', ev.text);
+        // Fix 6: dm_loop.handle_message's own session-death guard -- the character behind
+        // this session no longer exists server-side (world reset, redeploy race, etc). Skips
+        // straight to the same "Start again" recovery the 400-unknown-world branch above uses.
+        else if(ev.type === 'session_expired') showSessionExpired(ev.text);
         // New-world flow (e0b.10): this turn's start_adventure just minted a brand-new world
         // (session.campaign_id no longer matches the page we're on) -- tell the player, then
         // redirect once the whole turn (including its final narration) has actually arrived.
@@ -1996,9 +2545,14 @@ chatForm.addEventListener('submit', async (e) => {
     addChatMessage('error', 'connection trouble — try again?');
   }finally{
     chatTurnInFlight = false;
-    chatInput.disabled = false;
-    chatSendBtn.disabled = false;
-    chatInput.focus();
+    // Fix 6: don't undo showSessionExpired's disable-with-reason -- a dead session must stay
+    // visibly dead until "Start again" is actually clicked, not silently look normal again
+    // the instant this turn's stream finishes.
+    if(!chatSessionExpired){
+      chatInput.disabled = false;
+      chatSendBtn.disabled = false;
+      chatInput.focus();
+    }
   }
   // A turn can mint a brand-new character (start_adventure) or move an existing one -- either
   // way, the very next /state poll (tick() already runs every 1.5s) now resolves "you" from
@@ -2582,11 +3136,21 @@ def state(request: Request) -> JSONResponse:
         rooms = []
         for r in c.execute("SELECT * FROM rooms WHERE campaign_id=?", (campaign_id,)).fetchall():
             discovered = (r["id"] in discovered_ids) if discovered_ids is not None else bool(r["visited"])
+            room_contents = json.loads(r["contents"] or "[]")
+            room_kind = r["kind"] or ""
+            # category/danger power the map UI's visual differentiation (see worldgen.py's
+            # _ROOM_JSON) — category always falls back to a keyword-derived guess (never ""
+            # on the wire) for rooms generated before this field existed or whose sample
+            # didn't validate; danger is floored to 1 whenever a live monster is present so
+            # the map never shows "safe" next to an actual threat.
+            room_category = r["category"] or worldgen.derive_category(room_kind, r["name"])
+            room_danger = worldgen.fallback_danger(r["danger"] or 0, room_contents)
             rooms.append({"id": r["id"], "name": r["name"], "description": r["description"],
                           "features": json.loads(r["features"] or "[]"),
-                          "contents": json.loads(r["contents"] or "[]"),
+                          "contents": room_contents,
                           "visited": bool(r["visited"]), "discovered": discovered,
-                          "image_ref": r["image_ref"],
+                          "image_ref": r["image_ref"], "kind": room_kind,
+                          "category": room_category, "danger": room_danger,
                           "exits": exits_by_room.get(r["id"], {})})  # {direction: dest_room_id}
         # player_id IS the game's bearer credential -- server.py trusts it directly as the
         # only auth for move/attack/drop_item/delete_world/etc, no separate token or session.

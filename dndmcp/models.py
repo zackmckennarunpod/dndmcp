@@ -67,6 +67,10 @@ class Room(BaseModel):
     features: list[str] = []
     kind: str = ""  # one/two-word room type (LLM-picked, e.g. "attic", "great hall") —
                     # informs exit-count feel and gives nearby-region context to later gens
+    category: str = ""  # one of worldgen.ROOM_CATEGORIES (LLM-picked), or "" if unset/
+                        # unvalidated — map UI display bucket; "" falls back to
+                        # worldgen.derive_category at /state read time, never stored as a guess
+    danger: int = 0  # 0-3, LLM-picked (0=safe/social, 3=deadly) — map UI display only
 
 
 class Entity(BaseModel):
