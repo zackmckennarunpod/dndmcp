@@ -49,6 +49,8 @@ that didn't cover every edge case). This is dev-only throwaway state; wiping is 
 | `image_ref` | TEXT, nullable | art asset ref, not yet wired |
 | `features` | TEXT (JSON) | `["a cracked stone sarcophagus, its lid shifted askew", ...]` — flavor strings |
 | `kind` | TEXT | one/two-word room type (e.g. "attic"), LLM-picked when Flash is on, else `""` |
+| `category` | TEXT | map UI display bucket, one of `worldgen.ROOM_CATEGORIES` (chamber/passage/open-air/water/underground/sacred/industrial/lair), LLM-picked; `""` if unset/unvalidated — `/state` derives a keyword-based fallback so the client never sees `""` |
+| `danger` | INTEGER | map UI display only, 0-3 (0=safe/social, 3=deadly), LLM-picked, clamped on parse; `/state` floors it to at least 1 whenever the room has a live monster |
 
 → Pydantic model: `Room`. `contents` is deliberately loose (see module docstring in
 `models.py`) since it's produced by `compendium.py`/`worldgen.py` and mutated in place
