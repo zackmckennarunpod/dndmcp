@@ -40,6 +40,49 @@ _MAX_MATCHED_MONSTER_CR = 2.0
 # rooms back-to-back reads as padding, not pacing.
 _TRANSITIONAL_KIND_WORDS = ("hallway", "corridor", "landing", "threshold", "passage")
 
+# The map UI's fixed room-category enum (see models.Room.category) — anything the model
+# returns outside this set is rejected back to "" (never trusted verbatim), same
+# reliability-first pattern as monster_type/attack_flavor validation below.
+ROOM_CATEGORIES = ("chamber", "passage", "open-air", "water", "underground", "sacred",
+                   "industrial", "lair")
+
+# Best-effort category for a room whose STORED category is empty — pre-migration rows, or a
+# generation that predates this field / didn't validate. Keyword-matched against kind+name;
+# checked in this order (first match wins), falls back to "chamber". Deliberately dumb/pure
+# (no LLM call) — this runs on every /state poll for every room, not once at generation time.
+_CATEGORY_KEYWORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("passage", ("corridor", "hall", "stair", "landing")),
+    ("underground", ("cavern", "tunnel", "cellar", "vault", "shaft")),
+    ("sacred", ("shrine", "temple", "altar")),
+    ("industrial", ("forge", "workshop", "foundry")),
+    ("open-air", ("garden", "courtyard", "field", "slidescape")),
+    ("lair", ("den", "nest", "lair")),
+    ("water", ("water", "flood", "flooded", "river", "lake", "swamp", "marsh", "bog",
+              "tide", "drowned", "well", "spring", "sea", "ocean", "aquatic", "cistern")),
+)
+
+
+def derive_category(kind: str, name: str = "") -> str:
+    """Keyword-match a room's kind/name into ROOM_CATEGORIES when its stored category is
+    empty — see _CATEGORY_KEYWORDS. Pure and deterministic; called from web.py's /state so
+    the client always receives a non-empty category, even for rooms created before this
+    field existed (or a generation whose category the parser rejected)."""
+    text = f"{kind} {name}".lower()
+    for category, words in _CATEGORY_KEYWORDS:
+        if any(w in text for w in words):
+            return category
+    return "chamber"
+
+
+def fallback_danger(danger: int, contents: list[dict]) -> int:
+    """A room with a live monster in it is never truly safe, regardless of what danger (or
+    lack of one) it was generated/stored with — bump the floor to at least 1 rather than let
+    an empty/zero stored value read as "safe" on the map next to an actual threat. Never
+    lowers an already-higher stored value."""
+    has_monster = any(c.get("type") == "monster" for c in contents)
+    return max(danger, 1) if has_monster else danger
+
+
 # No hardcoded theme→creature table on purpose: a fixed Python mapping can only ever cover
 # the themes someone thought to enumerate, and a "sci-fi frontier" bandit swinging a Scimitar
 # (a real bug this replaced — see generate_room_content's monster_type handling below) just
@@ -80,6 +123,11 @@ _ROOM_JSON = ('{"name": a PROPER NAME for this specific room, capitalized like a
               '"corridor", "landing", "threshold", "passage" — sparse on purpose, still named '
               'and atmospheric, just without a monster/loot. Never two in a row (see the '
               'note above about the room being left, if it was already one of these), '
+              '"category": exactly one of "chamber", "passage", "open-air", "water", '
+              '"underground", "sacred", "industrial", "lair" — pick whichever fits this room '
+              'best, '
+              '"danger": integer 0-3 for how dangerous this room is (0 = safe/social, '
+              '3 = deadly), '
               '"atmosphere": 2-4 sentences of vivid, SPECIFIC sensory detail (sight, smell, '
               'sound, light, texture) — substantial enough to actually paint the room, not a '
               'single bare fact. Still facts for a Dungeon Master to narrate FROM, not finished '
@@ -229,6 +277,12 @@ async def generate_room_content(room_id: str, theme: str, *, entry_from: str | N
     regression (bleed-through for a custom world, or losing main's own lore by mistake)."""
     rng = game._seeded(room_id, salt)  # deterministic per (room_id, salt)
     base = game.generate_room(room_id, theme, entry_from=entry_from, salt=salt)  # procedural skeleton
+    # The procedural generator predates category/danger and never sets either — default to
+    # "" / 0 here so both keys always exist regardless of whether Flash succeeds below (the
+    # map UI's fallback derivation, worldgen.derive_category/fallback_danger, is what turns
+    # "" into a real category for display; this function itself never guesses).
+    base["category"] = ""
+    base["danger"] = 0
 
     via = "procedural"
     want_monster = any(c.get("type") == "monster" for c in base["contents"])
@@ -324,6 +378,21 @@ async def generate_room_content(room_id: str, theme: str, *, entry_from: str | N
                 base["name"] = name
             if kind := _normalize_label(data.get("kind")):
                 base["kind"] = kind
+            # Strict enum validation, same reliability-first pattern as monster_type/
+            # attack_flavor below — anything outside ROOM_CATEGORIES (wrong casing, an
+            # invented category, a whole phrase) is rejected to "" rather than trusted
+            # verbatim; derive_category's keyword fallback (applied at /state read time)
+            # covers the gap so the client still always gets a real category.
+            category = _normalize_label(data.get("category")).lower()
+            if category in ROOM_CATEGORIES:
+                base["category"] = category
+            # Clamp rather than reject: a small model drifting to e.g. 4 or -1 is much more
+            # likely than it inventing a wholly different scale, so clamping keeps the
+            # signal instead of discarding it outright the way the enum check above does.
+            try:
+                base["danger"] = max(0, min(3, int(data.get("danger"))))
+            except (TypeError, ValueError):
+                pass  # leave base["danger"] at its 0 default
             # `description` stays a raw FACT, not finished prose — the DM agent (whoever is
             # running the session) narrates from this, same as it would from a human DM's notes.
             if atmosphere := _normalize_text(data.get("atmosphere")):

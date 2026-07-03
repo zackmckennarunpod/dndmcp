@@ -113,7 +113,8 @@ class World:
             CREATE TABLE IF NOT EXISTS rooms (
                 id TEXT PRIMARY KEY, name TEXT, description TEXT,
                 contents TEXT, visited INTEGER DEFAULT 0, image_ref TEXT,
-                features TEXT DEFAULT '[]', kind TEXT DEFAULT ''
+                features TEXT DEFAULT '[]', kind TEXT DEFAULT '',
+                category TEXT DEFAULT '', danger INTEGER DEFAULT 0
             );
             -- Generic graph relationships (same pattern as the Context DB's own `edges`
             -- table): any node type can relate to any other, distinguished by edge_type.
@@ -262,6 +263,12 @@ class World:
         self._add_column_if_missing("character", "story_cache", "TEXT")
         self._add_column_if_missing("character", "story_cache_seq", "INTEGER DEFAULT 0")
         self._add_column_if_missing("character", "story_cache_via", "TEXT")
+        # Map UI display fields (LLM-picked at room generation, see worldgen._ROOM_JSON) —
+        # additive, same guarded ALTER pattern as everything else here. Existing rows read
+        # back as ""/0 (category/danger's own model defaults); web.py's /state route applies
+        # worldgen.derive_category/fallback_danger so the client never sees an empty category.
+        self._add_column_if_missing("rooms", "category", "TEXT DEFAULT ''")
+        self._add_column_if_missing("rooms", "danger", "INTEGER DEFAULT 0")
         # Migrate the old singleton `campaign` row (id=1) into campaigns/"main", once — INSERT
         # OR IGNORE makes re-running this on every startup a no-op after the first time.
         self._c.execute(
@@ -564,19 +571,30 @@ class World:
     def upsert_room(self, *, room_id: str, campaign_id: str = MAIN_CAMPAIGN_ID, name: str,
                     description: str, exits: dict[str, str], contents: list[dict],
                     image_ref: str | None = None, features: list[str] | None = None,
-                    kind: str = "", exit_descriptions: dict[str, str] | None = None) -> Room:
+                    kind: str = "", exit_descriptions: dict[str, str] | None = None,
+                    category: str = "", danger: int | None = None) -> Room:
+        # `category` follows the same "" -> "caller didn't touch this" sentinel as `kind`
+        # (see the ON CONFLICT clause below): the many re-upsert call sites in server.py that
+        # persist an unrelated change (HP, inventory, a new NPC) never pass it, and must not
+        # silently wipe out a category a generation call set earlier. `danger` can't reuse a
+        # sentinel VALUE the same way (0 is a legitimate real danger rating, not "unset"), so
+        # it uses None instead — see the CASE WHEN ? below.
         room = Room(id=room_id, name=name, description=description, exits=exits,
-                   contents=contents, image_ref=image_ref, features=features or [], kind=kind)
+                   contents=contents, image_ref=image_ref, features=features or [], kind=kind,
+                   category=category, danger=danger if danger is not None else 0)
         self._c.execute(
-            "INSERT INTO rooms (id,campaign_id,name,description,contents,visited,image_ref,features,kind)"
-            " VALUES (?,?,?,?,?,0,?,?,?)"
+            "INSERT INTO rooms (id,campaign_id,name,description,contents,visited,image_ref,features,kind,category,danger)"
+            " VALUES (?,?,?,?,?,0,?,?,?,?,?)"
             " ON CONFLICT(id) DO UPDATE SET name=excluded.name, description=excluded.description,"
             " contents=excluded.contents,"
             " image_ref=COALESCE(excluded.image_ref, rooms.image_ref),"
             " features=excluded.features,"
-            " kind=CASE WHEN excluded.kind != '' THEN excluded.kind ELSE rooms.kind END",
+            " kind=CASE WHEN excluded.kind != '' THEN excluded.kind ELSE rooms.kind END,"
+            " category=CASE WHEN excluded.category != '' THEN excluded.category ELSE rooms.category END,"
+            " danger=CASE WHEN ? THEN excluded.danger ELSE rooms.danger END",
             (room.id, campaign_id, room.name, room.description, json.dumps(room.contents),
-             room.image_ref, json.dumps(room.features), room.kind),
+             room.image_ref, json.dumps(room.features), room.kind, room.category, room.danger,
+             danger is not None),
         )
         self._c.commit()
         # exits are edges now, not a JSON column — sync separately. Delete-then-insert: the
@@ -614,6 +632,8 @@ class World:
         d["features"] = json.loads(d["features"] or "[]")
         d["visited"] = bool(d["visited"])
         d["kind"] = d.get("kind") or ""
+        d["category"] = d.get("category") or ""
+        d["danger"] = d.get("danger") or 0
         return Room.model_validate(d)
 
     def mark_visited(self, room_id: str) -> None:

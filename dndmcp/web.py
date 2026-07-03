@@ -2582,11 +2582,21 @@ def state(request: Request) -> JSONResponse:
         rooms = []
         for r in c.execute("SELECT * FROM rooms WHERE campaign_id=?", (campaign_id,)).fetchall():
             discovered = (r["id"] in discovered_ids) if discovered_ids is not None else bool(r["visited"])
+            room_contents = json.loads(r["contents"] or "[]")
+            room_kind = r["kind"] or ""
+            # category/danger power the map UI's visual differentiation (see worldgen.py's
+            # _ROOM_JSON) — category always falls back to a keyword-derived guess (never ""
+            # on the wire) for rooms generated before this field existed or whose sample
+            # didn't validate; danger is floored to 1 whenever a live monster is present so
+            # the map never shows "safe" next to an actual threat.
+            room_category = r["category"] or worldgen.derive_category(room_kind, r["name"])
+            room_danger = worldgen.fallback_danger(r["danger"] or 0, room_contents)
             rooms.append({"id": r["id"], "name": r["name"], "description": r["description"],
                           "features": json.loads(r["features"] or "[]"),
-                          "contents": json.loads(r["contents"] or "[]"),
+                          "contents": room_contents,
                           "visited": bool(r["visited"]), "discovered": discovered,
-                          "image_ref": r["image_ref"],
+                          "image_ref": r["image_ref"], "kind": room_kind,
+                          "category": room_category, "danger": room_danger,
                           "exits": exits_by_room.get(r["id"], {})})  # {direction: dest_room_id}
         # player_id IS the game's bearer credential -- server.py trusts it directly as the
         # only auth for move/attack/drop_item/delete_world/etc, no separate token or session.
