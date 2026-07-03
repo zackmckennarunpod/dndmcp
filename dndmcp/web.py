@@ -226,6 +226,12 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
     sidebar, 560 started feeling cramped/cut-off for how much is usually happening at once. */
  #map{width:100%;height:640px;overflow:hidden;position:relative;
    background:radial-gradient(ellipse at 50% 40%,#1a1330 0%,var(--panel) 70%)}
+ /* Fix 7: a real invitation (a line + two actions), not a dead-end sentence. display:flex is
+    the DEFAULT here (not an inline style) specifically so renderGraph's own
+    `empty.style.display=''` toggle (clearing just the inline style) falls back to this rule
+    instead of a bare block layout -- see renderGraph's own comment on that toggle. */
+ #mapEmpty{display:flex;flex-direction:column;align-items:center;justify-content:center;
+   height:100%;gap:14px;text-align:center;padding:0 32px;box-sizing:border-box}
  /* max-width matters more now than it used to (requirement 7's richer multi-line content,
     not just a bare room name): an absolutely-positioned auto-width box near the right/bottom
     edge of #map otherwise gets squeezed by the browser's own shrink-to-fit sizing into an
@@ -287,14 +293,14 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
     sentence. Reuses the same palette meaning the graph already established (violet=rooms,
     teal=ghosts/actors) rather than inventing a fourth unrelated color language. */
  .hl-room{color:var(--visited);font-weight:600}
- .hl-actor{color:var(--ghost);font-weight:600}
+ .hl-actor{color:var(--ghost);font-weight:600;cursor:pointer}
  .hl-item{color:var(--warm);font-weight:600}
 #flashcount{color:var(--warm);font-weight:600;margin-left:auto;transition:transform .15s}
 #flashcount.pulse{transform:scale(1.3);color:var(--warm-bright)}
 #flashStatus{font-size:.85em;letter-spacing:.05em;white-space:nowrap;cursor:default}
-#metricsLink{color:var(--ghost);cursor:pointer;font-weight:600}
+#metricsLink{color:var(--ghost);cursor:pointer;font-weight:600;text-decoration:none}
 #metricsLink:hover{color:var(--ghost-bright)}
-#evalsLink{color:var(--ghost);cursor:pointer;font-weight:600}
+#evalsLink{color:var(--ghost);cursor:pointer;font-weight:600;text-decoration:none}
 #evalsLink:hover{color:var(--ghost-bright)}
 #staleBanner{display:none;background:var(--warm);color:#1a1206;font-weight:600;font-size:12.5px;
   padding:7px 18px;text-align:center}
@@ -324,8 +330,10 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
  #stream div{color:var(--muted);padding:6px 0;border-bottom:1px solid var(--border-soft);
    font-size:12px;line-height:1.5}
  #stream div.new{animation:flash .8s ease-out}
- #stream .who{color:var(--warm)}
  #stream .evts{color:var(--muted);margin-right:5px;font-size:11px;opacity:.8}
+ /* Fix 2: replaces the old literal "(flash)" text suffix on Flash-generated log lines --
+    small enough to read as a badge, not shout over the sentence it's attached to. */
+ .flashGlyph{color:var(--warm);cursor:help}
  @keyframes flash{from{background:#4fd8c433}to{background:transparent}}
  #streamDot{width:8px;height:8px;border-radius:50%;background:var(--ghost);display:inline-block;
    margin-right:6px;box-shadow:0 0 6px var(--ghost)}
@@ -484,14 +492,14 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
   #flashcount{margin-left:0}
  }
 </style></head><body>
-<div id=staleBanner>⟳ This tab is running an older version of the page — <a href="#" onclick="location.reload();return false">refresh to update</a></div>
+<div id=staleBanner>⟳ This tab is running an older version of the page — <a href="#" onclick="location.reload();return false">refresh to update</a> (safe anytime — your game is saved on the server)</div>
 <div id=itemTooltip></div>
 <header><h1>⚔ DNDMCP</h1><span class=sub id=where>—</span>
  <button id=playBtn type=button title="Start here — the wizard walks you through every way to play">▶ Play</button>
  <span id=flashStatus title="Flash GPU worker status — art can cold-start from zero (up to a few minutes); a page visit already nudged it awake"></span>
- <span id=flashcount>⚡ 0 Flash calls</span>
- <span id=metricsLink title="Click to see system-wide metrics for this world">📊 Metrics</span>
- <span id=evalsLink title="Click to compare model performance (tool-calling reliability + room-gen coherence)">🧪 Evals</span>
+ <span id=flashcount title="Rooms, art, and NPC dialogue generated live on GPU">⚡ 0 Flash calls</span>
+ <a id=metricsLink href="/metrics" target=_blank rel=noopener title="Click to see system-wide metrics for this world">📊 Metrics</a>
+ <a id=evalsLink href="/evals" target=_blank rel=noopener title="Click to compare model performance (tool-calling reliability + room-gen coherence)">🧪 Evals</a>
  <button id=shareBtn title="Copies instructions to paste into your agent (Claude Code/Desktop) running dndmcp">🔗 Share</button></header>
 <div id=tagline>A world that doesn't exist until you step into it — Flash generates every room, item, NPC, and image in real time as you explore.</div>
 <!-- Onboarding wizard (e0b.12) — a modal stepper that owns ALL onboarding now: replaces the
@@ -503,6 +511,8 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
      page, not a separate view. -->
 <div id=wizardOverlay class=wizardOverlay>
  <div id=wizardModal class=panel role=dialog aria-modal=true aria-label="Onboarding wizard">
+  <span id=wizStepIndicator style="position:absolute;top:14px;right:40px;color:var(--muted);
+    font:600 10.5px 'IBM Plex Mono',monospace;letter-spacing:.04em"></span>
   <button id=wizardCloseBtn type=button title="Close (Esc)">✕</button>
   <div id=wizStep1 class=wizStep>
    <h2>How do you want to play?</h2>
@@ -597,7 +607,7 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
   </div>
 </div>
 <main style="margin-top:16px">
- <div class=panel><h2 id=mapTitle>World map (shared, live)</h2><div class=sub id=mapExplainer style="display:none;margin-bottom:2px">one persistent world everyone shares — other players' ghosts have already passed through it</div><div class=sub id=whereInMap style="margin-bottom:2px">—</div>
+ <div class=panel><h2 id=mapTitle>World map (shared, live)</h2><div class=sub id=mapExplainer style="display:none;margin-bottom:2px">one persistent world everyone shares — other players' ghosts have already passed through it</div>
 <div class=sub style="margin-bottom:4px;opacity:.85">
   <span style="color:var(--ghost)">●</span> your room &nbsp;
   <span style="color:var(--visited)">●</span> places you've been &nbsp;
@@ -605,7 +615,13 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
   <span style="color:var(--warm)">◆</span> loot &nbsp;
   <span style="color:var(--danger)">✕</span> monster &nbsp;
   <span style="color:var(--ghost)">👻</span> a player</div>
-<div class=sub style="margin-bottom:8px;opacity:.6">scroll + ⌘/Ctrl to zoom · drag to pan · click a discovered room to zoom in + open details</div><div id=map><span id=mapEmpty class=empty>no adventure yet — start one in your agent</span><div id=nodeTooltip></div><div id=roomCard><button id=roomCardClose aria-label=close>✕</button><div id=roomCardBody></div></div></div></div>
+<div class=sub style="margin-bottom:8px;opacity:.6">scroll + ⌘/Ctrl to zoom · drag to pan · click a discovered room to zoom in + open details</div><div id=map><div id=mapEmpty class=empty>
+  <div>Nothing here yet — be the first to step into this world, or see what's happening elsewhere.</div>
+  <div style="display:flex;gap:8px">
+   <button id=mapEmptyPlayBtn type=button class=choiceBtn>▶ Play</button>
+   <button id=mapEmptyBrowseBtn type=button class=choiceBtn>🌍 Browse other worlds</button>
+  </div>
+ </div><div id=nodeTooltip></div><div id=roomCard><button id=roomCardClose aria-label=close>✕</button><div id=roomCardBody></div></div></div></div>
  <div class=panel>
   <div class=midTabbar>
    <button class=midTabBtn data-miditab=stream>Live world stream</button>
@@ -623,9 +639,9 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
     <span id=streamSub>every player, every session</span>
     <select id=streamFilterSelect style="margin-left:auto;background:var(--link);color:var(--text);border:1px solid var(--border);border-radius:5px;padding:3px 6px;font:11.5px 'IBM Plex Mono',monospace">
      <option value=all>All events</option>
-     <option value=flash>⚡ Flash calls only</option>
+     <option value=flash>⚡ Generation only</option>
      <option id=streamFilterSpectateOpt value=spectate disabled>👀 Spectating only</option>
-     <option value=bot_chat>🤖 Bot chat only</option>
+     <option value=bot_chat>🤖 Bot players only</option>
      <option value=combat>⚔ Combat only</option>
      <option value=movement>🚶 Movement only</option>
      <option value=items>🎒 Items only</option>
@@ -750,8 +766,11 @@ const campaignId = params.get('campaign') || 'main';
 const myTruncId = playerId ? playerId.slice(0, 6) : null;
 
 // Map title copy (e0b.12): main gets the "this is the real shared world" explainer; any other
-// world keeps the plain title -- its own [world: <id>] tag already shows up in #whereInMap
-// every tick() (see the worldTag logic below), so it doesn't need a second static label here.
+// world keeps the plain title -- its own [world: <id>] tag already shows up in the header's
+// #where status line every tick() (see the worldTag logic below; the map panel used to
+// duplicate that same line into #whereInMap, which just meant the same sentence appeared
+// twice on screen -- #where is now the single identity/status line, the map panel only ever
+// carries its own legend + controls hint).
 if (campaignId === 'main') {
   document.getElementById('mapTitle').textContent = 'World map — the main shared world';
   document.getElementById('mapExplainer').style.display = '';
@@ -789,6 +808,10 @@ const WIZARD_DISMISSED_KEY = 'dndmcp_wizard_dismissed';
 
 function showWizStep(id){
   WIZ_STEPS.forEach(s => { document.getElementById(s).style.display = (s === id) ? 'block' : 'none'; });
+  // Subtle "1 / 2" progress -- step 1 is "how do you want to play", everything past it
+  // (2a/2b/2c: which world / connect your agent / build your world) is sub-steps of the
+  // same logical "step 2", not a deep multi-step flow worth counting further.
+  document.getElementById('wizStepIndicator').textContent = id === 'wizStep1' ? '1 / 2' : '2 / 2';
 }
 function openWizard(step){
   document.getElementById('wizardOverlay').style.display = 'flex';
@@ -803,7 +826,21 @@ function closeWizard(){
   // browser, per the task's own "no dismissal remembered... remember in localStorage" note.
   try{ localStorage.setItem(WIZARD_DISMISSED_KEY, '1'); }catch(e){}
 }
-document.getElementById('playBtn').addEventListener('click', () => openWizard('wizStep1'));
+// hasLiveCharacter (fix 5): true once tick() has seen a current_room for this page -- i.e.
+// the header already says "Playing as X". Once that's true, #playBtn stops being an
+// onboarding entry point (there's nothing left to onboard) and becomes a plain "reopen my
+// chat" shortcut -- restarting the wizard from step 1 for someone already playing was
+// confirmed-live confusing (looked like it wanted to abandon the character and start over).
+let hasLiveCharacter = false;
+document.getElementById('playBtn').addEventListener('click', () => {
+  if (hasLiveCharacter) {
+    showMidTab('chat');
+    const input = document.getElementById('chatInput');
+    if (input) input.focus();
+    return;
+  }
+  openWizard('wizStep1');
+});
 document.getElementById('wizardCloseBtn').addEventListener('click', () => closeWizard());
 document.getElementById('wizardOverlay').addEventListener('click', (e) => {
   if (e.target.id === 'wizardOverlay') closeWizard();  // click on the backdrop, not the modal card
@@ -905,6 +942,16 @@ function showTab(name){
   document.querySelectorAll('.tabBody').forEach(el => el.classList.toggle('active', el.id === 'tab-' + name));
 }
 document.querySelectorAll('.tabBtn').forEach(b => b.addEventListener('click', () => showTab(b.dataset.tab)));
+
+// Fix 7: the empty-map state's two actions -- Play opens the same onboarding wizard #playBtn
+// does; Browse jumps to the existing bottom Browse tab (real content already exists there,
+// this just surfaces it from the dead-end empty state instead of leaving "start one in your
+// agent" as the only, agent-only, path in).
+document.getElementById('mapEmptyPlayBtn').addEventListener('click', () => openWizard('wizStep1'));
+document.getElementById('mapEmptyBrowseBtn').addEventListener('click', () => {
+  showTab('browse');
+  document.querySelector('.tabBtn[data-tab=browse]').scrollIntoView({behavior: 'smooth', block: 'center'});
+});
 
 // Middle panel's OWN tab group (Live world stream / Play here) — deliberately separate
 // function/classes from showTab() above (see the .midTabBtn CSS comment for why reusing
@@ -1037,6 +1084,23 @@ document.getElementById('shareBtn').addEventListener('click', async () => {
   }
 });
 function esc(s){ return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+// Fix 2: server-side log text sometimes ends with a literal " (flash)" marker (see server.py's
+// various world.log() calls, e.g. "art for X (flash)" / "Y appeared in Z (flash)."). That raw
+// substring is also what /state's flash-call counter and /stream/events' flash_only filter
+// grep for server-side (text LIKE '%(flash)%'), so the STORED text has to keep saying it --
+// this only changes how a line is DISPLAYED: strip the suffix (keeping any trailing period)
+// and show a small ⚡ glyph instead, so it reads as story text with a subtle GPU badge, not
+// "...(flash)." shouted as an implementation detail.
+const FLASH_SUFFIX_RE = / \\(flash\\)(\\.?)$/;
+function formatLogText(text){
+  const m = FLASH_SUFFIX_RE.exec(text);
+  if(!m) return {clean: text, isFlash: false};
+  return {clean: text.slice(0, m.index) + m[1], isFlash: true};
+}
+function flashGlyphHtml(isFlash){
+  return isFlash
+    ? ' <span class=flashGlyph title="generated live on GPU (Runpod Flash)">⚡</span>' : '';
+}
 function escRegex(s){ return s.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&'); }
 // Relative "Xs/m/h/d ago" for stream events -- ev.ts is already a bare epoch-seconds float
 // from the log table (see /stream/events), just never rendered. Coarse buckets on purpose:
@@ -1063,6 +1127,11 @@ setInterval(() => {
 // one flat gray sentence. Accumulates across the whole session (never resets) so older log
 // lines mentioning a room/monster that's since left the current snapshot stay highlighted.
 const highlightClassOf = {};
+// Fix 9: a real player's name -> their (truncated) player_id, so clicking their highlighted
+// name in the stream can spectate them (see the streamEl click-delegation handler below) --
+// only ever populated for actual players, never monsters (also 'hl-actor', but not
+// spectatable), so a click on a monster's name safely no-ops via the lookup miss.
+const actorPlayerIdByName = {};
 let highlightTerms = [];
 let highlightRegex = null;
 function noteHighlightTerm(name, cls){
@@ -1074,7 +1143,10 @@ function noteHighlightTerm(name, cls){
 function rebuildHighlightIndex(state){
   const before = highlightTerms.length;
   (state.rooms||[]).forEach(r => noteHighlightTerm(r.name, 'hl-room'));
-  (state.players||[]).forEach(p => noteHighlightTerm(p.name, 'hl-actor'));
+  (state.players||[]).forEach(p => {
+    noteHighlightTerm(p.name, 'hl-actor');
+    if(p.name) actorPlayerIdByName[p.name.trim()] = p.player_id;
+  });
   (state.rooms||[]).forEach(r => (r.contents||[]).forEach(c =>
     noteHighlightTerm(c.name, c.type==='monster' ? 'hl-actor' : 'hl-item')));
   if(highlightTerms.length === before) return;  // nothing new -> keep the existing regex
@@ -1139,9 +1211,9 @@ const SPECTATE_ACTIVE_WINDOW_S = 600;  // "active now" = acted in the last 10 mi
 // filtering the existing connection by player_id rather than opening a second one.
 const STREAM_FILTER_MODES = {
   all:      {title: 'Live world stream', sub: 'every player, every session'},
-  flash:    {title: 'Flash calls', sub: 'every GPU generation call this world has made', flashOnly: true},
+  flash:    {title: 'Generation', sub: 'every GPU generation call this world has made', flashOnly: true},
   spectate: {title: 'Spectating', sub: "only the character you're watching above"},
-  bot_chat: {title: 'Bot chat', sub: 'what the self-playing characters are doing', kindPrefix: 'bot.'},
+  bot_chat: {title: 'Bot players', sub: 'what the self-playing characters are doing', kindPrefix: 'bot.'},
   combat:   {title: 'Combat', sub: 'every fight, this world', kindPrefix: 'combat.'},
   movement: {title: 'Movement', sub: 'who went where', kindPrefix: 'player.'},
   items:    {title: 'Items', sub: 'picked up, dropped, given', kindPrefix: 'item.'},
@@ -1198,11 +1270,27 @@ function centerOn(d, boostZoom){
 // SAME data/markup shape as the sidebar's "Selected room" panel — see showRoomCard below —
 // rather than duplicating the feature/monster/loot list logic a second time).
 function roomOccupantsOf(d){ return d.occupants || []; }
+// Fix 12: "vault · underground · danger ▲▲" -- kind (specific, e.g. "vault") + category
+// (broad, e.g. "underground", see worldgen.ROOM_CATEGORIES) + a danger tick count, each part
+// only included when it adds something (category dropped when it's redundant with kind;
+// danger dropped entirely at 0 -- a "safe" badge on every ordinary room would just be noise).
+// Shared by both the hover tooltip and the in-map/sidebar room card so the two surfaces never
+// drift out of sync on what "danger" means visually.
+function roomKindLine(d){
+  const parts = [];
+  if(d.kind) parts.push(d.kind);
+  if(d.category && d.category !== d.kind) parts.push(d.category);
+  let line = parts.join(' · ');
+  const danger = d.danger || 0;
+  if(danger > 0) line += (line ? ' · ' : '') + 'danger ' + '▲'.repeat(danger);
+  return line;
+}
 function roomDetailInnerHtml(d, imgAttrs){
   const img = d.image_ref
     ? `<img src="/art/${encodeURIComponent(d.image_ref)}.png" ${imgAttrs||''} onerror="this.style.display='none'">`
     : '';
-  const kind = d.kind ? `<div class="roomCardKind">${esc(d.kind)}</div>` : '';
+  const kindLine = roomKindLine(d);
+  const kind = kindLine ? `<div class="roomCardKind">${esc(kindLine)}</div>` : '';
   const feats = (d.features||[]).map(f => `<div>• ${esc(f)}</div>`).join('');
   const monsters = (d.contents||[]).filter(c=>c.type==='monster')
     .map(c => `<div>✕ ${esc(c.name)} (HP ${c.hp})</div>`).join('');
@@ -1330,6 +1418,20 @@ function domId(id){ return 'clip-' + String(id).replace(/[^a-zA-Z0-9_-]/g, '_');
 // Undiscovered rooms stay small and dim ("visually quieter" — requirement 1); discovered
 // ones (medallion or plain fill) get the original full size.
 function radiusFor(d){ return d.discovered ? 16 : 8; }
+// Fix 11: danger 1/2 reuse the SAME amber as loot/spectate (--warm) rather than inventing new
+// hex steps, just at rising opacity (faint -> strong) so it stays a tint, not a beacon; danger
+// 3 promotes to the actual monster-pip red (--danger), full opacity -- "this is a real
+// threat," not just "watch out." Undiscovered rooms never show it (nothing to warn about
+// yet); mine/spectating always win over it (see the stroke/opacity wiring below), same as
+// they already win over the plain discovered/image_ref stroke.
+function dangerRingColor(d){
+  if(!d.discovered || !d.danger) return null;
+  return d.danger >= 3 ? 'var(--danger)' : 'var(--warm)';
+}
+function dangerRingOpacity(d){
+  if(!d.discovered || !d.danger) return 1;
+  return d.danger >= 2 ? 0.9 : 0.4;
+}
 
 // Requirement 7: room name (+ kind, if the room has one), a one-line contents summary, and
 // who's standing there — all in the existing #nodeTooltip, kept small/instant (a glance, not
@@ -1337,7 +1439,8 @@ function radiusFor(d){ return d.discovered ? 16 : 8; }
 function nodeTooltipHtml(d){
   if(!d.discovered) return '???';
   let html = `<b>${esc(d.name)}</b>`;
-  if(d.kind) html += `<br><span style="color:var(--muted)">${esc(d.kind)}</span>`;
+  const kindLine = roomKindLine(d);
+  if(kindLine) html += `<br><span style="color:var(--muted)">${esc(kindLine)}</span>`;
   const contents = d.contents || [];
   const lootN = contents.filter(c => c.type === 'loot').length;
   const monsters = contents.filter(c => c.type === 'monster');
@@ -1536,6 +1639,7 @@ function renderGraph(rooms, players, you){
    n.name = r.name; n.visited = r.visited; n.discovered = r.discovered;
    n.description = r.description; n.features = r.features; n.contents = r.contents;
    n.image_ref = r.image_ref; n.kind = r.kind || '';
+   n.category = r.category || ''; n.danger = r.danger || 0;  // fixes 11/12 -- danger ring + tooltip/card
    n.mine = you && r.id===you.location_id;
    n.spectating = !!(spectateTarget && r.id===spectateTarget.location_id);
    // Requirement 3: full occupant objects now (not just a count) -- ghost dots + their name
@@ -1625,7 +1729,12 @@ function renderGraph(rooms, players, you){
  nodeSel.select('circle.bg')
    .attr('r', d=>radiusFor(d))
    .attr('fill', d=> d.mine ? '#4fd8c4' : (d.spectating ? '#e8b339' : (d.visited ? '#8072e0' : '#1c1630')))
-   .attr('stroke', d=> d.mine ? '#8ff0e0' : (d.spectating ? '#f5cc66' : (d.discovered && d.image_ref ? '#8072e0' : '#453a6b')))
+   // Fix 11: danger ring tint slots in BENEATH mine/spectating (those always win -- a
+   // dangerous room you're standing in still reads as "you are here" first) but ABOVE the
+   // plain discovered/image_ref default.
+   .attr('stroke', d=> d.mine ? '#8ff0e0' : (d.spectating ? '#f5cc66' :
+     (dangerRingColor(d) || (d.discovered && d.image_ref ? '#8072e0' : '#453a6b'))))
+   .attr('stroke-opacity', d=> (d.mine || d.spectating) ? 1 : dangerRingOpacity(d))
    .attr('stroke-width', d=> (d.discovered && d.image_ref && !d.mine && !d.spectating) ? 1.5 : 2)
    // A soft glow on your own current room (teal) or whoever you're spectating (amber) — you're
    // a ghost too; these are the only nodes genuinely "alive" right now, everything else is
@@ -1836,7 +1945,14 @@ async function tick(){
     ? ('Playing as ' + ((s.you && s.you.name) || 'your character') + ' — in ' + (s.current_room.name||''))
     : (playerId ? 'unknown player' : 'Spectating — hit ▶ Play to join, or connect your own agent'));
   document.getElementById('where').textContent = whereText;
-  document.getElementById('whereInMap').textContent = whereText;
+  // Fix 5: flip #playBtn to "Resume" once there's a live character to resume -- see the
+  // button's own click handler above for what hasLiveCharacter changes about its behavior.
+  hasLiveCharacter = !!s.current_room;
+  const playBtn = document.getElementById('playBtn');
+  playBtn.textContent = hasLiveCharacter ? '▶ Resume' : '▶ Play';
+  playBtn.title = hasLiveCharacter
+    ? 'Reopen your chat — jump back in as ' + ((s.you && s.you.name) || 'your character')
+    : 'Start here — the wizard walks you through every way to play';
   // First poll that finds a resumed character while the chat pane still shows its cold
   // "say start an adventure" hint: replace it with an explicit welcome-back so all three
   // panels (header, character card, chat) tell the SAME story about who you are. Direct
@@ -1915,7 +2031,10 @@ async function tick(){
   // esc() FIRST, always -- this was previously raw l.text with no escaping at all, a stored-
   // XSS gap (log_event's free-form agent-authored text would render as live HTML for every
   // viewer). highlightKnown only wraps matches in spans; it never introduces new raw content.
-  document.getElementById('log').innerHTML=(s.log||[]).map(l=>`<div>${highlightKnown(esc(l.text))}</div>`).join('')||'<div class=empty>—</div>';
+  document.getElementById('log').innerHTML=(s.log||[]).map(l=>{
+    const {clean, isFlash} = formatLogText(l.text);
+    return `<div>${highlightKnown(esc(clean))}${flashGlyphHtml(isFlash)}</div>`;
+  }).join('')||'<div class=empty>—</div>';
   const fc = document.getElementById('flashcount');
   const n = s.flash_calls||0;
   if(n !== lastFlashCalls){
@@ -1959,6 +2078,24 @@ const filterSpectateOpt = document.getElementById('streamFilterSpectateOpt');
 let es = null;
 let streamCaughtUp = true;
 
+// Fix 9: playtest observed clicking a highlighted player name (.hl-actor) in the stream
+// opening the Play wizard -- no such wiring exists in this file (the wizard only ever opens
+// via #playBtn/#mapEmptyPlayBtn or the cold-visitor auto-open), but a click on a highlighted
+// name doing NOTHING was also confirmed confusing (it visually reads like a link). Give it a
+// real, narrow, delegated handler instead -- selects/spectates that player, explicitly
+// stops propagation so it can never bubble into some future catch-all, and simply no-ops for
+// a monster's (also .hl-actor) name, which isn't in actorPlayerIdByName at all.
+streamEl.addEventListener('click', (e) => {
+  const el = e.target.closest('.hl-actor');
+  if (!el) return;
+  e.stopPropagation();
+  const pid = actorPlayerIdByName[el.textContent.trim()];
+  if (!pid) return;
+  lastSpectateName = null;
+  selectSpectate(pid);
+  renderSpectateBar(lastPlayers, lastRooms);
+});
+
 function connectStream(){
   if (es) es.close();
   streamEl.innerHTML = '<div class=empty>waiting for the world to move...</div>';
@@ -1982,9 +2119,15 @@ function connectStream(){
     const empty = streamEl.querySelector('.empty');
     if (empty) empty.remove();
     const div = document.createElement('div');
+    // Fix 2: used to lead every row with the raw truncated player-id hex ("b3b6ab Corvin
+    // Ashgrave moved..."), confirmed live as noise -- the name is already highlighted in the
+    // text itself via highlightKnown() below, so the hex added nothing but clutter. Kept as a
+    // (non-rendered) data attribute, not deleted outright -- the actor-name click-to-spectate
+    // handler further down still needs SOME way to resolve a clicked name back to a player_id.
+    if (ev.player_id) div.dataset.playerId = ev.player_id;
     const when = ev.ts ? `<span class=evts data-ts="${ev.ts}">${relTime(ev.ts)}</span> ` : '';
-    const who = ev.player_id ? `<span class=who>${esc(ev.player_id.slice(0,6))}</span> ` : '';
-    div.innerHTML = `${when}${who}${highlightKnown(esc(ev.text))}`;
+    const {clean, isFlash} = formatLogText(ev.text);
+    div.innerHTML = `${when}${highlightKnown(esc(clean))}${flashGlyphHtml(isFlash)}`;
     streamEl.prepend(div);
     while (streamEl.children.length > 50) streamEl.lastChild.remove();
     // backfilled rows arrive all at once on connect (both modes backfill now) — only flash
@@ -2063,18 +2206,19 @@ function syncStreamFilterToSpectate(){
 // the header number itself is now server-wide (see /state's flash_calls query), so the page
 // it opens must match that same total, not just this world's.
 document.getElementById('flashcount').style.cursor = 'pointer';
-document.getElementById('flashcount').title = 'Click to see every Flash call this server has ever made, across all worlds';
+document.getElementById('flashcount').title = 'Rooms, art, and NPC dialogue generated live on '
+  + 'GPU — click to see every Flash call this server has ever made, across all worlds';
 document.getElementById('flashcount').addEventListener('click', () => {
   window.open('/flash-calls', '_blank');
 });
 
-document.getElementById('metricsLink').addEventListener('click', () => {
-  window.open('/metrics?campaign='+encodeURIComponent(campaignId), '_blank');
-});
-
-document.getElementById('evalsLink').addEventListener('click', () => {
-  window.open('/evals', '_blank');
-});
+// metricsLink/evalsLink (fix 3): real <a href> now (keyboard/AT-focusable, right-clickable
+// for "open in new tab", not just a JS-only click target) -- target=_blank on the element
+// itself does what the old window.open() call used to. The href still needs a JS assist for
+// metrics though: it must carry THIS page's campaignId, which only exists client-side (PAGE
+// is a static string, not rendered per-request), so the static markup ships a sane
+// all-worlds default (href="/metrics") and this scopes it down once campaignId is known.
+document.getElementById('metricsLink').href = '/metrics?campaign=' + encodeURIComponent(campaignId);
 
 // Item description tooltip: delegated from the never-replaced #char panel div (its innerHTML
 // is rewritten every tick(), so listeners bound directly to .item spans would be lost on the
