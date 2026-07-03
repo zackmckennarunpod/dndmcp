@@ -248,6 +248,8 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
 #flashStatus{font-size:.85em;letter-spacing:.05em;white-space:nowrap;cursor:default}
 #metricsLink{color:var(--ghost);cursor:pointer;font-weight:600}
 #metricsLink:hover{color:var(--ghost-bright)}
+#evalsLink{color:var(--ghost);cursor:pointer;font-weight:600}
+#evalsLink:hover{color:var(--ghost-bright)}
 #staleBanner{display:none;background:var(--warm);color:#1a1206;font-weight:600;font-size:12.5px;
   padding:7px 18px;text-align:center}
 #staleBanner a{color:#1a1206;text-decoration:underline}
@@ -443,6 +445,7 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
  <span id=flashStatus title="Flash GPU worker status — art can cold-start from zero (up to a few minutes); a page visit already nudged it awake"></span>
  <span id=flashcount>⚡ 0 Flash calls</span>
  <span id=metricsLink title="Click to see system-wide metrics for this world">📊 Metrics</span>
+ <span id=evalsLink title="Click to compare model performance (tool-calling reliability + room-gen coherence)">🧪 Evals</span>
  <button id=shareBtn title="Copies instructions to paste into your agent (Claude Code/Desktop) running dndmcp">🔗 Share</button></header>
 <div id=tagline>A world that doesn't exist until you step into it — Flash generates every room, item, NPC, and image in real time as you explore.</div>
 <!-- Onboarding wizard (e0b.12) — a modal stepper that owns ALL onboarding now: replaces the
@@ -1705,6 +1708,10 @@ document.getElementById('flashcount').addEventListener('click', () => {
 
 document.getElementById('metricsLink').addEventListener('click', () => {
   window.open('/metrics?campaign='+encodeURIComponent(campaignId), '_blank');
+});
+
+document.getElementById('evalsLink').addEventListener('click', () => {
+  window.open('/evals', '_blank');
 });
 
 // Item description tooltip: delegated from the never-replaced #char panel div (its innerHTML
