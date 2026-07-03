@@ -26,11 +26,70 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from sse_starlette.sse import EventSourceResponse
 
-from . import bot_player, chat_sessions, dm_loop, pairing, server, worldgen
+from . import admin_flags, bot_player, chat_sessions, dm_loop, flash_art, flash_llm, pairing, server, worldgen
 from .state import MAIN_CAMPAIGN_ID
 
 app = FastAPI(title="DNDMCP map")
 logger = logging.getLogger(__name__)
+
+# asyncio only holds a WEAK reference to a task created via asyncio.create_task -- without
+# something else keeping a strong reference, the task can be garbage-collected mid-run
+# (silently, no error). Unlike bot_player's supervisor below (a forever-loop the process
+# lifetime itself keeps alive in practice), the warm-on-visit tasks fired from GET "/" and
+# POST /chat are short-lived background calls with nothing else referencing them the moment
+# the request handler returns -- exactly the shape that bites (see server.py's own _track,
+# same fix, independent set since web.py/server.py run in separate threads/event loops).
+_background_tasks: set[asyncio.Task] = set()
+
+
+def _track(task: asyncio.Task) -> asyncio.Task:
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return task
+
+
+# Cached snapshot the header badge reads from -- refreshed by _flash_status_poller below, not
+# computed inline on every /state poll (a plain sync `def`, and 1.5s-interval callers from
+# every open tab would otherwise mean a live Runpod /health call per tab per tick).
+_flash_status: dict[str, dict] = {"art": {"state": "unknown"}, "llm": {"state": "unknown"}}
+
+
+async def _flash_status_poller() -> None:
+    """Refreshes _flash_status every few seconds so the header badge stays live without any
+    request handler ever blocking on a real network call. Separate from maybe_warm's own
+    debounce below -- this is purely for DISPLAY, it never triggers a warm-up itself."""
+    while True:
+        for key, mod, is_on in (("art", flash_art, flash_art.enabled()),
+                                ("llm", flash_llm, flash_llm.ENABLED)):
+            if not is_on:
+                _flash_status[key] = {"state": "off"}
+                continue
+            try:
+                status = await mod.worker_status()
+                _flash_status[key] = {"state": "warm" if status.get("workers") else "cold",
+                                      "workers": status.get("workers")}
+            except Exception as exc:
+                _flash_status[key] = {"state": "unknown", "error": str(exc)}
+        await asyncio.sleep(8)
+
+
+async def _warm_flash_endpoints() -> None:
+    """Fire-and-forget: nudge both Flash endpoints toward warm the moment someone's actually
+    here (page load / a real interaction) instead of waiting for the first look()/move() to
+    eat the cold-start hit live. Each call is self-debouncing (see maybe_warm's health-check-
+    first design) so firing this from multiple trigger points, or many tabs at once, is cheap
+    after the very first real cold start.
+
+    Gated by the "warm_on_visit" admin flag (default ON) -- an SSH-side kill switch
+    (scripts/pod_set_flag.sh warm_on_visit 0), no redeploy needed, for backing this out fast
+    if it ever does something unwanted (e.g. burning GPU time on bot/crawler traffic). Purely
+    about the TRIGGER -- the status badge/poller keeps working either way, since that's just
+    a read, never a spend."""
+    if not admin_flags.enabled("warm_on_visit", default=True):
+        return
+    results = await asyncio.gather(flash_art.maybe_warm(), flash_llm.maybe_warm(),
+                                   return_exceptions=True)
+    logger.info("warm-on-visit: art=%r llm=%r", results[0], results[1])
 
 
 @app.on_event("startup")
@@ -39,6 +98,7 @@ async def _start_bot_supervisor() -> None:
     # bots can be turned on/off/scaled via scripts/pod_set_flag.sh with no redeploy. A crash
     # here must never take the whole GUI/MCP process down with it.
     asyncio.create_task(bot_player.start_supervisor())
+    _track(asyncio.create_task(_flash_status_poller()))
 
 # Kill switch for the whole browser-DM chat pane (e0b.3) — default ON. Flip to "0" to pull it
 # without a redeploy of the surrounding map/GUI: POST /chat 503s and GET /chat/enabled tells
@@ -184,6 +244,7 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
  .hl-item{color:var(--warm);font-weight:600}
 #flashcount{color:var(--warm);font-weight:600;margin-left:auto;transition:transform .15s}
 #flashcount.pulse{transform:scale(1.3);color:var(--warm-bright)}
+#flashStatus{font-size:.85em;letter-spacing:.05em;white-space:nowrap;cursor:default}
 #metricsLink{color:var(--ghost);cursor:pointer;font-weight:600}
 #metricsLink:hover{color:var(--ghost-bright)}
 #staleBanner{display:none;background:var(--warm);color:#1a1206;font-weight:600;font-size:12.5px;
@@ -377,6 +438,7 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
 <div id=itemTooltip></div>
 <header><h1>⚔ DNDMCP</h1><span class=sub id=where>—</span>
  <button id=playBtn type=button title="Start here — the wizard walks you through every way to play">▶ Play</button>
+ <span id=flashStatus title="Flash GPU worker status — art can cold-start from zero (up to a few minutes); a page visit already nudged it awake"></span>
  <span id=flashcount>⚡ 0 Flash calls</span>
  <span id=metricsLink title="Click to see system-wide metrics for this world">📊 Metrics</span>
  <button id=shareBtn title="Copies instructions to paste into your agent (Claude Code/Desktop) running dndmcp">🔗 Share</button></header>
@@ -974,6 +1036,10 @@ let userInteracted = false;
 let selectedRoomId = null;  // last-clicked node -- gets its name drawn on the map itself so
                              // the link between "what I clicked" and the sidebar panel that
                              // just changed is obvious, not just implied
+let lastMineRoomId = null;  // your own location_id as of the last render -- lets renderGraph
+                             // tell "you actually moved" apart from "you're just standing
+                             // still while browsing some other room's panel," see the
+                             // auto-follow block at the end of renderGraph
 let spectateId = null;      // truncated (6-char) player_id of whoever the "Active now" strip
                              // has selected to watch -- purely a client-side view overlay
                              // (highlights their current room), never touches ?player= or any
@@ -1247,6 +1313,20 @@ function renderGraph(rooms, players, you){
    // stops, correcting for however long THIS graph takes to settle.
    if(!userInteracted) fitToView(nodes);
  }
+
+ // Auto-follow: when your own character's room actually changes (a move happened), snap
+ // the "Selected room" panel to it too, the same way clicking that node would -- otherwise
+ // the panel (and its art) stays pinned to whatever you last clicked, even long after
+ // you've walked somewhere new. Gated on location_id actually changing, so a manual click
+ // to inspect a DIFFERENT room while standing still is never immediately overwritten; only
+ // fires while not spectating someone else, so it can't fight that view.
+ if(you && !spectateId && you.location_id !== lastMineRoomId){
+   lastMineRoomId = you.location_id;
+   selectedRoomId = you.location_id;
+   updateLabels();
+   const mine = nodesById[you.location_id];
+   if(mine) showRoomInfo(mine);
+ }
 }
 
 // "Active now" spectate strip -- lets a visitor watch a SPECIFIC character move around live,
@@ -1464,6 +1544,13 @@ async function tick(){
     if(n > lastFlashCalls){ fc.classList.add('pulse'); setTimeout(()=>fc.classList.remove('pulse'), 300); }
     lastFlashCalls = n;
   }
+  // Worker warm/cold badge -- purely informational (see _flash_status_poller server-side);
+  // 'off' means that endpoint's feature flag is disabled, not that it's cold.
+  const fstat = s.flash_status || {};
+  const badgeIcon = st => st==='warm' ? '🟢' : st==='cold' ? '🟡' : st==='off' ? '⚪' : '❔';
+  const badgePart = (label, info) => `${badgeIcon((info||{}).state)} ${label}`;
+  document.getElementById('flashStatus').textContent =
+    [badgePart('Art', fstat.art), badgePart('LLM', fstat.llm)].join('  ');
  }catch(e){}
 }
 let lastFlashCalls = -1;
@@ -1883,7 +1970,12 @@ chatForm.addEventListener('submit', async (e) => {
 
 
 @app.get("/", response_class=HTMLResponse)
-def index() -> str:
+async def index() -> str:
+    # Warm-on-visit: nudge both Flash endpoints the moment someone actually loads the page,
+    # instead of eating a cold-start (art's endpoint is scale-to-zero -- can be minutes) on
+    # whatever the first real generation happens to be. async def (not sync) specifically so
+    # create_task attaches to THIS request's own running loop, not a threadpool worker's.
+    _track(asyncio.create_task(_warm_flash_endpoints()))
     return PAGE
 
 
@@ -2149,6 +2241,11 @@ async def chat(request: Request):
     scheduling); and the process-wide chat_sessions.turn_semaphore protecting the single warm
     LLM worker from a burst of simultaneous browser turns.
     """
+    # Warm-on-visit, second trigger point: a real interaction, not just a page load (covers
+    # an MCP-only player whose browser tab sat open past the idle_timeout, or the rare case
+    # GET "/" fired before this pod redeployed with that trigger). Cheap after the first real
+    # cold start -- see _warm_flash_endpoints/maybe_warm's debounce.
+    _track(asyncio.create_task(_warm_flash_endpoints()))
     if not _browser_dm_enabled():
         return JSONResponse({"error": "browser play is currently disabled"}, status_code=503)
 
@@ -2518,6 +2615,7 @@ def state(request: Request) -> JSONResponse:
                              "you": char, "current_room": (dict(cur) if cur else None), "log": log,
                              "quests": quests,
                              "flash_calls": flash_calls, "campaign": campaign,
+                             "flash_status": _flash_status,
                              "server_version": SERVER_VERSION})
     except sqlite3.OperationalError:
         # schema not initialized yet — no one has called start_adventure on this pod yet

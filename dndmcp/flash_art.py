@@ -128,6 +128,26 @@ async def generate_image(prompt: str, *, negative_prompt: str = "", width: int =
         return None
 
 
+async def worker_status() -> dict:
+    """This endpoint's current cached worker status -- see flash_llm._cached_health (shared
+    cache/health-check plumbing, keyed by endpoint_id so both modules' checks never collide).
+    Used to drive the GUI's warm/cold header badge."""
+    return await flash_llm._cached_health(await ensure())  # noqa: SLF001
+
+
+async def maybe_warm() -> dict:
+    """Self-debouncing warm trigger, safe to call from every page load/interaction: only
+    actually pays for a real warm() generation (real GPU spend) if this endpoint currently
+    has ZERO workers up. See flash_llm.maybe_warm for the full rationale -- same pattern."""
+    if not enabled():
+        return {"skipped": "disabled"}
+    endpoint_id = await ensure()
+    status = await flash_llm._cached_health(endpoint_id)  # noqa: SLF001
+    if status.get("workers"):
+        return {"skipped": "already warm", "workers": status["workers"]}
+    return await warm()
+
+
 async def warm() -> dict:
     """Force a deploy + one generation so the worker is hot before play/recording."""
     import time

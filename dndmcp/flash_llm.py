@@ -22,6 +22,7 @@ import json
 import logging
 import os
 import subprocess
+import time
 import urllib.request
 
 logger = logging.getLogger(__name__)
@@ -163,9 +164,64 @@ async def generate(messages: list[dict], *, max_tokens: int = 250,
         return None
 
 
+# endpoint_id -> (checked_at, status dict) -- shared by BOTH this module's and flash_art's
+# worker_status() (flash_art passes its own endpoint_id through), so a page that checks both
+# endpoints only ever pays for two /health calls total, not one per module per poll.
+_HEALTH_CACHE: dict[str, tuple[float, dict]] = {}
+_HEALTH_TTL_S = 8.0
+
+
+def _health_sync(endpoint_id: str) -> dict:
+    url = f"https://api.runpod.ai/v2/{endpoint_id}/health"
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {_api_key()}"})
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        return json.load(resp)
+
+
+async def _cached_health(endpoint_id: str) -> dict:
+    """Worker-count check via /health -- no GPU spend (unlike generate/warm), so safe to call
+    on every page load or /state poll. Cached a few seconds so a burst of callers (multiple
+    open tabs, both maybe_warm() trigger points firing at once) collapses to one real HTTP
+    call, not one each. Returns {"workers": <total alive/starting count>} or {"workers": None,
+    "error": ...} if the health call itself fails (endpoint doesn't exist yet, network blip)."""
+    cached = _HEALTH_CACHE.get(endpoint_id)
+    now = time.time()
+    if cached and now - cached[0] < _HEALTH_TTL_S:
+        return cached[1]
+    loop = asyncio.get_running_loop()
+    try:
+        health = await loop.run_in_executor(None, _health_sync, endpoint_id)
+        workers = health.get("workers", {})
+        total = sum(workers.get(k, 0) for k in ("idle", "initializing", "ready", "running"))
+        status = {"workers": total}
+    except Exception as exc:
+        status = {"workers": None, "error": str(exc)}
+    _HEALTH_CACHE[endpoint_id] = (now, status)
+    return status
+
+
+async def worker_status() -> dict:
+    """This endpoint's current cached worker status -- see _cached_health. Used to drive the
+    GUI's warm/cold header badge."""
+    return await _cached_health(await ensure())
+
+
+async def maybe_warm() -> dict:
+    """Self-debouncing warm trigger, safe to call from every page load/interaction: only
+    actually pays for a real warm() generation if the endpoint currently has ZERO workers up
+    (a genuine scale-to-zero cold state). If a worker's already idle/starting/running, this
+    is just one cached /health read and returns immediately without spending anything."""
+    if not ENABLED:
+        return {"skipped": "disabled"}
+    endpoint_id = await ensure()
+    status = await _cached_health(endpoint_id)
+    if status.get("workers"):
+        return {"skipped": "already warm", "workers": status["workers"]}
+    return await warm()
+
+
 async def warm() -> dict:
     """Force a deploy + one generation so the worker is hot before play/recording."""
-    import time
     t0 = time.time()
     endpoint_id = await ensure()
     try:

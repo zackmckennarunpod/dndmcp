@@ -92,6 +92,22 @@ scripts/pod_get_flags.sh                 # check current bots_enabled/bots_count
 
 A background supervisor (started once in `web.py`'s FastAPI startup hook) polls these every
 15s and starts/stops individual bot loops to match — no restart required either direction.
+
+### Warm-on-visit (`dndmcp/flash_art.py`/`flash_llm.py`'s `maybe_warm`)
+
+A page load (`GET /`) or a real chat turn (`POST /chat`) fires a fire-and-forget nudge at
+both Flash endpoints so a cold, scale-to-zero worker (art's `workers=(0,3)`) starts spinning
+up before anyone's actually waiting on a generation, instead of eating that cold start live.
+Self-debouncing (a cheap `/health` check first — costs nothing if a worker's already up), and
+scales back down for free via each endpoint's existing `idle_timeout=300`. On by default.
+
+```bash
+scripts/pod_set_flag.sh warm_on_visit 0   # stop nudging on page load/chat (still shows the badge)
+scripts/pod_set_flag.sh warm_on_visit 1   # back on (the default)
+```
+
+The header's 🟢/🟡/⚪ badge (art/LLM worker status) keeps working regardless of this flag —
+it's a read-only `/health` poll, never a spend.
 Status doesn't need SSH at all: `/metrics` badges every bot character with 🤖, and the world
 map's "Active now" spectate strip shows them live while they're playing.
 
