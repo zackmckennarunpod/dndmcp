@@ -45,21 +45,32 @@ from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from . import server
+from . import admin_flags, server
 from .state import MAIN_CAMPAIGN_ID
 
 logger = logging.getLogger(__name__)
 
 # --- backend config -----------------------------------------------------------------------
-# Defaults point at the live Qwen2.5-7B-Instruct Flash endpoint verified (2026-07-01) to speak
-# OpenAI tool-calling correctly via vLLM's hermes parser (see flash_llm.py's ENABLE_AUTO_
-# TOOL_CHOICE/TOOL_CALL_PARSER env, deployed for that endpoint). Every knob is overridable so
-# this module works against any OpenAI-compatible host — that's the point of hand-rolling the
-# HTTP call instead of hardcoding a client for one provider.
-DND_DM_BASE_URL = os.environ.get(
-    "DND_DM_BASE_URL", "https://api.runpod.ai/v2/q1ruzcnbog3oz1/openai/v1")
-DND_DM_MODEL = os.environ.get("DND_DM_MODEL", "Qwen/Qwen2.5-7B-Instruct")
-DND_DM_ENDPOINT_NAME = os.environ.get("DND_DM_ENDPOINT", "dnd-dm-vllm")
+# Two known-good (endpoint_name, model) tiers, toggled LIVE via admin_flags -- no redeploy:
+#   scripts/pod_set_flag.sh dm_use_14b 1   # switch the DM to the 14B endpoint
+#   scripts/pod_set_flag.sh dm_use_14b 0   # back to the 7B default
+# "low" is the long-running default (workers=(1,3), always-warm -- avoids the THROTTLED-
+# worker problem flash_llm.py's own comment documents for scale-to-zero). "high" is the 14B
+# endpoint validated via /evals (2026-07-03, two separate runs: ~50-58% vs ~82-92% tool-
+# calling correctness) -- self-heals at workers=(0,3) if ever re-minted from scratch, since
+# it's meant to stay bump-on-demand rather than commit to continuous cost by default. If you
+# DO want "high" to be the standing live default (not just an eval/spot-check target), bump
+# dnd-dm-vllm-14b's workersMin to 1 via mcp__runpod__update-endpoint first -- the toggle
+# alone doesn't do that, and leaving it at min=0 means every idle gap re-pays the ~225s cold
+# start on whichever real player's turn happens to land next.
+DM_MODEL_TIERS: dict[str, tuple[str, str]] = {
+    "low": (os.environ.get("DND_DM_ENDPOINT", "dnd-dm-vllm"),
+            os.environ.get("DND_DM_MODEL", "Qwen/Qwen2.5-7B-Instruct")),
+    "high": ("dnd-dm-vllm-14b", "Qwen/Qwen2.5-14B-Instruct"),
+}
+# Explicit override escape hatch (e.g. pointing at a different host entirely for local
+# testing) -- empty/unset means "use the tier system above", same as before this existed.
+DND_DM_BASE_URL = os.environ.get("DND_DM_BASE_URL", "")
 DND_DM_IMAGE = "runpod/worker-v1-vllm:v2.22.4"
 
 MAX_TOOL_CALLS_PER_TURN = 6   # hard cap — a stuck/looping model must not hang a player's turn
@@ -68,36 +79,42 @@ MAX_TOKENS = 350
 TEMPERATURE = 0.6
 _CHAT_TIMEOUT_S = 120         # cold start on a scaled-to-zero Flash endpoint can take ~90s
 
+
+def current_dm_tier() -> str:
+    """Read fresh every call (no caching) so flipping the flag takes effect on the very next
+    turn, same contract as every other admin_flags toggle."""
+    return "high" if admin_flags.enabled("dm_use_14b", default=False) else "low"
+
+
 # Self-heal via the Flash SDK, same ensure()-by-name pattern already proven in flash_llm.py/
-# flash_art.py — this endpoint already exists (created once, previously only ever referenced
-# by the hardcoded id baked into DND_DM_BASE_URL above), so in NORMAL operation this only ever
-# hits the resolve-by-name branch below and returns instantly. The construct+deploy branch is
-# a pure safety net: if this endpoint is ever deleted, the next _chat call recreates it with
-# this exact config instead of the DM silently staying broken until someone notices and
-# redeploys by hand. DND_DM_BASE_URL stays as an explicit override escape hatch (e.g. pointing
-# at a different host entirely for local testing) — set it and this whole resolution path
-# never runs.
-_DM_ENDPOINT_STATE: dict[str, str | None] = {"endpoint_id": None}
+# flash_art.py — both endpoints already exist (created once), so in NORMAL operation this
+# only ever hits the resolve-by-name branch below and returns instantly, per tier. The
+# construct+deploy branch is a pure safety net: if a tier's endpoint is ever deleted, the
+# next _chat call recreates it with this exact config instead of the DM silently staying
+# broken until someone notices and redeploys by hand.
+_DM_ENDPOINT_STATE: dict[str, str] = {}   # tier -> resolved endpoint_id
 _DM_ENDPOINT_LOCK = asyncio.Lock()
 
 
-async def _resolve_dm_endpoint_by_name(client) -> str | None:
+async def _resolve_dm_endpoint_by_name(client, name: str) -> str | None:
     r = await client._execute_graphql("query { myself { endpoints { id name } } }", {})  # noqa: SLF001
     for e in r["myself"]["endpoints"]:
-        if e["name"] == DND_DM_ENDPOINT_NAME:
+        if e["name"] == name:
             return e["id"]
     return None
 
 
-async def ensure_dm_endpoint() -> str:
-    """Resolve (or, only if it's ever gone, re-mint) the DM chat endpoint by name via the
-    Flash SDK. Returns its id — callers build the OpenAI-compatible base URL from that,
-    same shape DND_DM_BASE_URL's hardcoded default already used."""
-    if _DM_ENDPOINT_STATE["endpoint_id"]:
-        return _DM_ENDPOINT_STATE["endpoint_id"]
+async def ensure_dm_endpoint(tier: str | None = None) -> tuple[str, str]:
+    """Resolve (or, only if it's ever gone, re-mint) the DM chat endpoint for `tier` (default:
+    current_dm_tier(), the live admin_flags toggle). Returns (endpoint_id, model) — callers
+    build the OpenAI-compatible base URL from the id and send `model` in the request body."""
+    tier = tier or current_dm_tier()
+    endpoint_name, model = DM_MODEL_TIERS[tier]
+    if tier in _DM_ENDPOINT_STATE:
+        return _DM_ENDPOINT_STATE[tier], model
     async with _DM_ENDPOINT_LOCK:
-        if _DM_ENDPOINT_STATE["endpoint_id"]:
-            return _DM_ENDPOINT_STATE["endpoint_id"]
+        if tier in _DM_ENDPOINT_STATE:
+            return _DM_ENDPOINT_STATE[tier], model
         os.environ.setdefault("RUNPOD_API_BASE_URL", "https://api.runpod.io")
         os.environ.setdefault("RUNPOD_ENDPOINT_BASE_URL", "https://api.runpod.ai/v2")
         _api_key()
@@ -105,25 +122,28 @@ async def ensure_dm_endpoint() -> str:
 
         client = RunpodGraphQLClient()
         try:
-            existing_id = await _resolve_dm_endpoint_by_name(client)
+            existing_id = await _resolve_dm_endpoint_by_name(client, endpoint_name)
         finally:
             await client.close()
         if existing_id:
-            logger.info("dm_loop.ensure_dm_endpoint: %s already deployed -> %s (skipped re-trigger)",
-                       DND_DM_ENDPOINT_NAME, existing_id)
-            _DM_ENDPOINT_STATE["endpoint_id"] = existing_id
-            return existing_id
+            logger.info("dm_loop.ensure_dm_endpoint: %s (%s) already deployed -> %s (skipped re-trigger)",
+                       tier, endpoint_name, existing_id)
+            _DM_ENDPOINT_STATE[tier] = existing_id
+            return existing_id, model
 
         from runpod_flash import CudaVersion, Endpoint, GpuGroup, PodTemplate
 
-        # Mirrors the live endpoint's actual deployed config exactly (verified via
+        # Mirrors each tier's actual deployed config exactly (verified via
         # mcp__runpod__list-endpoints 2026-07-03) so a self-heal re-deploy behaves identically
         # to what's there today, not a differently-configured replacement.
+        gpu = GpuGroup.ADA_24 if tier == "low" else GpuGroup.ADA_48_PRO
+        workers = (1, 3) if tier == "low" else (0, 3)
+        disk_gb = 50 if tier == "low" else 90
         ep = Endpoint(
-            name=DND_DM_ENDPOINT_NAME, image=DND_DM_IMAGE, gpu=GpuGroup.ADA_24,
-            workers=(1, 3), idle_timeout=300, template=PodTemplate(containerDiskInGb=50),
+            name=endpoint_name, image=DND_DM_IMAGE, gpu=gpu,
+            workers=workers, idle_timeout=300, template=PodTemplate(containerDiskInGb=disk_gb),
             min_cuda_version=CudaVersion.V13_0,
-            env={"MODEL_NAME": DND_DM_MODEL, "MAX_MODEL_LEN": "16384", "GPU_MEMORY_UTILIZATION": "0.90",
+            env={"MODEL_NAME": model, "MAX_MODEL_LEN": "16384", "GPU_MEMORY_UTILIZATION": "0.90",
                  "ENABLE_AUTO_TOOL_CHOICE": "true", "TOOL_CALL_PARSER": "hermes"},
         )
         try:
@@ -134,14 +154,14 @@ async def ensure_dm_endpoint() -> str:
         client = RunpodGraphQLClient()
         try:
             for _ in range(10):
-                resolved_id = await _resolve_dm_endpoint_by_name(client)
+                resolved_id = await _resolve_dm_endpoint_by_name(client, endpoint_name)
                 if resolved_id:
-                    logger.info("dm_loop.ensure_dm_endpoint: resolved endpoint %s -> %s",
-                               DND_DM_ENDPOINT_NAME, resolved_id)
-                    _DM_ENDPOINT_STATE["endpoint_id"] = resolved_id
-                    return resolved_id
+                    logger.info("dm_loop.ensure_dm_endpoint: resolved %s (%s) -> %s",
+                               tier, endpoint_name, resolved_id)
+                    _DM_ENDPOINT_STATE[tier] = resolved_id
+                    return resolved_id, model
                 await asyncio.sleep(2)
-            raise RuntimeError(f"{DND_DM_ENDPOINT_NAME!r} not found after deploy")
+            raise RuntimeError(f"{endpoint_name!r} not found after deploy")
         finally:
             await client.close()
 
@@ -761,33 +781,36 @@ TOOL_HANDLERS: dict[str, Callable[..., Any]] = {
 }
 
 
-_DND_DM_BASE_URL_OVERRIDE = os.environ.get("DND_DM_BASE_URL")  # None unless explicitly set
+_DND_DM_BASE_URL_OVERRIDE = os.environ.get("DND_DM_BASE_URL")  # empty/unset unless explicitly set
 
 
-async def _resolve_base_url() -> str:
-    """Prefer the Flash-resolved endpoint id (self-heals if this endpoint is ever recreated
-    under the same name with a different id) — DND_DM_BASE_URL is both an explicit override
-    escape hatch when actually SET (e.g. pointing at a different host for local testing) and
-    the fallback if Flash resolution itself fails for any reason. A GraphQL hiccup must never
-    take the whole DM down over what used to be a plain hardcoded URL."""
+async def _resolve_endpoint() -> tuple[str, str]:
+    """Prefer the Flash-resolved (endpoint_id, model) for the CURRENT tier (self-heals if that
+    endpoint is ever recreated under the same name with a different id, and picks up a live
+    dm_use_14b toggle flip immediately, no restart) — DND_DM_BASE_URL is both an explicit
+    override escape hatch when actually SET (e.g. pointing at a different host for local
+    testing; uses the low tier's model in that case) and the fallback if Flash resolution
+    itself fails for any reason. A GraphQL hiccup must never take the whole DM down over what
+    used to be a plain hardcoded URL."""
     if _DND_DM_BASE_URL_OVERRIDE:
-        return _DND_DM_BASE_URL_OVERRIDE
+        return _DND_DM_BASE_URL_OVERRIDE, DM_MODEL_TIERS["low"][1]
     try:
-        endpoint_id = await ensure_dm_endpoint()
-        return f"https://api.runpod.ai/v2/{endpoint_id}/openai/v1"
+        endpoint_id, model = await ensure_dm_endpoint()
+        return f"https://api.runpod.ai/v2/{endpoint_id}/openai/v1", model
     except Exception:
-        logger.exception("dm_loop._resolve_base_url: Flash resolution failed, "
-                        "falling back to hardcoded default")
-        return DND_DM_BASE_URL
+        logger.exception("dm_loop._resolve_endpoint: Flash resolution failed, "
+                        "falling back to hardcoded low-tier default")
+        low_name, low_model = DM_MODEL_TIERS["low"]
+        return f"https://api.runpod.ai/v2/{low_name}/openai/v1", low_model
 
 
 # --- the OpenAI-compatible chat call ---------------------------------------------------------
-def _chat_sync(base_url: str, messages: list[dict], tools: list[dict], *,
+def _chat_sync(base_url: str, model: str, messages: list[dict], tools: list[dict], *,
               temperature: float = TEMPERATURE) -> dict:
     """One POST to <base>/chat/completions — urllib in a thread executor, exactly
     flash_llm._chat_sync's proven shape (no new deps: no `openai`/`requests` package), which
     is what makes this loop work against ANY OpenAI-compatible host by just changing
-    base_url. Returns the raw `message` dict (content + tool_calls) — the loop needs
+    base_url/model. Returns the raw `message` dict (content + tool_calls) — the loop needs
     tool_calls verbatim to drive itself, not just the text half flash_llm.generate() returns.
     An empty `tools` list (bot_player.py's plain-text "what does the character do next" call,
     which never needs tool-calling) omits tools/tool_choice entirely rather than sending an
@@ -796,7 +819,7 @@ def _chat_sync(base_url: str, messages: list[dict], tools: list[dict], *,
     `temperature` is overridable per-call (default TEMPERATURE, the DM's own resolution
     temperature) so bot_player.py's player-persona decision can run hotter than the DM without
     touching the DM's own tool-calling reliability — see PLAYER_TEMPERATURE there."""
-    body = {"model": DND_DM_MODEL, "messages": messages,
+    body = {"model": model, "messages": messages,
             "max_tokens": MAX_TOKENS, "temperature": temperature}
     if tools:
         body["tools"] = tools
@@ -811,10 +834,10 @@ def _chat_sync(base_url: str, messages: list[dict], tools: list[dict], *,
 
 
 async def _chat(messages: list[dict], tools: list[dict], *, temperature: float = TEMPERATURE) -> dict:
-    base_url = await _resolve_base_url()
+    base_url, model = await _resolve_endpoint()
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
-        None, lambda: _chat_sync(base_url, messages, tools, temperature=temperature))
+        None, lambda: _chat_sync(base_url, model, messages, tools, temperature=temperature))
 
 
 def _truncate_history(messages: list[dict]) -> list[dict]:
