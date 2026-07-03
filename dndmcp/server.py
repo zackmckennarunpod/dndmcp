@@ -185,6 +185,37 @@ def _nearby_region(from_room_id: str, *, depth: int = 2,
     return out
 
 
+def _graph_context(nearby_full: list[tuple[str, str, str]]) -> list[dict]:
+    """Turn _nearby_region's flat (name, kind, room_id) triples into an actual adjacency
+    structure for room-gen's prompt: each nearby room's own exits (labeled with their real
+    descriptor, and the destination's name when that destination is ALSO in this same
+    neighborhood) plus its contents (alive monsters, loot). Confirmed live (2026-07-04): the
+    old flat name-only list told the model rooms EXISTED nearby but nothing about how they
+    connect to each other or what's in them — real graph structure the DB already has
+    (the `edges` table) simply never reached the prompt. Reuses the already-computed
+    nearby_full rather than re-walking the BFS a second time."""
+    known_names = {rid: name for name, _kind, rid in nearby_full}
+    out = []
+    for name, kind, room_id in nearby_full:
+        room = world.room(room_id)
+        if not room:
+            continue
+        descs = world.room_exit_descriptions(room_id)
+        exits = []
+        for direction, dest_id in room.exits.items():
+            descriptor = descs.get(direction, direction)
+            dest_name = known_names.get(dest_id)
+            exits.append(f"{descriptor} -> {dest_name}" if dest_name else descriptor)
+        contents = []
+        for c in room.contents:
+            if c.get("type") == "monster" and c.get("hp", 0) > 0:
+                contents.append(f"{c['name']} (alive monster)")
+            elif c.get("type") == "loot":
+                contents.append(str(c.get("name", "an item")))
+        out.append({"name": name, "kind": kind, "exits": exits, "contents": contents})
+    return out
+
+
 def _anonymized(entry) -> str:
     """A domain event's text as it should be surfaced to anyone other than its own actor —
     other players are ghosts to each other (see web.py's "how this works" panel: you never
@@ -570,14 +601,21 @@ async def _generate_and_link(dest_id: str, theme: str, campaign_id: str, salt: s
     stall a player who's synchronously waiting on this call."""
     start = time.monotonic()
     nearby_full = _nearby_region(back_to_id, depth=2)
-    nearby = [(name, kind) for name, kind, _rid in nearby_full]
+    nearby = _graph_context(nearby_full)
     # Stigmergy feeding INTO generation, not just narration: what just happened in the room
     # you're generating FROM should be able to ripple into what this new room actually is —
     # a fight/discovery next door, not a blank slate. exclude_player_id is deliberately
     # omitted here — unlike _render_scene's viewer-facing traces, generation should see
     # everyone's recent actions, including the very player who's about to walk through.
+    # 8, not the original 5 -- MAX_MODEL_LEN on the DM/world-gen endpoint is 16384 and this
+    # whole prompt (system brief + nearby rooms + existing names + JSON schema) realistically
+    # runs 500-1000 tokens total, nowhere near that ceiling; 5 was a "recent, not exhaustive"
+    # convention, not a token-budget constraint. Not pushed further than 8 here: a small model
+    # already has documented trouble fully honoring long lists (existing_names' own "6 of 8
+    # rooms opened with 'Rusty'" gotcha) -- more room to grow once a bigger/better model is
+    # the standing default, per the same reasoning.
     recent_events = [_anonymized(e) for e in world.recent_log(
-        5, campaign_id=campaign_id, subject_type="room", subject_id=back_to_id)]
+        8, campaign_id=campaign_id, subject_type="room", subject_id=back_to_id)]
     # The origin room itself — _nearby_region excludes it (BFSes outward from it), yet it's
     # the single most relevant tonal anchor: the room whose doorway is being stepped through.
     origin = world.room(back_to_id)

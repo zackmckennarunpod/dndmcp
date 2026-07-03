@@ -26,7 +26,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from sse_starlette.sse import EventSourceResponse
 
-from . import admin_flags, bot_player, chat_sessions, dm_loop, flash_art, flash_llm, pairing, server, worldgen
+from . import admin_flags, bot_player, chat_sessions, dm_loop, evals, flash_art, flash_llm, pairing, server, worldgen
 from .state import MAIN_CAMPAIGN_ID
 
 app = FastAPI(title="DNDMCP map")
@@ -2888,6 +2888,133 @@ main li{{margin:0 0 6px 18px}}
 </header>
 <main>
 {md_to_html(markdown)}
+</main>
+</body></html>"""
+
+
+# --- /evals: side-by-side model comparison (tool-calling reliability + room-gen coherence) --
+# Real GPU calls across every scenario x every configured model (~15 calls today) -- run only
+# ever fires from an explicit button press (POST /evals/run), NEVER automatically on a page
+# load, same "expensive action needs an explicit trigger" convention as /art/regen. Runs as a
+# tracked background task (see _track above) so the request returns immediately instead of
+# holding a browser tab open for however long the whole batch takes (can be minutes, especially
+# with a cold start on a scaled-to-zero test endpoint).
+_EVAL_CONFIGS = [
+    evals.ModelConfig("Qwen2.5-7B (live dnd-dm-vllm)", "q1ruzcnbog3oz1", "Qwen/Qwen2.5-7B-Instruct"),
+    evals.ModelConfig("Qwen2.5-14B (dnd-dm-vllm-14b-test)", "vllm-symcq20v3vy90y", "Qwen/Qwen2.5-14B-Instruct"),
+]
+_eval_run_state = {"running": False}
+
+
+async def _run_eval_tracked() -> None:
+    try:
+        await evals.run_eval(_EVAL_CONFIGS)
+    except Exception:
+        logger.exception("web._run_eval_tracked: eval run failed")
+    finally:
+        _eval_run_state["running"] = False
+
+
+@app.post("/evals/run")
+async def evals_run(request: Request) -> Response:
+    if not _eval_run_state["running"]:
+        _eval_run_state["running"] = True
+        _track(asyncio.create_task(_run_eval_tracked()))
+    return Response(status_code=303, headers={"Location": "/evals"})
+
+
+@app.get("/evals", response_class=HTMLResponse)
+def evals_page(request: Request) -> str:
+    """Renders the LAST completed run (evals.load_last_run) plus a button to kick off a new
+    one -- never re-runs on page load, since every load would otherwise cost real GPU spend
+    across every configured model. Two tracks, per evals.py's own split: `scenarios` (tool-
+    calling correctness, auto-graded pass/fail) and `room_gen` (architectural/thematic
+    coherence, NOT auto-graded -- raw output shown side by side for a human to judge)."""
+    run = evals.load_last_run()
+    running = _eval_run_state["running"]
+    configs = run["configs"] if run else [c.label for c in _EVAL_CONFIGS]
+
+    def esc(s: object) -> str:
+        return html.escape(str(s))
+
+    scenario_rows = ""
+    if run:
+        for row in run["scenarios"]:
+            cells = ""
+            for cfg_label in configs:
+                r = row["results"].get(cfg_label, {})
+                if r.get("error"):
+                    cells += f'<td class=err>error: {esc(r["error"])[:80]}</td>'
+                    continue
+                mark = "✅" if r.get("correct") else "❌"
+                tools = ", ".join(r.get("tool_calls") or []) or "(none)"
+                cells += (f'<td class="{"ok" if r.get("correct") else "bad"}">{mark} {esc(tools)}'
+                         f'<div class=meta>{r.get("elapsed_s", "?")}s'
+                         f'{" — " + esc(r["content"][:60]) if r.get("content") else ""}</div></td>')
+            scenario_rows += (f'<tr><td class=label>{esc(row["label"])}'
+                             f'<div class=meta>{esc(row["action"])}</div></td>{cells}</tr>')
+
+    room_gen_blocks = ""
+    if run:
+        for row in run.get("room_gen", []):
+            cols = ""
+            for cfg_label in configs:
+                r = row["results"].get(cfg_label, {})
+                if r.get("error"):
+                    cols += f'<div class=col><h4>{esc(cfg_label)}</h4><div class=err>error: {esc(r["error"])[:200]}</div></div>'
+                    continue
+                parsed = r.get("parsed")
+                body = (f'<b>{esc(parsed.get("name",""))}</b> <span class=meta>({esc(parsed.get("kind",""))})</span>'
+                       f'<p>{esc(parsed.get("atmosphere",""))}</p>'
+                       f'<div class=meta>exits: {esc(", ".join(f"{k}: {v}" for k,v in (parsed.get("exits") or {}).items()))}</div>'
+                       f'<div class=meta>items: {esc(", ".join(parsed.get("notable_items") or []))}</div>'
+                       f'<div class=meta>monster: {esc(parsed.get("monster_type") or "none")}</div>'
+                       if parsed else f'<pre class=raw>{esc((r.get("raw") or "")[:600])}</pre>')
+                cols += (f'<div class=col><h4>{esc(cfg_label)} <span class=meta>{r.get("elapsed_s","?")}s</span></h4>{body}</div>')
+            room_gen_blocks += f'<div class=rgrow><div class=rglabel>{esc(row["label"])}</div><div class=rgcols>{cols}</div></div>'
+
+    banner = '<div class=banner>⏳ Eval run in progress — reload this page in a bit.</div>' if running else ""
+    last_run_note = (f'last run: {datetime.datetime.fromtimestamp(run["finished_at"]).strftime("%Y-%m-%d %H:%M:%S")}'
+                     if run and run.get("finished_at") else "no run yet")
+    return f"""<!doctype html><html><head><meta charset=utf-8><title>Model evals</title>
+<link rel=icon href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🧪</text></svg>">
+<style>
+:root{{--bg:#0a0713;--panel:#150f24;--border:#2b2145;--border-soft:#221a38;--text:#e7e1f5;
+  --muted:#8d7fae;--warm:#e8b339;--warm-bright:#f5cc66;--ghost:#4fd8c4;--ghost-bright:#8ff0e0;
+  --ok:#4ade80;--bad:#f87171}}
+body{{margin:0;background:var(--bg);color:var(--text);font:13px 'IBM Plex Mono',ui-monospace,Menlo,monospace}}
+header{{padding:14px 20px;border-bottom:1px solid var(--border);display:flex;gap:14px;align-items:baseline;flex-wrap:wrap}}
+h1{{font-size:16px;margin:0;color:var(--warm-bright)}}
+h2{{font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin:24px 20px 8px}}
+.count{{color:var(--muted)}}
+main{{padding:6px 20px 30px}}
+button{{background:var(--warm);color:#1a1225;border:none;border-radius:6px;padding:6px 14px;
+  font:12px 'IBM Plex Mono',monospace;cursor:pointer}}
+.banner{{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:10px 14px;margin:10px 20px;color:var(--warm-bright)}}
+table{{width:100%;border-collapse:collapse;margin:0 20px;width:calc(100% - 40px)}}
+td{{border-bottom:1px solid var(--border-soft);padding:8px 10px;vertical-align:top;font-size:12px}}
+td.label{{color:var(--ghost-bright);width:220px}}
+td.ok{{color:var(--ok)}}
+td.bad{{color:var(--bad)}}
+td.err{{color:var(--bad)}}
+.meta{{color:var(--muted);font-size:11px;margin-top:3px}}
+.rgrow{{margin:0 20px 20px;border:1px solid var(--border);border-radius:8px;padding:12px 14px;background:var(--panel)}}
+.rglabel{{color:var(--warm-bright);margin-bottom:8px}}
+.rgcols{{display:grid;grid-template-columns:1fr 1fr;gap:16px}}
+.col h4{{margin:0 0 6px;font-size:12px;color:var(--ghost-bright)}}
+.col p{{margin:6px 0;font-size:12px;line-height:1.5}}
+.raw{{white-space:pre-wrap;font-size:11px;color:var(--muted)}}
+.empty{{color:var(--muted);padding:20px}}
+</style></head><body>
+<header><h1>🧪 Model evals</h1><span class=count>{esc(last_run_note)}</span>
+<form method=post action=/evals/run style="margin-left:auto"><button {"disabled" if running else ""}>
+{"running…" if running else "▶ run new eval"}</button></form></header>
+{banner}
+<main>
+<h2>Tool-calling reliability ({len(configs)} models × {len(run["scenarios"]) if run else 0} scenarios)</h2>
+{f'<table><tr><td></td>{"".join(f"<td>{esc(c)}</td>" for c in configs)}</tr>{scenario_rows}</table>' if run else '<div class=empty>No run yet — hit "run new eval" above.</div>'}
+<h2>Room-generation coherence (not auto-graded — read and judge)</h2>
+{room_gen_blocks or '<div class=empty>No run yet.</div>'}
 </main>
 </body></html>"""
 

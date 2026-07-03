@@ -105,7 +105,7 @@ _ROOM_JSON = ('{"name": a PROPER NAME for this specific room, capitalized like a
 
 
 def _room_messages(theme: str, came_from: str | None, exits: list[str],
-                   nearby: list[tuple[str, str]] | None = None,
+                   nearby: list[dict] | None = None,
                    recent_events: list[str] | None = None, premise: str = "",
                    existing_names: list[str] | None = None,
                    entry_room: tuple[str, str] | None = None, *,
@@ -140,9 +140,21 @@ def _room_messages(theme: str, came_from: str | None, exits: list[str],
             context += (f" {e_name} was ALREADY a bare transitional space (a hallway/landing/"
                        f"threshold) — this room must NOT also be one; give it real content.")
     if nearby:
-        listed = ", ".join(f"{name} ({kind})" if kind else name for name, kind in nearby)
-        context += (f" Nearby, already-explored areas: {listed}. Keep this room's tone/architecture "
-                    f"consistent with them — same building, not a random mismatch of styles.")
+        # An actual adjacency structure (this room -> its own exits -> named neighbors when
+        # known, plus what's actually in it), not just a bag of names — see server.py's
+        # _graph_context. Confirmed live (2026-07-04): a flat name list told the model rooms
+        # existed nearby but nothing about how they connect or what's in them.
+        lines = []
+        for r in nearby:
+            bits = f"{r['name']} ({r['kind']})" if r.get("kind") else r["name"]
+            if r.get("exits"):
+                bits += f" — exits: {', '.join(r['exits'])}"
+            if r.get("contents"):
+                bits += f" — contains: {', '.join(r['contents'])}"
+            lines.append(bits)
+        context += (f" Known map nearby:\n{chr(10).join(lines)}\nKeep this room's tone/"
+                    f"architecture consistent with them — same building, not a random "
+                    f"mismatch of styles.")
     if recent_events:
         # Stigmergy reaching into generation itself, not just narration: what happened next
         # door can ripple into what THIS room is — the same fight/discovery a moment ago is
@@ -168,7 +180,7 @@ def _room_messages(theme: str, came_from: str | None, exits: list[str],
 
 
 async def generate_room_content(room_id: str, theme: str, *, entry_from: str | None = None,
-                                nearby: list[tuple[str, str]] | None = None,
+                                nearby: list[dict] | None = None,
                                 recent_events: list[str] | None = None,
                                 salt: str = "", premise: str = "",
                                 existing_names: list[str] | None = None,
@@ -178,9 +190,12 @@ async def generate_room_content(room_id: str, theme: str, *, entry_from: str | N
     """Generate a room's content for the graph. Tries Flash (structured JSON); falls back
     to procedural. Returns game.generate_room's shape + `features` + a `via` marker.
 
-    `nearby`: (name, kind) pairs of already-generated rooms within a couple hops, so the LLM
-    keeps tone/architecture consistent with the surrounding region instead of each room being
-    generated in isolation. `recent_events`: recent log text for the room being generated
+    `nearby`: an actual adjacency structure (server.py's _graph_context) for already-generated
+    rooms within a couple hops — each entry's own exits (named when the destination is ALSO in
+    this neighborhood) and contents (alive monsters/loot), not just a flat name/kind list — so
+    the LLM keeps tone/architecture consistent with the surrounding region AND understands how
+    it actually connects, instead of each room being generated in isolation. `recent_events`:
+    recent log text for the room being generated
     FROM (see server.py's _generate_and_link) — lets a fight/discovery next door ripple into
     what this new room actually is, not just how it's narrated. `salt`: the owning campaign's
     salt (state.py Campaign.salt) — see game._seeded for why this must be passed through, not
