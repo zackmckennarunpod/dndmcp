@@ -2928,8 +2928,7 @@ async def _run_eval_tracked() -> None:
 @app.post("/evals/run")
 async def evals_run(request: Request) -> Response:
     if not _evals_enabled():
-        return JSONResponse({"error": "evals are disabled -- enable via "
-                             "scripts/pod_set_flag.sh evals_enabled 1"}, status_code=503)
+        return JSONResponse({"error": "evals are currently disabled"}, status_code=503)
     if not _eval_run_state["running"]:
         _eval_run_state["running"] = True
         _track(asyncio.create_task(_run_eval_tracked()))
@@ -3026,7 +3025,7 @@ td.err{{color:var(--bad)}}
 <header><h1>🧪 Model evals</h1><span class=count>{esc(last_run_note)}</span>
 {f'<form method=post action=/evals/run style="margin-left:auto"><button {"disabled" if running else ""}>'
   f'{"running…" if running else "▶ run new eval"}</button></form>' if can_run
-  else '<span class=count style="margin-left:auto">evals disabled — enable via SSH: scripts/pod_set_flag.sh evals_enabled 1</span>'}
+  else '<span class=count style="margin-left:auto">evals are currently disabled</span>'}
 </header>
 {banner}
 <main>
