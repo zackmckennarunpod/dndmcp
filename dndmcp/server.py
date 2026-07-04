@@ -627,6 +627,10 @@ async def _generate_and_link(dest_id: str, theme: str, campaign_id: str, salt: s
         # an unbounded "don't reuse these names" list stopped being reliably honored by the 7B
         # model well before it reached this world's current size.
         existing_names=[name for _, name, _ in world.room_ids_in(campaign_id, limit=25)],
+        # Same recency cap, same reasoning, applied to loot item names (item_names_in) — room
+        # names already had this anti-repeat protection, items never did (observed live: two
+        # separate "Rusty Iron Key"s across unrelated rooms in the same world).
+        existing_item_names=world.item_names_in(campaign_id, limit=25),
         deadline_s=deadline_s,
         entry_room=(origin.name, origin.kind) if origin else None,
         is_main=campaign_id == MAIN_CAMPAIGN_ID)
