@@ -88,9 +88,13 @@ async def _warm_flash_endpoints() -> None:
     a read, never a spend."""
     if not admin_flags.enabled("warm_on_visit", default=True):
         return
+    # dm_loop.maybe_warm() resolves whichever DM tier (7B/14B) dm_use_14b currently points at --
+    # without it, flipping to the 14B tier left dnd-dm-vllm-14b with no warm-on-visit coverage
+    # at all (flash_llm.maybe_warm() only ever nudges the hardcoded/aliased "low" tier
+    # endpoint), so a judge's first chat message would cold-start blind against it.
     results = await asyncio.gather(flash_art.maybe_warm(), flash_llm.maybe_warm(),
-                                   return_exceptions=True)
-    logger.info("warm-on-visit: art=%r llm=%r", results[0], results[1])
+                                   dm_loop.maybe_warm(), return_exceptions=True)
+    logger.info("warm-on-visit: art=%r llm=%r dm=%r", *results)
 
 
 @app.on_event("startup")
