@@ -660,6 +660,28 @@ class World:
         ).fetchall()
         return [(r["id"], r["name"], r["kind"] or "") for r in rows]
 
+    def item_names_in(self, campaign_id: str, *, limit: int | None = None) -> list[str]:
+        """Distinct loot item names across the `limit` most-recently-created rooms in a world —
+        same recency-capped rationale as room_ids_in (an unbounded list stops being reliably
+        honored by a small model long before it ever hits a token limit). worldgen's
+        generate_room_content anti-repeat list for item names: without it, two independently-
+        generated rooms can each hand out an item with the identical name (observed live: two
+        separate "Rusty Iron Key"s), since room names have this protection but items never did."""
+        order_limit = " ORDER BY rowid DESC LIMIT ?" if limit is not None else ""
+        params = (campaign_id, limit) if limit is not None else (campaign_id,)
+        rows = self._c.execute(
+            f"SELECT contents FROM rooms WHERE campaign_id=?{order_limit}", params
+        ).fetchall()
+        names: list[str] = []
+        seen: set[str] = set()
+        for r in rows:
+            for c in json.loads(r["contents"] or "[]"):
+                name = c.get("name") if c.get("type") == "loot" else None
+                if name and name not in seen:
+                    seen.add(name)
+                    names.append(name)
+        return names
+
     def set_room_image(self, room_id: str, image_ref: str) -> None:
         self._c.execute("UPDATE rooms SET image_ref=? WHERE id=?", (image_ref, room_id))
         self._c.commit()

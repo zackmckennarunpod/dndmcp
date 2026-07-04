@@ -167,6 +167,7 @@ def _room_messages(theme: str, came_from: str | None, exits: list[str],
                    nearby: list[dict] | None = None,
                    recent_events: list[str] | None = None, premise: str = "",
                    existing_names: list[str] | None = None,
+                   existing_item_names: list[str] | None = None,
                    entry_room: tuple[str, str] | None = None, *,
                    is_main: bool) -> list[dict]:
     # A bare theme label ("sundered weave") means nothing to a small model on its own — no
@@ -233,6 +234,12 @@ def _room_messages(theme: str, came_from: str | None, exits: list[str],
             context += (" Vary your word choice — do not reach for the same adjective/"
                        "descriptor that already opens multiple names above just because it "
                        "fits the theme; the theme supports many different words, not one.")
+    if existing_item_names:
+        # Same failure mode as room names, applied to notable_items: each room is generated
+        # independently with no memory of another room's loot, so two unrelated rooms can hand
+        # out an item with the identical name (observed live: two separate "Rusty Iron Keys").
+        context += (f" Portable item names already used in this world (do not reuse): "
+                   f"{', '.join(existing_item_names)}.")
     user = (f"Generate the next room{enter}. Exits lead: {', '.join(exits) or 'none'}.{context} "
             f"Return JSON: {_ROOM_JSON}")
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
@@ -243,6 +250,7 @@ async def generate_room_content(room_id: str, theme: str, *, entry_from: str | N
                                 recent_events: list[str] | None = None,
                                 salt: str = "", premise: str = "",
                                 existing_names: list[str] | None = None,
+                                existing_item_names: list[str] | None = None,
                                 deadline_s: float | None = None,
                                 entry_room: tuple[str, str] | None = None,
                                 is_main: bool) -> dict:
@@ -263,8 +271,10 @@ async def generate_room_content(room_id: str, theme: str, *, entry_from: str | N
     the premise is what actually explains what it means. `existing_names`: every room name
     already used in this world (state.py's room_ids_in) — without this two independent
     generation calls can both land on the same name (observed live: two different rooms both
-    named "Rune Chamber"). `deadline_s`: total wall-clock budget across ALL retry attempts —
-    None (default) keeps the existing patient behavior (up to `room_attempts` full 150s-
+    named "Rune Chamber"). `existing_item_names`: same idea, for notable_items (state.py's
+    item_names_in) — without it two rooms can each hand out an item with the identical name
+    (observed live: two separate "Rusty Iron Key"s). `deadline_s`: total wall-clock budget
+    across ALL retry attempts — None (default) keeps the existing patient behavior (up to `room_attempts` full 150s-
     timeout calls; used by the background prefetch path, which never blocks a player). Pass
     a real budget (e.g. ~20-30s) from a REACTIVE caller (a player is synchronously waiting,
     e.g. move()) so a hung/cold Flash endpoint can't stall them for up to 4x150s (~10min) —
@@ -295,7 +305,8 @@ async def generate_room_content(room_id: str, theme: str, *, entry_from: str | N
     # entry_room: (name, kind) of the room the player is walking FROM — the immediate tonal
     # anchor _nearby_region can't provide (it excludes its own origin). See _room_messages.
     messages = _room_messages(theme, entry_from, list(base["exits"].keys()), nearby, recent_events,
-                              premise, existing_names, entry_room=entry_room, is_main=is_main)
+                              premise, existing_names, existing_item_names,
+                              entry_room=entry_room, is_main=is_main)
 
     # A single bad sample (malformed JSON) or a transient endpoint hiccup (cold start,
     # throttling — both observed in practice) shouldn't cost the room real content when a
