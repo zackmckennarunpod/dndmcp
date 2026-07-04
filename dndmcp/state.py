@@ -617,6 +617,27 @@ class World:
         if exit_descriptions is None:
             exit_descriptions = self.room_exit_descriptions(room_id)
         self.set_edges("room", room_id, "room", room.exits, metadata=exit_descriptions)
+        # room --in_campaign--> campaign: the semantic edge form of the rooms.campaign_id
+        # scalar column above (see WORLD_SCHEMA.md's EDGES section). That column stays as a
+        # denormalized, indexed read-optimization for the many existing partition-scoped
+        # queries — this edge is the source of truth, and it's what lets a room belong to
+        # MORE than one campaign later (e.g. a portal/crossover room) with zero schema
+        # change, instead of the scalar column needing to become a list/join table.
+        # upsert_room is called repeatedly for the SAME room_id over its life (creation, then
+        # every later mutation — art regen, combat, contents changes — see server.py's call
+        # sites), and `edges` has no unique constraint, so check-before-insert rather than an
+        # unconditional INSERT to avoid a duplicate in_campaign row on every touch.
+        already_has_campaign_edge = self._c.execute(
+            "SELECT 1 FROM edges WHERE from_type='room' AND from_id=? AND edge_type='in_campaign' LIMIT 1",
+            (room_id,),
+        ).fetchone() is not None
+        if not already_has_campaign_edge:
+            self._c.execute(
+                "INSERT INTO edges (from_type,from_id,to_type,to_id,edge_type,metadata,created_at)"
+                " VALUES ('room',?,'campaign',?,'in_campaign',NULL,?)",
+                (room_id, campaign_id, time.time()),
+            )
+            self._c.commit()
         saved = self.room(room_id)  # re-read: picks up visited/COALESCE'd image_ref from the DB
         assert saved is not None, f"room {room_id} vanished immediately after its own upsert"
         return saved
