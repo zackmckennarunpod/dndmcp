@@ -82,6 +82,14 @@ turn-based narration and needs zero new infrastructure.
 - entity —disposition→ character   (how an NPC feels about a PC)
 - quest —involves→ entity/location ; lore —found_in→ location ; lore —about→ entity/topic
 - event —about→ any node ; player —controls→ character
+- location —in_campaign→ campaign  (world/campaign membership; `from_type='room'` per the
+  existing room-edge convention). `rooms.campaign_id` (plus the campaign-id room-id prefix
+  convention) stays as a denormalized, indexed read-optimization for the many existing
+  partition-scoped queries — this edge is the semantic source of truth. The real payoff: a
+  room belonging to MORE than one campaign (e.g. a future portal/crossover room) becomes an
+  additional edge row with zero schema change, instead of forcing the scalar column to become
+  a list/join table. Written go-forward only in `upsert_room` — not backfilled for existing
+  rooms, same as every other additive migration in this file.
 
 ## MUTABLE STATE (the "world remembers" — what tools write)
 - location.state (searched, door_open, fire, changed by actions) + visited/discovered
