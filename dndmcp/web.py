@@ -292,6 +292,14 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
  .ch span.item{cursor:help;border-bottom:1px dotted var(--dim)}
  .log div{color:var(--muted);padding:2px 0;border-bottom:1px solid var(--border-soft);font-size:12px}
  .empty{color:var(--dim)}
+ /* This-world card: one shared pill style for every stat/category/danger chip (room count,
+    character count, world age, per-category tallies, per-danger-level tallies) -- reusing the
+    existing violet/teal "Sundered Weave" custom properties rather than inventing new colors,
+    and one class rather than a different pill style per row. */
+ .infoPill{display:inline-block;background:var(--link);border:1px solid var(--border);
+   border-radius:10px;padding:2px 9px;margin:2px 5px 2px 0;font-size:11px;color:var(--muted)}
+ .worldPremise{color:var(--muted);margin:4px 0 8px}
+ .pillRow{margin:4px 0}
  /* Known-entity highlighting in free-text log/stream lines (see highlightKnown()) — one
     color per category so "who / where / what" is readable at a glance, not one flat gray
     sentence. Reuses the same palette meaning the graph already established (violet=rooms,
@@ -1928,6 +1936,59 @@ document.getElementById('spectateStopBtn').addEventListener('click', ev => {
   renderSpectateBar(lastPlayers, lastRooms);
 });
 
+// "This world" card (requirement: the page's own "How this works" copy pitches "facts,
+// never invented prose" -- typed rooms/quests/events, not freeform text -- but this panel
+// used to fuse theme+name+premise into one prose blob, undercutting that pitch on its own
+// page). Rooms/players/campaign are already typed facts on /state's JSON (category is one of
+// worldgen.ROOM_CATEGORIES, danger a 0-3 int) -- tally and pill them instead of re-flattening
+// into a sentence. Premise stays its own prose line below the pills: that field genuinely IS
+// narrative (the world's founding hook), not tallyable data.
+function tallyBy(items, keyFn){
+  const counts = {};
+  items.forEach(item => { const key = keyFn(item); if (key) counts[key] = (counts[key]||0) + 1; });
+  return counts;
+}
+function pillHtml(label){ return `<span class=infoPill>${label}</span>`; }
+function dangerLabel(level){ return level === 0 ? 'safe' : '▲'.repeat(level); }
+function renderWorldInfo(camp, mapRooms, players){
+  const roomCount = mapRooms.length;
+  const playerCount = players.length;
+  const statPills = [
+    pillHtml(roomCount + ' room' + (roomCount === 1 ? '' : 's')),
+    pillHtml(playerCount + ' character' + (playerCount === 1 ? '' : 's')),
+    // timeAgo already exists (used by the worlds browser above) and already takes a bare
+    // epoch-seconds float -- exactly what campaigns.created_at is (state.py's
+    // create_campaign sets it via time.time()) -- so no new formatter needed.
+    camp.created_at ? pillHtml(esc('started ' + timeAgo(camp.created_at))) : '',
+  ].join('');
+  const categoryCounts = tallyBy(mapRooms, r => r.category);
+  const categoryPills = Object.entries(categoryCounts)
+    .sort((a, b) => b[1] - a[1])
+    .map(([cat, n]) => pillHtml(esc(cat) + ' ×' + n))
+    .join('');
+  const dangerCounts = [0, 0, 0, 0];
+  mapRooms.forEach(r => { const lvl = r.danger || 0; if (dangerCounts[lvl] !== undefined) dangerCounts[lvl]++; });
+  const dangerPills = dangerCounts
+    .map((n, lvl) => n > 0 ? pillHtml(dangerLabel(lvl) + ' ×' + n) : '')
+    .join('');
+  return `<b>${esc(camp.theme||'')}</b>${camp.name ? ` — <span>${esc(camp.name)}</span>` : ''}`
+    + `<div class="worldPremise">${esc(camp.premise||'')}</div>`
+    + `<div class="pillRow">${statPills}</div>`
+    + (categoryPills ? `<div class="pillRow">${categoryPills}</div>` : '')
+    + (dangerPills ? `<div class="pillRow">${dangerPills}</div>` : '');
+}
+// quest.given_by is an entity_id (see state.py's quest table comment), not a display name --
+// resolve it against the same room `contents` the map already ships per-room (monster/NPC
+// entries carry {id, name}, see server.py's upsert_entity call sites) rather than showing a
+// raw opaque hex id. Falls back to no suffix (not the raw id) if the giver's entry can't be
+// found -- e.g. the NPC died/was removed -- since a bare hash reads as broken, not as data.
+function entityNameById(mapRooms, entityId){
+  for (const r of mapRooms) {
+    const match = (r.contents||[]).find(c => c.id === entityId);
+    if (match) return match.name;
+  }
+  return null;
+}
 async function tick(){
  try{
   const url = '/state?campaign='+encodeURIComponent(campaignId)
@@ -2000,7 +2061,7 @@ async function tick(){
   const camp = s.campaign;
   lastCampaignTheme = camp && camp.theme;
   document.getElementById('worldInfo').innerHTML = camp
-    ? `<b>${esc(camp.theme||'')}</b>${camp.name?` — <span>${esc(camp.name)}</span>`:''}<br>${esc(camp.premise||'')}`
+    ? renderWorldInfo(camp, mapRooms, s.players||[])
     : '<span class=empty>no world seeded yet</span>';
   // Onboarding wizard (e0b.12): auto-open once for a cold visitor, checked from this first
   // real /state payload (needs s.you to know whether this browser already has a character
@@ -2016,7 +2077,9 @@ async function tick(){
         const qsteps = (q.steps||[]).map(st =>
           `<div>${st.done?'☑':'☐'} ${esc(st.text||'')}</div>`).join('')
           || '<span class=empty>no steps yet</span>';
-        return `<div style="margin-bottom:8px"><b>📜 ${esc(q.title)}</b><br>${qsteps}</div>`;
+        const giverName = q.given_by ? entityNameById(mapRooms, q.given_by) : null;
+        const givenBy = giverName ? ` <span class=sub>— given by ${esc(giverName)}</span>` : '';
+        return `<div style="margin-bottom:8px"><b>📜 ${esc(q.title)}</b>${givenBy}<br>${qsteps}</div>`;
       }).join('')
     : '<span class=empty>no active quests</span>';
   // While spectating, the Character panel shows the WATCHED character's own sheet instead of
