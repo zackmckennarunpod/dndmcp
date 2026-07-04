@@ -39,13 +39,14 @@ import logging
 import os
 import re
 import subprocess
+import time
 import urllib.request
 import uuid
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from . import admin_flags, server
+from . import admin_flags, flash_llm, server
 from .state import MAIN_CAMPAIGN_ID
 
 logger = logging.getLogger(__name__)
@@ -807,6 +808,33 @@ async def _resolve_endpoint() -> tuple[str, str]:
                         "falling back to hardcoded low-tier default")
         low_name, low_model = DM_MODEL_TIERS["low"]
         return f"https://api.runpod.ai/v2/{low_name}/openai/v1", low_model
+
+
+async def maybe_warm() -> dict:
+    """Self-debouncing warm trigger for the DM chat endpoint, mirroring flash_llm.maybe_warm()
+    -- meant to be called from the same page-load/interaction trigger points as
+    web.py's _warm_flash_endpoints(). Confirmed gap (2026-07-04): that function only ever
+    nudged flash_llm's own endpoint (aliased to the "low"/7B tier via DND_LLM_ENDPOINT) --
+    flipping dm_use_14b to "high" left dnd-dm-vllm-14b with ZERO warm-on-visit coverage, so a
+    judge's first chat message would cold-start blind against it. Always resolves whichever
+    tier current_dm_tier() says is ACTIVE right now, so this stays correct across a live
+    dm_use_14b flip with no code change. Reuses flash_llm._cached_health (keyed by
+    endpoint_id, not tied to flash_llm's own single endpoint) instead of a second cache."""
+    try:
+        endpoint_id, model = await ensure_dm_endpoint()
+    except Exception as exc:
+        return {"skipped": f"resolve failed: {exc}"}
+    status = await flash_llm._cached_health(endpoint_id)  # noqa: SLF001
+    if status["state"] in ("active", "starting"):
+        return {"skipped": f"already {status['state']}", "model": model}
+    t0 = time.time()
+    try:
+        message = await _chat([{"role": "user", "content": "Say 'ready'."}], [], temperature=0.5)
+        return {"ok": True, "model": model, "sample": message.get("content"),
+                "seconds": round(time.time() - t0, 1)}
+    except Exception as exc:
+        return {"ok": False, "model": model, "error": str(exc),
+                "seconds": round(time.time() - t0, 1)}
 
 
 # --- the OpenAI-compatible chat call ---------------------------------------------------------
