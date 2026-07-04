@@ -211,6 +211,23 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
    text-shadow:0 0 12px rgba(79,216,196,.35)}
  .sub{color:var(--muted);font-size:12px}
  #tagline{padding:6px 18px 10px;color:var(--muted);font-size:12px;max-width:760px}
+ /* Concept strip (e0b.13) — the "how this works" pitch used to live behind a non-default
+    bottom tab, i.e. invisible to a cold visitor/judge unless they scrolled past the map AND
+    picked the right tab. Always-visible chips right under the tagline get the pitch in front
+    of a first screenful without forcing everyone to read all 6 paragraphs up front — each
+    chip click-expands its own slice, collapsed by default. */
+ #conceptStrip{margin:0 18px 14px;max-width:920px}
+ #conceptStrip>.sub{margin-bottom:8px}
+ #conceptChips{display:flex;flex-wrap:wrap;gap:8px}
+ .chip{background:var(--panel);border:1px solid var(--border);border-radius:8px;flex:0 0 auto}
+ .chip[open]{flex-basis:100%}
+ .chip summary{cursor:pointer;list-style:none;padding:7px 12px;font-size:11.5px;font-weight:600;
+   color:var(--ghost-bright);display:flex;align-items:center;gap:6px;white-space:nowrap}
+ .chip[open] summary{white-space:normal;border-bottom:1px solid var(--border)}
+ .chip summary::-webkit-details-marker{display:none}
+ .chip summary::before{content:'▸';color:var(--muted);transition:transform .15s}
+ .chip[open] summary::before{content:'▾'}
+ .chip .body{padding:0 12px 12px;margin-top:0}
  /* 3 columns: map (flexible width) | live stream (own space, not buried below the fold) | the
     existing character/room/recent sidebar. align-items:start is load-bearing: CSS grid's
     default (stretch) makes every column match the ROW's tallest cell -- the sidebar's Recent
@@ -348,24 +365,12 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
  details.panel summary::before{content:'▸';transition:transform .15s}
  details.panel[open] summary::before{content:'▾'}
  /* .body used to only ever live inside a <details>, hence the old "details.panel .body"
-    ancestor-scoped selectors — now also used inside tab panes (.tabBody), so scoped to the
-    class alone. */
+    ancestor-scoped selectors — now also used inside the concept-strip chips and the (now
+    tab-less) Browse panel, so scoped to the class alone rather than any particular ancestor. */
  .body{margin-top:10px;color:var(--muted);line-height:1.6;font-size:12.5px}
  .body b{color:var(--ghost-bright)}
  .body a{color:var(--ghost-bright);text-decoration:underline;text-decoration-color:var(--ghost)}
  .body p{margin:0 0 10px}
- /* Tab group (Connect & play / Browse other worlds / How this works) — these are mutually
-    exclusive MODES a visitor picks, not things worth having open side-by-side, unlike the
-    always-visible "This world" status strip or the collapsible-but-independent sidebar
-    cards below. */
- .tabbar{display:flex;gap:2px;border-bottom:1px solid var(--border);margin-bottom:2px}
- .tabBtn{background:none;border:none;color:var(--muted);font-size:11px;text-transform:uppercase;
-   letter-spacing:1.5px;padding:8px 12px 9px;cursor:pointer;border-bottom:2px solid transparent;
-   font-family:'IBM Plex Mono',monospace;transition:color .15s,border-color .15s}
- .tabBtn:hover{color:var(--text)}
- .tabBtn.active{color:var(--ghost-bright);border-bottom-color:var(--ghost)}
- .tabBody{display:none}
- .tabBody.active{display:block}
  .world-card{display:block;background:var(--bg);border:1px solid var(--border-soft);border-radius:6px;
    padding:9px 11px;margin-bottom:6px;text-decoration:none;cursor:pointer}
  .world-card:hover{border-color:var(--ghost)}
@@ -382,12 +387,10 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
    border-radius:5px;padding:4px 10px;font:600 11px 'IBM Plex Mono',monospace;cursor:pointer}
  .copyCodeBtn:hover{background:var(--visited)}
  .copyCodeBtn.copied{background:var(--ghost);color:var(--bg)}
- /* Middle panel's own tab group (Live world stream / Play here) — deliberately NOT the same
-    .tabbar/.tabBtn/.tabBody classes as the bottom Browse/How-this-works group: that group's
-    showTab() queries ALL .tabBtn/.tabBody elements on the page and forcibly toggles 'active'
-    off anything whose data-tab doesn't match, which would silently kill this panel's own tab
-    state every time someone clicks Browse or How-it-works. Same visual language, independent
-    wiring (see showMidTab() below). */
+ /* Middle panel's own tab group (Live world stream / Play here) — its own .midTabbar/.midTabBtn/
+    .midTabBody classes and its own showMidTab() wiring below, independent of any other tab-like
+    control on the page (the bottom panel used to have its own generic .tabBtn/.tabBody group
+    too, but that's gone now that it only has one section left — see #worldsBrowsePanel). */
  .midTabbar{display:flex;gap:2px;border-bottom:1px solid var(--border);margin-bottom:10px}
  .midTabBtn{background:none;border:none;color:var(--muted);font-size:11px;text-transform:uppercase;
    letter-spacing:1.5px;padding:0 10px 8px;cursor:pointer;border-bottom:2px solid transparent;
@@ -506,6 +509,80 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
  <a id=evalsLink href="/evals" target=_blank rel=noopener title="Click to compare model performance (tool-calling reliability + room-gen coherence)">🧪 Evals</a>
  <button id=shareBtn title="Copies instructions to paste into your agent (Claude Code/Desktop) running dndmcp">🔗 Share</button></header>
 <div id=tagline>A world that doesn't exist until you step into it — Flash generates every room, item, NPC, and image in real time as you explore.</div>
+<!-- Concept strip (e0b.13) — always-visible pitch for the graph-based agent-context substrate
+     under this demo, so a cold visitor/judge sees it in the first screenful instead of it
+     being buried behind a non-default "❔ How this works" tab at the bottom of the page (that
+     tab + its #tab-howworks body are gone now — this replaces it, not a duplicate of it). Each
+     chip is a native <details>/<summary> — zero JS needed, and the text below is the SAME
+     prose that used to live in that tab, just chunked under subhead labels and moved up here;
+     nothing was rewritten. -->
+<div id=conceptStrip>
+ <div class=sub>Under the hood, this isn't a D&amp;D-specific engine — click a card for how it actually works.</div>
+ <div id=conceptChips>
+  <details class=chip>
+   <summary>🕸 The substrate</summary>
+   <div class=body>
+    <p>Under the hood this isn't a D&amp;D-specific engine — it's a generic graph: every room,
+    item, and NPC is a <b>node</b>, connections between them (an exit, ownership, a relationship)
+    are typed <b>edges</b>, and everything that happens is an append-only <b>event log</b>. We
+    call that substrate the <b>Graph Context Engine</b> — the D&amp;D adventure you're watching
+    is one skin on it — the same server also runs a Linear-style task graph (nodes = tickets,
+    edges = links, same event log) with zero changes to the underlying mechanics.</p>
+    <p>That pattern isn't limited to games or tickets — it's the same substrate any long-running
+    <b>agent workflow</b> needs: nodes for subtasks or artifacts, edges for dependencies between
+    them, the event log for what's already been tried or decided. It's what lets an agent (or a
+    human) step away mid-task and pick up real context hours or days later instead of restarting
+    from a blank prompt — the same way this world remembers a player's choices between sessions.</p>
+   </div>
+  </details>
+  <details class=chip>
+   <summary>🔌 How you connect (MCP)</summary>
+   <div class=body>
+    <p>You're reaching all of this through <b>MCP</b> (Model Context Protocol) — the same open
+    standard your own agent uses for every tool call. The server exposes mechanics as typed
+    tools that return facts, never prose: a dice roll, an HP total, what's actually in a room.
+    The agent narrates from those facts; it never touches state directly, so nothing you read
+    was invented to sound good — it's downstream of something real. Even the Dungeon Master
+    persona ships through MCP's own <b>instructions</b> field: connecting doesn't just grant
+    tools, it assigns your agent a role for the session. And because MCP tools don't care which
+    transport carries them, this exact server runs solo over stdio and shared over HTTP on this
+    live pod with zero duplicated logic — a private local game and the world you're watching
+    right now are the same code path.</p>
+    <p>That MCP-native shape carries into how this gets built, too: it's a long-running process,
+    not re-read per call, so a code change means reconnecting the session, not restarting a
+    server — and whoever's developing it plays through the same tool calls you do, no separate
+    admin path. Even the pod this world runs on got provisioned that way: an agent using
+    MCP-exposed infrastructure tooling to look up the right API shapes and deploy it, rather than
+    a web console. The tooling you're using to read this is also, one layer down, how the thing
+    you're reading about got made.</p>
+   </div>
+  </details>
+  <details class=chip>
+   <summary>🧭 How generation stays coherent</summary>
+   <div class=body>
+    <p>When new content is needed — the next room, an NPC's response, the next step of a task —
+    the LLM is never generating in isolation. It's fed the <b>surrounding graph context</b>:
+    nearby already-generated nodes a couple hops out, and recent events near this spot, so
+    whatever it invents stays consistent with what's already real instead of contradicting it.
+    That's the "world stream" below and the map itself: both are live views of that same graph.
+    It's a <a href="https://en.wikipedia.org/wiki/Stigmergy" target="_blank" rel="noopener"><b>stigmergic</b></a>
+    system in the literal sense — coordination through traces left in the shared graph, not
+    direct messages between whoever's generating content — the same mechanism ants use to
+    build a colony without a blueprint or a foreman.</p>
+   </div>
+  </details>
+  <details class=chip>
+   <summary>👻 Ghosts, not chat</summary>
+   <div class=body>
+    <p>That's also the literal model for other players in this world: you never see or talk to
+    them directly — they're <b>ghosts</b>, visible only as a dot moving across this same map in
+    real time. The only way you affect each other is through the graph itself: drop something in
+    a room and it's really there — the next ghost to pass through can pick it up, same as any
+    other trace.</p>
+   </div>
+  </details>
+ </div>
+</div>
 <!-- Onboarding wizard (e0b.12) — a modal stepper that owns ALL onboarding now: replaces the
      old always-open connect <details> panel (content absorbed into step 2B below) AND the
      inline choice card that used to sit above the chat input (see midTab-chat, which no
@@ -696,65 +773,23 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
 <!-- Moved below the map on purpose: this used to sit above it, pushing the map (the actual
      game) below a scroll on a cold homepage visit. This info is worth having, just not
      worth blocking the primary content for. -->
-<details class=panel style="margin:16px 18px 16px">
+<details open class=panel style="margin:16px 18px 16px">
  <summary>This world</summary>
  <div class=ch id=worldInfo style="margin-top:10px">—</div>
  <div class=ch id=questList style="margin-top:10px">—</div>
 </details>
-<div class=panel style="margin:0 18px 16px">
- <div class=tabbar>
-  <button class=tabBtn data-tab=browse>🌍 Browse other worlds</button>
-  <button class=tabBtn data-tab=howworks>❔ How this works</button>
- </div>
- <div class="tabBody body" id=tab-browse>
+<!-- Used to be a two-tab panel (Browse other worlds / How this works). The "How this works"
+     content now lives in the always-visible #conceptStrip up top (not duplicated here), which
+     leaves this panel with exactly one section — so the tab chrome (.tabbar/.tabBtn) that
+     used to switch between them is gone too; there's nothing left to switch between.
+     #worldsList/#worldSearch below are untouched. -->
+<div class=panel id=worldsBrowsePanel style="margin:0 18px 16px">
+ <h2>🌍 Browse other worlds</h2>
+ <div class=body>
   <input id=worldSearch placeholder="Search by theme or premise..."
     style="width:100%;box-sizing:border-box;background:var(--bg);border:1px solid var(--border);
     border-radius:6px;padding:7px 10px;color:var(--text);font:12.5px 'IBM Plex Mono',monospace;margin-bottom:10px">
   <div id=worldsList><div class=empty>Loading worlds…</div></div>
- </div>
- <div class="tabBody body" id=tab-howworks>
-  <p>Under the hood this isn't a D&amp;D-specific engine — it's a generic graph: every room,
-  item, and NPC is a <b>node</b>, connections between them (an exit, ownership, a relationship)
-  are typed <b>edges</b>, and everything that happens is an append-only <b>event log</b>. We
-  call that substrate the <b>Graph Context Engine</b> — the D&amp;D adventure you're watching
-  is one skin on it — the same server also runs a Linear-style task graph (nodes = tickets,
-  edges = links, same event log) with zero changes to the underlying mechanics.</p>
-  <p>That pattern isn't limited to games or tickets — it's the same substrate any long-running
-  <b>agent workflow</b> needs: nodes for subtasks or artifacts, edges for dependencies between
-  them, the event log for what's already been tried or decided. It's what lets an agent (or a
-  human) step away mid-task and pick up real context hours or days later instead of restarting
-  from a blank prompt — the same way this world remembers a player's choices between sessions.</p>
-  <p>You're reaching all of this through <b>MCP</b> (Model Context Protocol) — the same open
-  standard your own agent uses for every tool call. The server exposes mechanics as typed
-  tools that return facts, never prose: a dice roll, an HP total, what's actually in a room.
-  The agent narrates from those facts; it never touches state directly, so nothing you read
-  was invented to sound good — it's downstream of something real. Even the Dungeon Master
-  persona ships through MCP's own <b>instructions</b> field: connecting doesn't just grant
-  tools, it assigns your agent a role for the session. And because MCP tools don't care which
-  transport carries them, this exact server runs solo over stdio and shared over HTTP on this
-  live pod with zero duplicated logic — a private local game and the world you're watching
-  right now are the same code path.</p>
-  <p>That MCP-native shape carries into how this gets built, too: it's a long-running process,
-  not re-read per call, so a code change means reconnecting the session, not restarting a
-  server — and whoever's developing it plays through the same tool calls you do, no separate
-  admin path. Even the pod this world runs on got provisioned that way: an agent using
-  MCP-exposed infrastructure tooling to look up the right API shapes and deploy it, rather than
-  a web console. The tooling you're using to read this is also, one layer down, how the thing
-  you're reading about got made.</p>
-  <p>When new content is needed — the next room, an NPC's response, the next step of a task —
-  the LLM is never generating in isolation. It's fed the <b>surrounding graph context</b>:
-  nearby already-generated nodes a couple hops out, and recent events near this spot, so
-  whatever it invents stays consistent with what's already real instead of contradicting it.
-  That's the "world stream" below and the map itself: both are live views of that same graph.
-  It's a <a href="https://en.wikipedia.org/wiki/Stigmergy" target="_blank" rel="noopener"><b>stigmergic</b></a>
-  system in the literal sense — coordination through traces left in the shared graph, not
-  direct messages between whoever's generating content — the same mechanism ants use to
-  build a colony without a blueprint or a foreman.</p>
-  <p>That's also the literal model for other players in this world: you never see or talk to
-  them directly — they're <b>ghosts</b>, visible only as a dot moving across this same map in
-  real time. The only way you affect each other is through the graph itself: drop something in
-  a room and it's really there — the next ghost to pass through can pick it up, same as any
-  other trace.</p>
  </div>
 </div>
 <script src="https://d3js.org/d3.v7.min.js"></script>
@@ -938,28 +973,20 @@ if (playerId) {
   document.getElementById('exportStoryBtn').style.display = 'block';
 }
 
-// Connect / Browse / How-it-works tab group — mutually exclusive modes, not simultaneous
-// panels (see the CSS comment above .tabbar). Clicking a tab is always available regardless
-// of default state.
-function showTab(name){
-  document.querySelectorAll('.tabBtn').forEach(b => b.classList.toggle('active', b.dataset.tab === name));
-  document.querySelectorAll('.tabBody').forEach(el => el.classList.toggle('active', el.id === 'tab-' + name));
-}
-document.querySelectorAll('.tabBtn').forEach(b => b.addEventListener('click', () => showTab(b.dataset.tab)));
-
 // Fix 7: the empty-map state's two actions -- Play opens the same onboarding wizard #playBtn
-// does; Browse jumps to the existing bottom Browse tab (real content already exists there,
+// does; Browse jumps to the existing bottom Browse panel (real content already exists there,
 // this just surfaces it from the dead-end empty state instead of leaving "start one in your
-// agent" as the only, agent-only, path in).
+// agent" as the only, agent-only, path in). Used to also flip a tab ('browse' vs 'how this
+// works') via showTab() -- that tab group is gone (see #worldsBrowsePanel's own comment), so
+// this is just a scroll now.
 document.getElementById('mapEmptyPlayBtn').addEventListener('click', () => openWizard('wizStep1'));
 document.getElementById('mapEmptyBrowseBtn').addEventListener('click', () => {
-  showTab('browse');
-  document.querySelector('.tabBtn[data-tab=browse]').scrollIntoView({behavior: 'smooth', block: 'center'});
+  document.getElementById('worldsBrowsePanel').scrollIntoView({behavior: 'smooth', block: 'center'});
 });
 
-// Middle panel's OWN tab group (Live world stream / Play here) — deliberately separate
-// function/classes from showTab() above (see the .midTabBtn CSS comment for why reusing
-// .tabBtn/.tabBody would silently break this one every time the bottom tab group is clicked).
+// Middle panel's OWN tab group (Live world stream / Play here) — its own function/classes
+// (.midTabBtn/.midTabBody), independent of the .tabBtn/.tabBody names used elsewhere on the
+// page (see the .midTabBtn CSS comment).
 function showMidTab(name){
   document.querySelectorAll('.midTabBtn').forEach(b => b.classList.toggle('active', b.dataset.miditab === name));
   document.querySelectorAll('.midTabBody').forEach(el => el.classList.toggle('active', el.id === 'midTab-' + name));
