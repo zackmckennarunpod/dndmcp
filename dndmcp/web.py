@@ -221,12 +221,18 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>DNDMCP — map</
  #conceptChips{display:flex;flex-wrap:wrap;gap:8px}
  .chip{background:var(--panel);border:1px solid var(--border);border-radius:8px;flex:0 0 auto}
  .chip[open]{flex-basis:100%}
+ /* No chevron marker on purpose (fix e0b.14) -- a ▸/▾ triangle is the universal dropdown/menu
+    affordance, but clicking this opens an expanding paragraph, not a menu of options -- right
+    next to the stream panel's REAL <select> dropdown, which uses the same chevron cue for an
+    actually-different interaction. The "+"/"−" below reads as "expand this text," which is
+    what actually happens, and doesn't visually double up with the emoji already carrying the
+    "this is a distinct topic" signal. */
  .chip summary{cursor:pointer;list-style:none;padding:7px 12px;font-size:11.5px;font-weight:600;
    color:var(--ghost-bright);display:flex;align-items:center;gap:6px;white-space:nowrap}
  .chip[open] summary{white-space:normal;border-bottom:1px solid var(--border)}
  .chip summary::-webkit-details-marker{display:none}
- .chip summary::before{content:'▸';color:var(--muted);transition:transform .15s}
- .chip[open] summary::before{content:'▾'}
+ .chip summary::after{content:'+';color:var(--muted);margin-left:auto;padding-left:8px;font-weight:400}
+ .chip[open] summary::after{content:'−'}
  .chip .body{padding:0 12px 12px;margin-top:0}
  /* 3 columns: map (flexible width) | live stream (own space, not buried below the fold) | the
     existing character/room/recent sidebar. align-items:start is load-bearing: CSS grid's
