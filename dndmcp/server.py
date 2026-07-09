@@ -551,7 +551,7 @@ def _spawn_phrase(name: str, kind: str) -> str:
 async def _maybe_spawn_entity_persona(new_room: dict, dest_id: str, theme: str,
                                       nearby_room_ids: list[str], *, campaign_id: str,
                                       premise: str = "",
-                                      nearby: list[tuple[str, str]] | None = None,
+                                      nearby: list[dict] | None = None,
                                       recent_events: list[str] | None = None,
                                       deadline_s: float | None = None) -> None:
     """If this room's procedural gen placed a monster, decide (deterministically, from what's

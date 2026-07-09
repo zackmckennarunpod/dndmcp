@@ -767,7 +767,7 @@ _NPC_PERSONA_JSON = ('{"name": an individual proper name or title fitting this c
 
 
 def _npc_persona_messages(mon: dict, theme: str, room_name: str, room_kind: str,
-                          atmosphere: str, nearby: list[tuple[str, str]] | None = None,
+                          atmosphere: str, nearby: list[dict] | None = None,
                           recent_events: list[str] | None = None,
                           existing_names: list[str] | None = None,
                           premise: str = "", *, is_main: bool) -> list[dict]:
@@ -784,7 +784,8 @@ def _npc_persona_messages(mon: dict, theme: str, room_name: str, room_kind: str,
     context = (f"A {mon['name']} (traits: {traits}) is found in {room_name} ({room_kind}): "
               f"{atmosphere}")
     if nearby:
-        listed = ", ".join(f"{name} ({kind})" if kind else name for name, kind in nearby)
+        listed = ", ".join(f"{r['name']} ({r['kind']})" if r.get("kind") else r["name"]
+                           for r in nearby)
         context += f" Nearby, already-explored areas: {listed}."
     if recent_events:
         context += f" Recently: {'; '.join(recent_events)}."
@@ -799,7 +800,7 @@ def _npc_persona_messages(mon: dict, theme: str, room_name: str, room_kind: str,
 
 
 async def generate_npc_persona(mon: dict, theme: str, room_name: str, room_kind: str,
-                               atmosphere: str, nearby: list[tuple[str, str]] | None = None,
+                               atmosphere: str, nearby: list[dict] | None = None,
                                recent_events: list[str] | None = None,
                                existing_names: list[str] | None = None,
                                deadline_s: float | None = None,
