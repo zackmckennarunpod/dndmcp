@@ -19,6 +19,7 @@ import re
 import subprocess
 import sqlite3
 import time
+from http.cookies import SimpleCookie
 from pathlib import Path
 from urllib.parse import quote
 
@@ -27,10 +28,49 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingRes
 from sse_starlette.sse import EventSourceResponse
 
 from . import admin_flags, bot_player, chat_sessions, dm_loop, evals, flash_art, flash_llm, pairing, server, worldgen
-from .state import MAIN_CAMPAIGN_ID
+from .state import MAIN_CAMPAIGN_ID, request_context
 
 app = FastAPI(title="DNDMCP map")
 logger = logging.getLogger(__name__)
+
+
+class _WebRequestContextMiddleware:
+    """Pure ASGI middleware — the web-GUI counterpart to server.py's
+    _RequestContextMiddleware, which only ever wrapped the MCP transport. Without this, every
+    /metrics unique_ips/unique_players count was silently MCP-traffic-only: real browser
+    visitors (the common case — a human clicking the map link) never populated log.ip/
+    log.session_id at all, since web.py's FastAPI app had no middleware setting
+    request_context() for its own requests. `session_id` here is the SAME durable HttpOnly
+    cookie (chat_sessions.COOKIE_NAME) web.py already sets/reads for character-resume — this
+    just also threads it into world.log()'s provenance columns via the identical
+    request_context() contextvar server.py's middleware uses, so /metrics finally reflects
+    real browser visitors too. Deliberately NOT Starlette's BaseHTTPMiddleware (same reasoning
+    as server.py's own middleware) — it buffers the response body, which would break this
+    app's own streamed responses (POST /chat's StreamingResponse, GET /events'
+    EventSourceResponse)."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope.get("headers", [])}
+        xff = headers.get("x-forwarded-for", "")
+        client = scope.get("client")
+        ip = xff.split(",")[0].strip() if xff else (client[0] if client else None)
+        session_id = None
+        if cookie_header := headers.get("cookie"):
+            cookies = SimpleCookie()
+            cookies.load(cookie_header)
+            if morsel := cookies.get(chat_sessions.COOKIE_NAME):
+                session_id = morsel.value
+        with request_context(ip, session_id):
+            await self.app(scope, receive, send)
+
+
+app.add_middleware(_WebRequestContextMiddleware)
 
 # asyncio only holds a WEAK reference to a task created via asyncio.create_task -- without
 # something else keeping a strong reference, the task can be garbage-collected mid-run
