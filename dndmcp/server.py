@@ -1226,9 +1226,12 @@ async def talk_to(player_id: str, message: str, npc_name: str | None = None) -> 
     camp = _require_campaign(ch.campaign_id)
     # Computed once, shared by persona-gen (if needed below) AND the dialogue call — an NPC
     # should be at least as regionally/event-aware as the room it's standing in, which
-    # already gets this same context (see _generate_and_link).
+    # already gets this same context (see _generate_and_link). _graph_context (not a bare
+    # (name, kind) tuple list) — _npc_persona_messages expects the same list[dict] shape
+    # _room_messages does (confirmed live: a stale tuple list here crashes with
+    # AttributeError: 'tuple' object has no attribute 'get' the moment nearby is non-empty).
     nearby_full = _nearby_region(room.id, depth=2)
-    nearby = [(name, kind) for name, kind, _rid in nearby_full]
+    nearby = _graph_context(nearby_full)
     recent_events = [_anonymized(e) for e in world.recent_log(
         5, campaign_id=ch.campaign_id, subject_type="room", subject_id=room.id)]
     ent = world.entity(npc["id"])
