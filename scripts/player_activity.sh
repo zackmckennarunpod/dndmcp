@@ -8,6 +8,12 @@
 #   scripts/player_activity.sh                # every world
 #   scripts/player_activity.sh <campaign_id>   # one world only (e.g. the shared "main" id,
 #                                               # or a shareable world id from start_adventure)
+#
+# The Python below is shipped base64-encoded rather than as a quoted inline string — pod_ssh.sh
+# run's command passes through two shell layers (local -> ssh -> remote), and this script's
+# source has plenty of its own single quotes (dict keys, the em-dash placeholder); any of the
+# usual quoting tricks breaks on one of those layers. Base64 has no shell-special characters at
+# all, so it survives both layers unchanged regardless of what's inside the actual script.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -41,7 +47,7 @@ for row in c.execute("SELECT player_id, kind, COUNT(*) AS n FROM log "
                      "WHERE player_id IS NOT NULL GROUP BY player_id, kind"):
     kinds.setdefault(row["player_id"], []).append((row["kind"], row["n"]))
 
-def fmt_dur(seconds: float) -> str:
+def fmt_dur(seconds):
     seconds = int(seconds)
     if seconds < 60:
         return f"{seconds}s"
@@ -51,7 +57,7 @@ def fmt_dur(seconds: float) -> str:
     h, m = divmod(m, 60)
     return f"{h}h{m:02d}m"
 
-def fmt_ts(ts: float) -> str:
+def fmt_ts(ts):
     return time.strftime("%Y-%m-%d %H:%M", time.localtime(ts))
 
 print(f"{'player':<10} {'name':<20} {'world':<12} {'duration':<9} {'events':<7} {'last ip':<16} {'last seen'}")
@@ -59,12 +65,14 @@ print("-" * 100)
 for p in players:
     dur = fmt_dur(p["last_seen"] - p["first_seen"])
     top = sorted(kinds.get(p["player_id"], []), key=lambda kv: -kv[1])[:3]
-    top_str = ", ".join(f"{k}×{n}" for k, n in top)
-    bot = " 🤖" if p["is_bot"] else ""
+    top_str = ", ".join(f"{k}x{n}" for k, n in top)
+    bot = " [bot]" if p["is_bot"] else ""
     name = (p["name"] or "?") + bot
+    dash = chr(8212)
     print(f"{p['player_id'][:8]:<10} {name[:20]:<20} {p['campaign_id'][:12]:<12} "
-         f"{dur:<9} {p['events']:<7} {p['last_ip'] or '—':<16} {fmt_ts(p['last_seen'])}")
-    print(f"           actions: {top_str or '—'}")
+         f"{dur:<9} {p['events']:<7} {p['last_ip'] or dash:<16} {fmt_ts(p['last_seen'])}")
+    print(f"           actions: {top_str or dash}")
 EOF
 
-"$SCRIPT_DIR/pod_ssh.sh" run "python3.11 -c '$PYCODE' ${CAMPAIGN}"
+PYCODE_B64="$(printf '%s' "$PYCODE" | base64 | tr -d '\n')"
+"$SCRIPT_DIR/pod_ssh.sh" run "echo $PYCODE_B64 | base64 -d | python3.11 - ${CAMPAIGN}"
